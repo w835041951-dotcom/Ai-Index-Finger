@@ -1,6 +1,9 @@
 package com.aiindexfinger
 
 import android.Manifest
+import android.app.Activity
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -12,7 +15,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +31,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -41,32 +48,48 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aiindexfinger.automation.AutomationAccessibilityService
 import com.aiindexfinger.automation.LaunchableAppCatalog
 import com.aiindexfinger.automation.ObservedNode
 import com.aiindexfinger.automation.SelectorRecommendations
+import com.aiindexfinger.automation.ScreenCaptureState
+import com.aiindexfinger.automation.mapFitCenterTapToScreen
+import com.aiindexfinger.automation.recommendedSelector
+import com.aiindexfinger.automation.selectCaptureNode
+import com.aiindexfinger.automation.NotificationPreflightStatus
+import com.aiindexfinger.automation.PreflightRecoveryAction
+import com.aiindexfinger.automation.WorkflowPreflightReport
+import com.aiindexfinger.automation.buildWorkflowPreflightReport
+import com.aiindexfinger.automation.recoveryActions
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
 import com.aiindexfinger.data.RunStatus
+import com.aiindexfinger.data.filterRunRecords
 import com.aiindexfinger.data.WorkflowStore
 import com.aiindexfinger.data.WorkflowTransfer
 import com.aiindexfinger.data.normalizeImportedWorkflows
+import com.aiindexfinger.data.resolveRunHistoryDestination
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.ComparisonOperator
@@ -75,19 +98,47 @@ import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
+import com.aiindexfinger.model.StepBranch
+import com.aiindexfinger.model.StepListPath
+import com.aiindexfinger.model.StepPath
 import com.aiindexfinger.model.SystemAction
 import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowLimits
+import com.aiindexfinger.model.WorkflowState
+import com.aiindexfinger.model.WorkflowStarterTemplate
+import com.aiindexfinger.model.WorkflowStarterTemplates
 import com.aiindexfinger.model.WorkflowValidator
-import com.aiindexfinger.model.duplicateWithNewIds
+import com.aiindexfinger.model.duplicateStep
+import com.aiindexfinger.model.insertStep
 import com.aiindexfinger.model.matchesSearch
+import com.aiindexfinger.model.moveStep
+import com.aiindexfinger.model.removeStep
+import com.aiindexfinger.model.replaceStep
+import com.aiindexfinger.model.stepAt
+import com.aiindexfinger.model.stepsAt
 import com.aiindexfinger.model.withExecutionSettings
+import com.aiindexfinger.model.uniquePathTo
+import com.aiindexfinger.model.effectiveState
+import com.aiindexfinger.model.isReadyToRun
+import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.scheduler.ScheduleNotificationWorker
+import com.aiindexfinger.scheduler.ScheduledWorkflowEvent
+import com.aiindexfinger.scheduler.ScheduledWorkflowEventController
 import com.aiindexfinger.scheduler.WorkflowSchedule
 import com.aiindexfinger.scheduler.WorkflowScheduler
+import com.aiindexfinger.scheduler.localScheduleEpochMillis
+import com.aiindexfinger.scheduler.scheduleDelayMillis
+import com.aiindexfinger.scheduler.removeTriggeredSchedule
 import java.text.DateFormat
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.Date
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -100,27 +151,42 @@ class MainActivity : ComponentActivity() {
     private val workflowStore by lazy { WorkflowStore(this) }
     private val runHistoryStore by lazy { RunHistoryStore(this) }
     private val workflowScheduler by lazy { WorkflowScheduler(this) }
-    private val scheduledWorkflowId = MutableStateFlow<String?>(null)
+    private val releasePreferences by lazy {
+        getSharedPreferences(RELEASE_PREFERENCES_NAME, MODE_PRIVATE)
+    }
+    private val scheduledWorkflowEvents = ScheduledWorkflowEventController()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val initialWorkflows = workflowStore.load()
         val initialRunRecords = runHistoryStore.load()
-        val initialSchedules = workflowScheduler.load(initialWorkflows.map { it.id }.toSet())
-        scheduledWorkflowId.value = intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID)
+        val initialSchedules = workflowScheduler.load(
+            initialWorkflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
+        )
+        scheduledWorkflowEvents.publish(intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID))
         setContent {
             AiIndexFingerTheme {
-            val scheduledWorkflow by scheduledWorkflowId.collectAsStateWithLifecycle()
+            val scheduledWorkflowEvent by scheduledWorkflowEvents.event.collectAsStateWithLifecycle()
                 WorkflowApp(
                     initialWorkflows = initialWorkflows,
                     initialRunRecords = initialRunRecords,
                     initialSchedules = initialSchedules,
-                    scheduledWorkflowId = scheduledWorkflow,
+                    scheduledWorkflowEvent = scheduledWorkflowEvent,
+                    onScheduledWorkflowEventConsumed = scheduledWorkflowEvents::consume,
                     onSave = workflowStore::save,
                     onClearRunHistory = runHistoryStore::clear,
                     onSchedule = workflowScheduler::schedule,
                     onCancelSchedule = workflowScheduler::cancel,
                     onOpenAccessibilitySettings = ::openAccessibilitySettings,
+                    accessibilityDisclosureAcknowledged = releasePreferences.getBoolean(
+                        ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED,
+                        false,
+                    ),
+                    onAccessibilityDisclosureAcknowledged = {
+                        releasePreferences.edit()
+                            .putBoolean(ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED, true)
+                            .apply()
+                    },
                 )
             }
         }
@@ -129,11 +195,16 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        scheduledWorkflowId.value = intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID)
+        scheduledWorkflowEvents.publish(intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID))
     }
 
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    private companion object {
+        const val RELEASE_PREFERENCES_NAME = "release_readiness"
+        const val ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED = "accessibility_disclosure_acknowledged"
     }
 }
 
@@ -142,18 +213,24 @@ private fun WorkflowApp(
     initialWorkflows: List<Workflow>,
     initialRunRecords: List<RunRecord>,
     initialSchedules: List<WorkflowSchedule>,
-    scheduledWorkflowId: String?,
+    scheduledWorkflowEvent: ScheduledWorkflowEvent?,
+    onScheduledWorkflowEventConsumed: (Long) -> Unit,
     onSave: (List<Workflow>) -> Unit,
     onClearRunHistory: () -> Unit,
-    onSchedule: (String, String, Long) -> List<WorkflowSchedule>,
+    onSchedule: (Workflow, Long) -> List<WorkflowSchedule>,
     onCancelSchedule: (String) -> List<WorkflowSchedule>,
     onOpenAccessibilitySettings: () -> Unit,
+    accessibilityDisclosureAcknowledged: Boolean,
+    onAccessibilityDisclosureAcknowledged: () -> Unit,
 ) {
     var workflows by remember { mutableStateOf(initialWorkflows) }
     var runRecords by remember { mutableStateOf(initialRunRecords) }
     var schedules by remember { mutableStateOf(initialSchedules) }
     var editingWorkflow by remember { mutableStateOf<Workflow?>(null) }
+    var initialEditingStepPath by remember { mutableStateOf<StepPath?>(null) }
+    var showRunHistory by remember { mutableStateOf(false) }
     var runMessage by remember { mutableStateOf<String?>(null) }
+    var preflightReport by remember { mutableStateOf<Pair<Workflow, WorkflowPreflightReport>?>(null) }
     val runningWorkflowId by AutomationAccessibilityService.runningWorkflowId.collectAsStateWithLifecycle()
     val latestRun by AutomationAccessibilityService.latestRun.collectAsStateWithLifecycle()
     var pendingExport by remember { mutableStateOf<Workflow?>(null) }
@@ -161,10 +238,32 @@ private fun WorkflowApp(
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val workflowTransfer = remember { WorkflowTransfer(context.contentResolver) }
-    LaunchedEffect(scheduledWorkflowId) {
-        scheduledWorkflowId?.let { id ->
+    DisposableEffect(editingWorkflow != null) {
+        val observationLease = if (editingWorkflow != null) {
+            AutomationAccessibilityService.acquireObservationLease()
+        } else {
+            null
+        }
+        onDispose { observationLease?.close() }
+    }
+    val accessibilityDisclosureGate = remember(accessibilityDisclosureAcknowledged) {
+        AccessibilityDisclosureGate(accessibilityDisclosureAcknowledged)
+    }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
+    val requestAccessibilitySetup = {
+        when (accessibilityDisclosureGate.requestSetup()) {
+            AccessibilityDisclosureAction.ShowDisclosure -> showAccessibilityDisclosure = true
+            AccessibilityDisclosureAction.OpenSettings -> onOpenAccessibilitySettings()
+            AccessibilityDisclosureAction.StayInApp -> Unit
+        }
+    }
+    LaunchedEffect(scheduledWorkflowEvent?.sequence) {
+        scheduledWorkflowEvent?.let { event ->
+            val id = event.workflowId
+            schedules = removeTriggeredSchedule(schedules, id)
             val workflowName = workflows.firstOrNull { it.id == id }?.name ?: "Scheduled workflow"
             runMessage = "$workflowName is ready. Tap Run to start it."
+            onScheduledWorkflowEventConsumed(event.sequence)
         }
     }
     LaunchedEffect(latestRun?.record?.id) {
@@ -186,6 +285,7 @@ private fun WorkflowApp(
         runMessage = when {
             !granted -> "Notification permission is required while a workflow is running"
             workflow == null -> runMessage
+            !workflow.isReadyToRun() -> "Cannot run: ${workflow.readinessIssues().first().message}"
             service == null -> "Enable the automation service before running a workflow"
             service.startWorkflow(workflow) -> "Running ${workflow.name}"
             else -> "Another workflow is already running"
@@ -196,11 +296,26 @@ private fun WorkflowApp(
     ) { granted ->
         val request = pendingSchedule
         pendingSchedule = null
-        if (granted && request != null) {
-            schedules = onSchedule(request.first.id, request.first.name, request.second)
-            runMessage = "Scheduled ${request.first.name}"
+        if (granted && request != null && request.first.isReadyToRun()) {
+            runCatching { onSchedule(request.first, request.second) }
+                .onSuccess {
+                    schedules = it
+                    runMessage = "Scheduled ${request.first.name}"
+                }
+                .onFailure { runMessage = it.message ?: "Could not schedule workflow" }
+        } else if (granted && request != null) {
+            runMessage = "Cannot schedule: ${request.first.readinessIssues().first().message}"
         } else if (!granted) {
             runMessage = "Notification permission is required for schedule reminders"
+        }
+    }
+    val preflightNotificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        runMessage = if (granted) {
+            "Notification permission granted. Check the workflow again for a fresh report."
+        } else {
+            "Notification permission was not granted"
         }
     }
     val exportLauncher = rememberLauncherForActivityResult(
@@ -255,19 +370,52 @@ private fun WorkflowApp(
         }
     }
 
-    if (editingWorkflow == null) {
+    if (editingWorkflow != null) {
+        WorkflowEditor(
+            workflow = requireNotNull(editingWorkflow),
+            initialEditingStepPath = initialEditingStepPath,
+            onBack = {
+                editingWorkflow = null
+                initialEditingStepPath = null
+            },
+            onSave = { workflow ->
+                if (!workflow.isReadyToRun()) {
+                    schedules = onCancelSchedule(workflow.id)
+                }
+                val updated = workflows.filterNot { it.id == workflow.id } + workflow
+                onSave(updated)
+                workflows = updated
+                editingWorkflow = null
+                initialEditingStepPath = null
+            },
+        )
+    } else if (showRunHistory) {
+        RunHistoryScreen(
+            records = runRecords,
+            workflows = workflows,
+            onBack = { showRunHistory = false },
+            onOpenWorkflow = { workflow, stepPath ->
+                initialEditingStepPath = stepPath
+                editingWorkflow = workflow
+            },
+            onClear = {
+                onClearRunHistory()
+                runRecords = emptyList()
+            },
+        )
+    } else {
         WorkflowHome(
             workflows = workflows,
             runRecords = runRecords,
             schedules = schedules,
-            onCreate = {
-                editingWorkflow = Workflow(
-                    id = UUID.randomUUID().toString(),
-                    name = "Untitled workflow",
-                    steps = emptyList(),
-                )
+            onCreate = { workflow ->
+                initialEditingStepPath = null
+                editingWorkflow = workflow
             },
-            onEdit = { editingWorkflow = it },
+            onEdit = {
+                initialEditingStepPath = null
+                editingWorkflow = it
+            },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
             onExportAll = {
                 pendingBundleExport = workflows.toList()
@@ -292,16 +440,22 @@ private fun WorkflowApp(
                 onSave(updated)
                 workflows = updated
             },
-            onSchedule = { workflow, delayMinutes ->
-                if (Build.VERSION.SDK_INT >= 33 &&
+            onSchedule = { workflow, targetEpochMillis ->
+                if (!workflow.isReadyToRun()) {
+                    runMessage = "Cannot schedule: ${workflow.readinessIssues().first().message}"
+                } else if (Build.VERSION.SDK_INT >= 33 &&
                     context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                     PackageManager.PERMISSION_GRANTED
                 ) {
-                    pendingSchedule = workflow to delayMinutes
+                    pendingSchedule = workflow to targetEpochMillis
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
-                    schedules = onSchedule(workflow.id, workflow.name, delayMinutes)
-                    runMessage = "Scheduled ${workflow.name}"
+                    runCatching { onSchedule(workflow, targetEpochMillis) }
+                        .onSuccess {
+                            schedules = it
+                            runMessage = "Scheduled ${workflow.name}"
+                        }
+                        .onFailure { runMessage = it.message ?: "Could not schedule workflow" }
                 }
             },
             onCancelSchedule = { workflow ->
@@ -312,16 +466,17 @@ private fun WorkflowApp(
                 onClearRunHistory()
                 runRecords = emptyList()
             },
+            onViewRunHistory = { showRunHistory = true },
             runningWorkflowId = runningWorkflowId,
             runMessage = runMessage,
             onRun = { workflow ->
                 val service = AutomationAccessibilityService.instance
-                val issue = WorkflowValidator.validate(workflow).firstOrNull()
+                val issue = workflow.readinessIssues().firstOrNull()
                 if (issue != null) {
                     runMessage = "Cannot run: ${issue.message}"
                 } else if (service == null) {
                     runMessage = "Enable the automation service before running a workflow"
-                    onOpenAccessibilitySettings()
+                    requestAccessibilitySetup()
                 } else if (Build.VERSION.SDK_INT >= 33 &&
                     context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                     PackageManager.PERMISSION_GRANTED
@@ -337,18 +492,77 @@ private fun WorkflowApp(
                     }
                 }
             },
+            onPreflight = { workflow ->
+                val service = AutomationAccessibilityService.instance
+                val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
+                    NotificationPreflightStatus.NotRequired
+                } else if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    NotificationPreflightStatus.Granted
+                } else {
+                    NotificationPreflightStatus.Denied
+                }
+                preflightReport = workflow to buildWorkflowPreflightReport(
+                    workflow = workflow,
+                    accessibilityConnected = service != null,
+                    notificationStatus = notificationStatus,
+                    isLaunchable = { packageName ->
+                        context.packageManager.getLaunchIntentForPackage(packageName) != null
+                    },
+                    countMatches = { selector -> service?.countMatches(selector) ?: 0 },
+                )
+            },
             onStop = { AutomationAccessibilityService.instance?.stopWorkflow() },
-            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+            onOpenAccessibilitySettings = requestAccessibilitySetup,
+            onReviewAccessibilityDisclosure = {
+                if (accessibilityDisclosureGate.reviewDisclosure() ==
+                    AccessibilityDisclosureAction.ShowDisclosure
+                ) {
+                    showAccessibilityDisclosure = true
+                }
+            },
         )
-    } else {
-        WorkflowEditor(
-            workflow = requireNotNull(editingWorkflow),
-            onBack = { editingWorkflow = null },
-            onSave = { workflow ->
-                val updated = workflows.filterNot { it.id == workflow.id } + workflow
-                onSave(updated)
-                workflows = updated
-                editingWorkflow = null
+    }
+
+    if (showAccessibilityDisclosure) {
+        AccessibilityDisclosureDialog(
+            onDecline = {
+                accessibilityDisclosureGate.declineDisclosure()
+                showAccessibilityDisclosure = false
+            },
+            onAccept = {
+                val action = accessibilityDisclosureGate.acceptDisclosure()
+                onAccessibilityDisclosureAcknowledged()
+                showAccessibilityDisclosure = false
+                if (action == AccessibilityDisclosureAction.OpenSettings) {
+                    onOpenAccessibilitySettings()
+                }
+            },
+        )
+    }
+    preflightReport?.let { (workflow, report) ->
+        PreflightReportDialog(
+            workflow = workflow,
+            report = report,
+            onDismiss = { preflightReport = null },
+            onEditStep = { path ->
+                preflightReport = null
+                initialEditingStepPath = path
+                editingWorkflow = workflow
+            },
+            onRecoveryAction = { action ->
+                preflightReport = null
+                when (action) {
+                    PreflightRecoveryAction.SetUpAutomation -> requestAccessibilitySetup()
+                    PreflightRecoveryAction.GrantNotifications -> {
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            preflightNotificationPermissionLauncher.launch(
+                                Manifest.permission.POST_NOTIFICATIONS,
+                            )
+                        }
+                    }
+                }
             },
         )
     }
@@ -359,7 +573,7 @@ private fun WorkflowHome(
     workflows: List<Workflow>,
     runRecords: List<RunRecord>,
     schedules: List<WorkflowSchedule>,
-    onCreate: () -> Unit,
+    onCreate: (Workflow) -> Unit,
     onEdit: (Workflow) -> Unit,
     onImport: () -> Unit,
     onExportAll: () -> Unit,
@@ -369,11 +583,14 @@ private fun WorkflowHome(
     onSchedule: (Workflow, Long) -> Unit,
     onCancelSchedule: (Workflow) -> Unit,
     onClearRunHistory: () -> Unit,
+    onViewRunHistory: () -> Unit,
     runningWorkflowId: String?,
     runMessage: String?,
     onRun: (Workflow) -> Unit,
+    onPreflight: (Workflow) -> Unit,
     onStop: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onReviewAccessibilityDisclosure: () -> Unit,
 ) {
     val serviceConnected by AutomationAccessibilityService.connected.collectAsStateWithLifecycle()
     val currentStepId by AutomationAccessibilityService.currentStepId.collectAsStateWithLifecycle()
@@ -385,6 +602,15 @@ private fun WorkflowHome(
     var showNodeInspector by remember { mutableStateOf(false) }
     var workflowToSchedule by remember { mutableStateOf<Workflow?>(null) }
     var workflowQuery by remember { mutableStateOf("") }
+    var showCreateWorkflow by remember { mutableStateOf(false) }
+    DisposableEffect(showNodeInspector) {
+        val observationLease = if (showNodeInspector) {
+            AutomationAccessibilityService.acquireObservationLease()
+        } else {
+            null
+        }
+        onDispose { observationLease?.close() }
+    }
     val visibleWorkflows = remember(workflows, workflowQuery) {
         workflows.filter { it.matchesSearch(workflowQuery) }
     }
@@ -406,7 +632,7 @@ private fun WorkflowHome(
         bottomBar = {
             Surface(shadowElevation = 8.dp) {
                 Button(
-                    onClick = onCreate,
+                    onClick = { showCreateWorkflow = true },
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                 ) { Text("New workflow") }
             }
@@ -423,7 +649,11 @@ private fun WorkflowHome(
             Text("AI Index Finger", fontSize = 30.sp, fontWeight = FontWeight.Bold)
             Text("Workflows", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp)
             Spacer(Modifier.height(24.dp))
-            PermissionStatus(serviceConnected, onOpenAccessibilitySettings)
+            PermissionStatus(
+                connected = serviceConnected,
+                onOpenSettings = onOpenAccessibilitySettings,
+                onReviewDisclosure = onReviewAccessibilityDisclosure,
+            )
             if (runningWorkflowId != null) {
                 val currentWorkflow = workflows.firstOrNull { it.id == runningWorkflowId }
                 val currentStep = currentStepId?.let { currentWorkflow?.steps?.findById(it) }
@@ -496,6 +726,7 @@ private fun WorkflowHome(
                     onSchedule = { workflowToSchedule = workflow },
                     onCancelSchedule = { onCancelSchedule(workflow) },
                     onRun = { onRun(workflow) },
+                    onPreflight = { onPreflight(workflow) },
                     onStop = onStop,
                 )
                 HorizontalDivider()
@@ -504,6 +735,7 @@ private fun WorkflowHome(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("RUN HISTORY", modifier = Modifier.weight(1f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 if (runRecords.isNotEmpty()) {
+                    TextButton(onClick = onViewRunHistory) { Text("View all (${runRecords.size})") }
                     TextButton(onClick = { confirmClearHistory = true }) { Text("Clear") }
                 }
             }
@@ -542,6 +774,61 @@ private fun WorkflowHome(
             },
         )
     }
+    if (showCreateWorkflow) {
+        AlertDialog(
+            onDismissRequest = { showCreateWorkflow = false },
+            title = { Text("Create workflow") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            showCreateWorkflow = false
+                            onCreate(
+                                Workflow(
+                                    id = newId(),
+                                    name = "Untitled workflow",
+                                    steps = emptyList(),
+                                    state = WorkflowState.Draft,
+                                ),
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.fillMaxWidth()) {
+                            Text("Blank workflow", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Start with an empty draft.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    WorkflowStarterTemplate.entries.forEach { template ->
+                        OutlinedButton(
+                            onClick = {
+                                showCreateWorkflow = false
+                                onCreate(WorkflowStarterTemplates.create(template, ::newId))
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Text(template.title, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    template.description,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showCreateWorkflow = false }) { Text("Cancel") }
+            },
+        )
+    }
     if (confirmClearHistory) {
         AlertDialog(
             onDismissRequest = { confirmClearHistory = false },
@@ -570,8 +857,8 @@ private fun WorkflowHome(
         ScheduleDialog(
             workflowName = workflow.name,
             onDismiss = { workflowToSchedule = null },
-            onSchedule = { delayMinutes ->
-                onSchedule(workflow, delayMinutes)
+            onSchedule = { targetEpochMillis ->
+                onSchedule(workflow, targetEpochMillis)
                 workflowToSchedule = null
             },
         )
@@ -584,21 +871,66 @@ private fun ScheduleDialog(
     onDismiss: () -> Unit,
     onSchedule: (Long) -> Unit,
 ) {
-    var delayMinutes by remember { mutableStateOf("15") }
-    val delay = delayMinutes.toLongOrNull()
+    val context = LocalContext.current
+    val initialDateTime = remember { LocalDateTime.now().plusMinutes(15).withSecond(0).withNano(0) }
+    var selectedDate by remember { mutableStateOf(initialDateTime.toLocalDate()) }
+    var selectedTime by remember { mutableStateOf(initialDateTime.toLocalTime()) }
+    val targetResult = runCatching {
+        localScheduleEpochMillis(selectedDate, selectedTime, ZoneId.systemDefault()).also {
+            scheduleDelayMillis(it, System.currentTimeMillis())
+        }
+    }
+    val formatter = remember {
+        DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Schedule $workflowName") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("A notification will remind you to open the app and run this workflow.")
-                NodeField(delayMinutes, { delayMinutes = it }, "Delay in minutes", true)
+                Text(LocalDateTime.of(selectedDate, selectedTime).format(formatter))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            DatePickerDialog(
+                                context,
+                                { _, year, month, day -> selectedDate = LocalDate.of(year, month + 1, day) },
+                                selectedDate.year,
+                                selectedDate.monthValue - 1,
+                                selectedDate.dayOfMonth,
+                            ).apply {
+                                datePicker.minDate = System.currentTimeMillis()
+                                datePicker.maxDate = System.currentTimeMillis() + 365L * 24 * 60 * 60 * 1_000
+                            }.show()
+                        },
+                    ) { Text("Choose date") }
+                    OutlinedButton(
+                        onClick = {
+                            TimePickerDialog(
+                                context,
+                                { _, hour, minute -> selectedTime = LocalTime.of(hour, minute) },
+                                selectedTime.hour,
+                                selectedTime.minute,
+                                android.text.format.DateFormat.is24HourFormat(context),
+                            ).show()
+                        },
+                    ) { Text("Choose time") }
+                }
+                targetResult.exceptionOrNull()?.message?.let { message ->
+                    Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                }
+                Text(
+                    "Delivery is best effort and may be delayed by Android.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = delay != null && delay in 1..525_600,
-                onClick = { onSchedule(requireNotNull(delay)) },
+                enabled = targetResult.isSuccess,
+                onClick = { onSchedule(targetResult.getOrThrow()) },
             ) { Text("Schedule") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -673,12 +1005,20 @@ private fun NodeProperty(label: String, value: String?) {
 }
 
 @Composable
-private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Workflow) -> Unit) {
+private fun WorkflowEditor(
+    workflow: Workflow,
+    initialEditingStepPath: StepPath? = null,
+    onBack: () -> Unit,
+    onSave: (Workflow) -> Unit,
+) {
     var name by remember(workflow.id) { mutableStateOf(workflow.name) }
     var defaultTimeoutText by remember(workflow.id) {
         mutableStateOf(workflow.defaultStepTimeoutMillis.toString())
     }
-    val steps = remember(workflow.id) { mutableStateListOf<Step>().apply { addAll(workflow.steps) } }
+    var steps by remember(workflow.id) { mutableStateOf(workflow.steps) }
+    var currentListPath by remember(workflow.id) {
+        mutableStateOf(initialEditingStepPath?.parent ?: StepListPath())
+    }
     var showClickDialog by remember { mutableStateOf(false) }
     var showLongClickDialog by remember { mutableStateOf(false) }
     var showLaunchDialog by remember { mutableStateOf(false) }
@@ -693,17 +1033,19 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
     var showRepeatDialog by remember { mutableStateOf(false) }
     var showConditionDialog by remember { mutableStateOf(false) }
     var showNodeConditionDialog by remember { mutableStateOf(false) }
-    var policyStepIndex by remember { mutableStateOf<Int?>(null) }
-    var editingStepIndex by remember { mutableStateOf<Int?>(null) }
-    var stepToDeleteIndex by remember { mutableStateOf<Int?>(null) }
+    var policyStepPath by remember { mutableStateOf<StepPath?>(null) }
+    var editingStepPath by remember(workflow.id) { mutableStateOf(initialEditingStepPath) }
+    var stepToDeletePath by remember { mutableStateOf<StepPath?>(null) }
     var confirmDiscardChanges by remember { mutableStateOf(false) }
+    var showAllValidationIssues by remember(workflow.id) { mutableStateOf(false) }
     val observedNodes by AutomationAccessibilityService.observedNodes.collectAsStateWithLifecycle()
     val defaultTimeoutMillis = defaultTimeoutText.toLongOrNull()
+    val currentSteps = steps.stepsAt(currentListPath)
     val validationIssues = if (name.isNotBlank() && defaultTimeoutMillis != null && defaultTimeoutMillis > 0) {
         WorkflowValidator.validate(
             workflow.copy(
                 name = name.trim(),
-                steps = steps.toList(),
+                steps = steps,
                 defaultStepTimeoutMillis = defaultTimeoutMillis,
             ),
         )
@@ -712,9 +1054,15 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
     }
     val hasUnsavedChanges = name != workflow.name ||
         defaultTimeoutMillis != workflow.defaultStepTimeoutMillis ||
-        steps.toList() != workflow.steps
+        steps != workflow.steps
     val requestBack = {
-        if (hasUnsavedChanges) confirmDiscardChanges = true else onBack()
+        if (currentListPath.segments.isNotEmpty()) {
+            currentListPath = StepListPath(currentListPath.segments.dropLast(1))
+        } else if (hasUnsavedChanges) {
+            confirmDiscardChanges = true
+        } else {
+            onBack()
+        }
     }
 
     BackHandler(onBack = requestBack)
@@ -722,20 +1070,43 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             Surface(shadowElevation = 8.dp) {
-                Button(
-                    enabled = name.isNotBlank() && defaultTimeoutMillis != null && defaultTimeoutMillis > 0,
-                    onClick = {
-                        onSave(
-                            workflow.copy(
-                                schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
-                                name = name.trim(),
-                                steps = steps.toList(),
-                                defaultStepTimeoutMillis = requireNotNull(defaultTimeoutMillis),
-                            ),
-                        )
-                    },
+                Row(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
-                ) { Text("Save workflow") }
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    val canSave = name.isNotBlank() &&
+                        defaultTimeoutMillis != null && defaultTimeoutMillis > 0
+                    OutlinedButton(
+                        enabled = canSave,
+                        onClick = {
+                            onSave(
+                                workflow.copy(
+                                    schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
+                                    name = name.trim(),
+                                    steps = steps,
+                                    defaultStepTimeoutMillis = requireNotNull(defaultTimeoutMillis),
+                                    state = WorkflowState.Draft,
+                                ),
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Save draft") }
+                    Button(
+                        enabled = canSave && validationIssues.isEmpty(),
+                        onClick = {
+                            onSave(
+                                workflow.copy(
+                                    schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
+                                    name = name.trim(),
+                                    steps = steps,
+                                    defaultStepTimeoutMillis = requireNotNull(defaultTimeoutMillis),
+                                    state = WorkflowState.Ready,
+                                ),
+                            )
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Save ready") }
+                }
             }
         },
     ) { contentPadding ->
@@ -774,42 +1145,80 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                     color = MaterialTheme.colorScheme.error,
                     fontWeight = FontWeight.SemiBold,
                 )
-                validationIssues.take(3).forEach { issue ->
-                    Text(
-                        issue.message,
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 13.sp,
-                    )
+                val visibleIssues = if (showAllValidationIssues) validationIssues else validationIssues.take(3)
+                visibleIssues.forEach { issue ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            issue.message,
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 13.sp,
+                        )
+                        issue.stepId?.let(steps::uniquePathTo)?.let { path ->
+                            TextButton(
+                                onClick = {
+                                    currentListPath = path.parent
+                                    editingStepPath = path
+                                },
+                            ) { Text("Edit step") }
+                        }
+                    }
                 }
                 if (validationIssues.size > 3) {
-                    Text(
-                        "+${validationIssues.size - 3} more",
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 13.sp,
-                    )
+                    TextButton(onClick = { showAllValidationIssues = !showAllValidationIssues }) {
+                        Text(
+                            if (showAllValidationIssues) "Show fewer" else "+${validationIssues.size - 3} more",
+                        )
+                    }
                 }
             }
             Spacer(Modifier.height(24.dp))
-            Text("STEPS", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (currentListPath.segments.isEmpty()) "STEPS" else "NESTED STEPS",
+                    modifier = Modifier.weight(1f),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                if (currentListPath.segments.isNotEmpty()) {
+                    TextButton(
+                        onClick = {
+                            currentListPath = StepListPath(currentListPath.segments.dropLast(1))
+                        },
+                    ) { Text("Parent") }
+                }
+            }
             Spacer(Modifier.height(8.dp))
-            if (steps.isEmpty()) {
+            if (currentSteps.isEmpty()) {
                 Text("Add the first action below", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            steps.forEachIndexed { index, step ->
+            currentSteps.forEachIndexed { index, step ->
+                val stepPath = StepPath(currentListPath, index)
                 StepRow(
                     index = index,
                     step = step,
                     canMoveUp = index > 0,
-                    canMoveDown = index < steps.lastIndex,
-                    onMoveUp = { steps.move(index, index - 1) },
-                    onMoveDown = { steps.move(index, index + 1) },
+                    canMoveDown = index < currentSteps.lastIndex,
+                    onMoveUp = { steps = steps.moveStep(stepPath, index - 1) },
+                    onMoveDown = { steps = steps.moveStep(stepPath, index + 1) },
                     canEdit = step.isActionEditable(),
-                    onEdit = { editingStepIndex = index },
-                    onEditPolicy = { policyStepIndex = index },
+                    onEdit = { editingStepPath = stepPath },
+                    onEditPolicy = { policyStepPath = stepPath },
                     onDuplicate = {
-                        steps.add(index + 1, step.duplicateWithNewIds(::newId))
+                        steps = steps.duplicateStep(stepPath, ::newId)
                     },
-                    onDelete = { stepToDeleteIndex = index },
+                    onDelete = { stepToDeletePath = stepPath },
+                    onOpenRepeat = (step as? Step.Repeat)?.let {
+                        {
+                            currentListPath = currentListPath.child(step.id, StepBranch.RepeatBody)
+                        }
+                    },
+                    onOpenIfTrue = (step as? Step.IfElse)?.let {
+                        { currentListPath = currentListPath.child(step.id, StepBranch.IfTrue) }
+                    },
+                    onOpenIfFalse = (step as? Step.IfElse)?.let {
+                        { currentListPath = currentListPath.child(step.id, StepBranch.IfFalse) }
+                    },
                 )
                 HorizontalDivider()
             }
@@ -849,17 +1258,35 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                     Text("Wait")
                 }
                 OutlinedButton(
-                    onClick = { steps += Step.GlobalAction(newId(), SystemAction.Back) },
+                    onClick = {
+                        steps = steps.insertStep(
+                            currentListPath,
+                            currentSteps.size,
+                            Step.GlobalAction(newId(), SystemAction.Back),
+                        )
+                    },
                     modifier = Modifier.weight(1f),
                 ) { Text("Back") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
-                    onClick = { steps += Step.GlobalAction(newId(), SystemAction.Home) },
+                    onClick = {
+                        steps = steps.insertStep(
+                            currentListPath,
+                            currentSteps.size,
+                            Step.GlobalAction(newId(), SystemAction.Home),
+                        )
+                    },
                     modifier = Modifier.weight(1f),
                 ) { Text("Home") }
                 OutlinedButton(
-                    onClick = { steps += Step.GlobalAction(newId(), SystemAction.Recents) },
+                    onClick = {
+                        steps = steps.insertStep(
+                            currentListPath,
+                            currentSteps.size,
+                            Step.GlobalAction(newId(), SystemAction.Recents),
+                        )
+                    },
                     modifier = Modifier.weight(1f),
                 ) { Text("Recents") }
             }
@@ -881,18 +1308,18 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             ) { Text("Read element attribute") }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
-                    enabled = steps.isNotEmpty(),
+                    enabled = currentSteps.isNotEmpty(),
                     onClick = { showRepeatDialog = true },
                     modifier = Modifier.weight(1f),
                 ) { Text("Repeat step") }
                 OutlinedButton(
-                    enabled = steps.isNotEmpty(),
+                    enabled = currentSteps.isNotEmpty(),
                     onClick = { showConditionDialog = true },
                     modifier = Modifier.weight(1f),
                 ) { Text("If variable") }
             }
             OutlinedButton(
-                enabled = steps.isNotEmpty() && observedNodes.isNotEmpty(),
+                enabled = currentSteps.isNotEmpty() && observedNodes.isNotEmpty(),
                 onClick = { showNodeConditionDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("If element exists") }
@@ -904,7 +1331,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             observedNodes = observedNodes,
             onDismiss = { showClickDialog = false },
             onAdd = { selector ->
-                steps += Step.Click(UUID.randomUUID().toString(), selector)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.Click(UUID.randomUUID().toString(), selector),
+                )
                 showClickDialog = false
             },
         )
@@ -915,7 +1346,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             title = "Long click an element",
             onDismiss = { showLongClickDialog = false },
             onAdd = { selector ->
-                steps += Step.LongClick(newId(), selector)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.LongClick(newId(), selector),
+                )
                 showLongClickDialog = false
             },
         )
@@ -924,7 +1359,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
         LaunchAppDialog(
             onDismiss = { showLaunchDialog = false },
             onAdd = { packageName ->
-                steps += Step.LaunchApp(UUID.randomUUID().toString(), packageName)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.LaunchApp(UUID.randomUUID().toString(), packageName),
+                )
                 showLaunchDialog = false
             },
         )
@@ -934,12 +1373,10 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             observedNodes = observedNodes,
             onDismiss = { showInputDialog = false },
             onAdd = { selector, text, variableName, inputMethod ->
-                steps += Step.InputText(
-                    newId(),
-                    selector,
-                    text,
-                    variableName,
-                    inputMethod,
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.InputText(newId(), selector, text, variableName, inputMethod),
                 )
                 showInputDialog = false
             },
@@ -949,7 +1386,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
         SwipeDialog(
             onDismiss = { showSwipeDialog = false },
             onAdd = { startX, startY, endX, endY, duration ->
-                steps += Step.Swipe(newId(), startX, startY, endX, endY, duration)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.Swipe(newId(), startX, startY, endX, endY, duration),
+                )
                 showSwipeDialog = false
             },
         )
@@ -958,7 +1399,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
         TapDialog(
             onDismiss = { showTapDialog = false },
             onAdd = { x, y ->
-                steps += Step.Tap(newId(), x, y)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.Tap(newId(), x, y),
+                )
                 showTapDialog = false
             },
         )
@@ -968,7 +1413,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             observedNodes = observedNodes,
             onDismiss = { showScrollDialog = false },
             onAdd = { selector, direction ->
-                steps += Step.Scroll(newId(), selector, direction)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.Scroll(newId(), selector, direction),
+                )
                 showScrollDialog = false
             },
         )
@@ -980,7 +1429,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             initialValue = "1000",
             onDismiss = { showWaitDialog = false },
             onAdd = { duration ->
-                steps += Step.Delay(newId(), duration)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.Delay(newId(), duration),
+                )
                 showWaitDialog = false
             },
         )
@@ -990,11 +1443,15 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             observedNodes = observedNodes,
             onDismiss = { showWaitNodeDialog = false },
             onAdd = { selector, timeout, mustExist ->
-                steps += Step.WaitForNode(
-                    newId(),
-                    selector,
-                    mustExist = mustExist,
-                    timeoutMillis = timeout,
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.WaitForNode(
+                        newId(),
+                        selector,
+                        mustExist = mustExist,
+                        timeoutMillis = timeout,
+                    ),
                 )
                 showWaitNodeDialog = false
             },
@@ -1004,7 +1461,11 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
         SetVariableDialog(
             onDismiss = { showVariableDialog = false },
             onAdd = { variableName, value ->
-                steps += Step.SetVariable(newId(), variableName, value)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.SetVariable(newId(), variableName, value),
+                )
                 showVariableDialog = false
             },
         )
@@ -1014,20 +1475,24 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             observedNodes = observedNodes,
             onDismiss = { showReadNodeTextDialog = false },
             onSave = { selector, variableName, attribute ->
-                steps += Step.ReadNodeText(newId(), selector, variableName, attribute)
+                steps = steps.insertStep(
+                    currentListPath,
+                    currentSteps.size,
+                    Step.ReadNodeText(newId(), selector, variableName, attribute),
+                )
                 showReadNodeTextDialog = false
             },
         )
     }
-    editingStepIndex?.let { index ->
-        when (val step = steps.getOrNull(index)) {
+    editingStepPath?.let { path ->
+        when (val step = runCatching { steps.stepAt(path) }.getOrNull()) {
             is Step.LaunchApp -> LaunchAppDialog(
                 initialPackageName = step.packageName,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { packageName ->
-                    steps[index] = step.copy(packageName = packageName)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(packageName = packageName))
+                    editingStepPath = null
                 },
             )
             is Step.LongClick -> ClickStepDialog(
@@ -1035,35 +1500,38 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                 initialSelector = step.selector,
                 title = "Long click an element",
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { selector ->
-                    steps[index] = step.copy(selector = selector)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(selector = selector))
+                    editingStepPath = null
                 },
             )
             is Step.Click -> ClickStepDialog(
                 observedNodes = observedNodes,
                 initialSelector = step.selector,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { selector ->
-                    steps[index] = step.copy(selector = selector)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(selector = selector))
+                    editingStepPath = null
                 },
             )
             is Step.InputText -> InputTextDialog(
                 observedNodes = observedNodes,
                 initialStep = step,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { selector, text, variableName, inputMethod ->
-                    steps[index] = step.copy(
-                        selector = selector,
-                        text = text,
-                        variableName = variableName,
-                        inputMethod = inputMethod,
+                    steps = steps.replaceStep(
+                        path,
+                        step.copy(
+                            selector = selector,
+                            text = text,
+                            variableName = variableName,
+                            inputMethod = inputMethod,
+                        ),
                     )
-                    editingStepIndex = null
+                    editingStepPath = null
                 },
             )
             is Step.ReadNodeText -> ReadNodeTextDialog(
@@ -1071,14 +1539,13 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                 initialSelector = step.selector,
                 initialVariableName = step.variableName,
                 initialAttribute = step.attribute,
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onSave = { selector, variableName, attribute ->
-                    steps[index] = step.copy(
-                        selector = selector,
-                        variableName = variableName,
-                        attribute = attribute,
+                    steps = steps.replaceStep(
+                        path,
+                        step.copy(selector = selector, variableName = variableName, attribute = attribute),
                     )
-                    editingStepIndex = null
+                    editingStepPath = null
                 },
             )
             is Step.Delay -> NumberDialog(
@@ -1086,18 +1553,18 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                 label = "Duration in milliseconds",
                 initialValue = step.durationMillis.toString(),
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { duration ->
-                    steps[index] = step.copy(durationMillis = duration)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(durationMillis = duration))
+                    editingStepPath = null
                 },
             )
             is Step.GlobalAction -> GlobalActionSettingsDialog(
                 current = step.action,
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onSelect = { action ->
-                    steps[index] = step.copy(action = action)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(action = action))
+                    editingStepPath = null
                 },
             )
             is Step.IfElse -> {
@@ -1110,16 +1577,19 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                                 initialVariableName = variable.name,
                                 initialExpectedValue = expected.value,
                                 initialOperator = condition.operator,
-                                onDismiss = { editingStepIndex = null },
+                                onDismiss = { editingStepPath = null },
                                 onSave = { variableName, expectedValue, operator ->
-                                    steps[index] = step.copy(
-                                        condition = Condition.Equals(
-                                            Value.Variable(variableName),
-                                            Value.Literal(expectedValue),
-                                            operator,
+                                    steps = steps.replaceStep(
+                                        path,
+                                        step.copy(
+                                            condition = Condition.Equals(
+                                                Value.Variable(variableName),
+                                                Value.Literal(expectedValue),
+                                                operator,
+                                            ),
                                         ),
                                     )
-                                    editingStepIndex = null
+                                    editingStepPath = null
                                 },
                             )
                         }
@@ -1127,10 +1597,13 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
                     is Condition.NodeExists -> NodeConditionDialog(
                         observedNodes = observedNodes,
                         initialSelector = condition.selector,
-                        onDismiss = { editingStepIndex = null },
+                        onDismiss = { editingStepPath = null },
                         onSave = { _, selector ->
-                            steps[index] = step.copy(condition = Condition.NodeExists(selector))
-                            editingStepIndex = null
+                            steps = steps.replaceStep(
+                                path,
+                                step.copy(condition = Condition.NodeExists(selector)),
+                            )
+                            editingStepPath = null
                         },
                     )
                 }
@@ -1138,67 +1611,73 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             is Step.Swipe -> SwipeDialog(
                 initialStep = step,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { startX, startY, endX, endY, duration ->
-                    steps[index] = step.copy(
-                        startX = startX,
-                        startY = startY,
-                        endX = endX,
-                        endY = endY,
-                        durationMillis = duration,
+                    steps = steps.replaceStep(
+                        path,
+                        step.copy(
+                            startX = startX,
+                            startY = startY,
+                            endX = endX,
+                            endY = endY,
+                            durationMillis = duration,
+                        ),
                     )
-                    editingStepIndex = null
+                    editingStepPath = null
                 },
             )
             is Step.Tap -> TapDialog(
                 initialStep = step,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { x, y ->
-                    steps[index] = step.copy(x = x, y = y)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(x = x, y = y))
+                    editingStepPath = null
                 },
             )
             is Step.SetVariable -> SetVariableDialog(
                 initialName = step.name,
                 initialValue = step.value,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { variableName, value ->
-                    steps[index] = step.copy(name = variableName, value = value)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(name = variableName, value = value))
+                    editingStepPath = null
                 },
             )
             is Step.Repeat -> RepeatSettingsDialog(
                 initialCount = step.times,
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onSave = { count ->
-                    steps[index] = step.copy(times = count)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(times = count))
+                    editingStepPath = null
                 },
             )
             is Step.Scroll -> ScrollStepDialog(
                 observedNodes = observedNodes,
                 initialStep = step,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { selector, direction ->
-                    steps[index] = step.copy(selector = selector, direction = direction)
-                    editingStepIndex = null
+                    steps = steps.replaceStep(path, step.copy(selector = selector, direction = direction))
+                    editingStepPath = null
                 },
             )
             is Step.WaitForNode -> WaitNodeDialog(
                 observedNodes = observedNodes,
                 initialStep = step,
                 confirmLabel = "Save",
-                onDismiss = { editingStepIndex = null },
+                onDismiss = { editingStepPath = null },
                 onAdd = { selector, timeout, mustExist ->
-                    steps[index] = step.copy(
-                        selector = selector,
-                        mustExist = mustExist,
-                        timeoutMillis = timeout,
+                    steps = steps.replaceStep(
+                        path,
+                        step.copy(
+                            selector = selector,
+                            mustExist = mustExist,
+                            timeoutMillis = timeout,
+                        ),
                     )
-                    editingStepIndex = null
+                    editingStepPath = null
                 },
             )
             else -> Unit
@@ -1209,29 +1688,37 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
             title = "Repeat a step",
             valueLabel = "Repeat count",
             initialValue = "2",
-            steps = steps,
+            steps = currentSteps,
             onDismiss = { showRepeatDialog = false },
             onAdd = { index, count ->
-                val nestedStep = steps.removeAt(index)
-                steps += Step.Repeat(newId(), count.toInt(), listOf(nestedStep))
+                val path = StepPath(currentListPath, index)
+                val nestedStep = steps.stepAt(path)
+                steps = steps.replaceStep(
+                    path,
+                    Step.Repeat(newId(), count.toInt(), listOf(nestedStep)),
+                )
                 showRepeatDialog = false
             },
         )
     }
     if (showConditionDialog) {
         ConditionDialog(
-            steps = steps,
+            steps = currentSteps,
             onDismiss = { showConditionDialog = false },
             onAdd = { index, variableName, expectedValue, operator ->
-                val nestedStep = steps.removeAt(index)
-                steps += Step.IfElse(
-                    id = newId(),
-                    condition = Condition.Equals(
-                        Value.Variable(variableName),
-                        Value.Literal(expectedValue),
-                        operator,
+                val path = StepPath(currentListPath, index)
+                val nestedStep = steps.stepAt(path)
+                steps = steps.replaceStep(
+                    path,
+                    Step.IfElse(
+                        id = newId(),
+                        condition = Condition.Equals(
+                            Value.Variable(variableName),
+                            Value.Literal(expectedValue),
+                            operator,
+                        ),
+                        whenTrue = listOf(nestedStep),
                     ),
-                    whenTrue = listOf(nestedStep),
                 )
                 showConditionDialog = false
             },
@@ -1240,49 +1727,61 @@ private fun WorkflowEditor(workflow: Workflow, onBack: () -> Unit, onSave: (Work
     if (showNodeConditionDialog) {
         NodeConditionDialog(
             observedNodes = observedNodes,
-            steps = steps,
+            steps = currentSteps,
             onDismiss = { showNodeConditionDialog = false },
             onSave = { selectedIndex, selector ->
-                val nestedStep = steps.removeAt(requireNotNull(selectedIndex))
-                steps += Step.IfElse(
-                    id = newId(),
-                    condition = Condition.NodeExists(selector),
-                    whenTrue = listOf(nestedStep),
+                val path = StepPath(currentListPath, requireNotNull(selectedIndex))
+                val nestedStep = steps.stepAt(path)
+                steps = steps.replaceStep(
+                    path,
+                    Step.IfElse(
+                        id = newId(),
+                        condition = Condition.NodeExists(selector),
+                        whenTrue = listOf(nestedStep),
+                    ),
                 )
                 showNodeConditionDialog = false
             },
         )
     }
-    policyStepIndex?.let { index ->
+    policyStepPath?.let { path ->
+        val currentStep = runCatching { steps.stepAt(path) }.getOrNull()
+        if (currentStep == null) {
+            policyStepPath = null
+        } else {
         FailurePolicyDialog(
-            currentStep = steps[index],
+            currentStep = currentStep,
             defaultTimeoutMillis = defaultTimeoutMillis ?: workflow.defaultStepTimeoutMillis,
-            onDismiss = { policyStepIndex = null },
+            onDismiss = { policyStepPath = null },
             onSelect = { policy, timeoutMillis ->
-                steps[index] = steps[index].withExecutionSettings(timeoutMillis, policy)
-                policyStepIndex = null
+                steps = steps.replaceStep(
+                    path,
+                    currentStep.withExecutionSettings(timeoutMillis, policy),
+                )
+                policyStepPath = null
             },
         )
+        }
     }
-    stepToDeleteIndex?.let { index ->
-        val step = steps.getOrNull(index)
+    stepToDeletePath?.let { path ->
+        val step = runCatching { steps.stepAt(path) }.getOrNull()
         if (step == null) {
-            stepToDeleteIndex = null
+            stepToDeletePath = null
         } else {
             AlertDialog(
-                onDismissRequest = { stepToDeleteIndex = null },
+                onDismissRequest = { stepToDeletePath = null },
                 title = { Text("Delete step?") },
-                text = { Text("${index + 1}. ${step.title()} will be removed from this workflow.") },
+                text = { Text("${path.index + 1}. ${step.title()} will be removed from this workflow.") },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            steps.removeAt(index)
-                            stepToDeleteIndex = null
+                            steps = steps.removeStep(path)
+                            stepToDeletePath = null
                         },
                     ) { Text("Delete") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { stepToDeleteIndex = null }) { Text("Cancel") }
+                    TextButton(onClick = { stepToDeletePath = null }) { Text("Cancel") }
                 },
             )
         }
@@ -1454,6 +1953,9 @@ private fun InputTextDialog(
     onDismiss: () -> Unit,
     onAdd: (NodeSelector, String, String?, TextInputMethod) -> Unit,
 ) {
+    DisposableEffect(Unit) {
+        onDispose { AutomationAccessibilityService.discardScreenCapture() }
+    }
     var selectedSelector by remember(initialStep) { mutableStateOf(initialStep?.selector) }
     var inputText by remember(initialStep) { mutableStateOf(initialStep?.text.orEmpty()) }
     var useVariable by remember(initialStep) { mutableStateOf(initialStep?.variableName != null) }
@@ -1462,13 +1964,20 @@ private fun InputTextDialog(
         mutableStateOf(initialStep?.inputMethod ?: TextInputMethod.SetText)
     }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            AutomationAccessibilityService.discardScreenCapture()
+            onDismiss()
+        },
         title = { Text("Input text") },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                VisualSelectorCapture(
+                    onSelectorSelected = { selector -> selectedSelector = selector },
+                )
+                HorizontalDivider()
                 Text("Choose a recently observed text field", fontWeight = FontWeight.SemiBold)
                 if (observedNodes.isEmpty()) {
                     Text(
@@ -1526,7 +2035,7 @@ private fun InputTextDialog(
                         Text(if (inputMethod == TextInputMethod.Paste) "Paste through clipboard" else "Set text directly")
                         Text(
                             if (inputMethod == TextInputMethod.Paste) {
-                                "Replaces the current system clipboard"
+                                "Temporarily uses the clipboard and restores it if unchanged"
                             } else {
                                 "Uses the accessibility set-text action"
                             },
@@ -1547,6 +2056,7 @@ private fun InputTextDialog(
             TextButton(
                 enabled = selectedSelector != null && (!useVariable || variableName.isNotBlank()),
                 onClick = {
+                    AutomationAccessibilityService.discardScreenCapture()
                     onAdd(
                         requireNotNull(selectedSelector),
                         if (useVariable) "" else inputText,
@@ -1556,7 +2066,14 @@ private fun InputTextDialog(
                 },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    AutomationAccessibilityService.discardScreenCapture()
+                    onDismiss()
+                },
+            ) { Text("Cancel") }
+        },
     )
 }
 
@@ -2260,6 +2777,9 @@ private fun ClickStepDialog(
     onDismiss: () -> Unit,
     onAdd: (NodeSelector) -> Unit,
 ) {
+    DisposableEffect(Unit) {
+        onDispose { AutomationAccessibilityService.discardScreenCapture() }
+    }
     var packageName by remember(initialSelector) { mutableStateOf(initialSelector?.packageName.orEmpty()) }
     var viewId by remember(initialSelector) { mutableStateOf(initialSelector?.viewId.orEmpty()) }
     var text by remember(initialSelector) { mutableStateOf(initialSelector?.text.orEmpty()) }
@@ -2278,13 +2798,31 @@ private fun ClickStepDialog(
     val hasAttribute = listOf(viewId, text, description, className).any { it.isNotBlank() }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            AutomationAccessibilityService.discardScreenCapture()
+            onDismiss()
+        },
         title = { Text(title) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                VisualSelectorCapture(
+                    onSelectorSelected = { selector ->
+                        packageName = selector.packageName
+                        viewId = selector.viewId.orEmpty()
+                        text = selector.text.orEmpty()
+                        textContains = false
+                        description = selector.contentDescription.orEmpty()
+                        descriptionContains = false
+                        className = selector.className.orEmpty()
+                        matchIndex = selector.matchIndex
+                        matchResult = "Selected from the captured screen"
+                    },
+                    onSelectionError = { matchResult = it },
+                )
+                HorizontalDivider()
                 Text("RECENTLY OBSERVED", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 if (observedNodes.isEmpty()) {
                     Text(
@@ -2399,6 +2937,7 @@ private fun ClickStepDialog(
             TextButton(
                 enabled = packageName.isNotBlank() && hasAttribute,
                 onClick = {
+                    AutomationAccessibilityService.discardScreenCapture()
                     onAdd(
                         requireNotNull(
                             nodeSelectorOrNull(
@@ -2416,8 +2955,98 @@ private fun ClickStepDialog(
                 },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    AutomationAccessibilityService.discardScreenCapture()
+                    onDismiss()
+                },
+            ) { Text("Cancel") }
+        },
     )
+}
+
+@Composable
+private fun VisualSelectorCapture(
+    onSelectorSelected: (NodeSelector) -> Unit,
+    onSelectionError: (String) -> Unit = {},
+) {
+    val context = LocalContext.current
+    val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
+    var captureSize by remember { mutableStateOf(IntSize.Zero) }
+
+    Text("PICK FROM SCREEN", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    Text(
+        "Capture the previous app, then tap the object in the captured screen. The image is kept only in memory.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+    )
+    OutlinedButton(
+        onClick = {
+            if (AutomationAccessibilityService.instance?.capturePreviousApp() == true) {
+                (context as? Activity)?.moveTaskToBack(true)
+            }
+        },
+        enabled = AutomationAccessibilityService.instance != null &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            captureState !is ScreenCaptureState.Armed,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(if (captureState is ScreenCaptureState.Ready) "Capture again" else "Capture previous app")
+    }
+    when (val state = captureState) {
+        ScreenCaptureState.Armed -> Text(
+            "Waiting for the target app to settle…",
+            color = MaterialTheme.colorScheme.primary,
+        )
+        is ScreenCaptureState.Error -> Text(
+            state.message,
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+        )
+        is ScreenCaptureState.Ready -> {
+            Text("Tap the object to select it", fontWeight = FontWeight.SemiBold)
+            Image(
+                bitmap = state.bitmap.asImageBitmap(),
+                contentDescription = "Captured target app screen. Tap an object to select it.",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(360.dp)
+                    .onSizeChanged { captureSize = it }
+                    .pointerInput(state, captureSize) {
+                        detectTapGestures { offset ->
+                            val point = mapFitCenterTapToScreen(
+                                tapX = offset.x,
+                                tapY = offset.y,
+                                containerWidth = captureSize.width,
+                                containerHeight = captureSize.height,
+                                imageWidth = state.bitmap.width,
+                                imageHeight = state.bitmap.height,
+                            )
+                            val node = point?.let { selectCaptureNode(state.nodes, it) }
+                            if (node == null) {
+                                onSelectionError(
+                                    "No accessible element at that point. Try another object or use a coordinate Tap step.",
+                                )
+                            } else {
+                                val service = AutomationAccessibilityService.instance
+                                onSelectorSelected(
+                                    recommendedSelector(node) { service?.countMatches(it) ?: 0 },
+                                )
+                            }
+                        }
+                    },
+            )
+        }
+        ScreenCaptureState.Idle -> if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Text(
+                "Visual capture requires Android 11 or newer. Recent elements remain available below.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+        }
+    }
 }
 
 private fun nodeSelectorOrNull(
@@ -2476,6 +3105,9 @@ private fun StepRow(
     onEditPolicy: () -> Unit,
     onDuplicate: () -> Unit,
     onDelete: () -> Unit,
+    onOpenRepeat: (() -> Unit)? = null,
+    onOpenIfTrue: (() -> Unit)? = null,
+    onOpenIfFalse: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
@@ -2511,6 +3143,19 @@ private fun StepRow(
             )
         }
         Column {
+            if (onOpenRepeat != null) {
+                TextButton(onClick = onOpenRepeat) { Text("Open steps") }
+            }
+            if (onOpenIfTrue != null || onOpenIfFalse != null) {
+                Row {
+                    onOpenIfTrue?.let { open ->
+                        TextButton(onClick = open) { Text("True") }
+                    }
+                    onOpenIfFalse?.let { open ->
+                        TextButton(onClick = open) { Text("False") }
+                    }
+                }
+            }
             Row {
                 TextButton(onClick = onMoveUp, enabled = canMoveUp) { Text("Up") }
                 TextButton(onClick = onMoveDown, enabled = canMoveDown) { Text("Down") }
@@ -2625,7 +3270,52 @@ private fun formatElapsed(elapsedMillis: Long): String {
 }
 
 @Composable
-private fun PermissionStatus(connected: Boolean, onOpenSettings: () -> Unit) {
+private fun AccessibilityDisclosureDialog(
+    onDecline: () -> Unit,
+    onAccept: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDecline,
+        title = { Text("Allow automation access?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "When enabled, AI Index Finger reads visible screen text, descriptions, " +
+                        "view identifiers, and app names so you can inspect elements and run " +
+                        "workflows you create.",
+                )
+                Text(
+                    "When you choose Capture previous app, it takes one screenshot so you can " +
+                        "tap an element visually. That screenshot stays only in memory and is " +
+                        "discarded after you select or cancel; it is not saved or uploaded.",
+                )
+                Text(
+                    "During a workflow, it can tap, swipe, enter text, use system navigation, " +
+                        "and temporarily replace clipboard contents for paste input, then restore " +
+                        "them unless the clipboard changes again.",
+                )
+                Text(
+                    "Observed interface data and run history stay on this device. The app has no " +
+                        "network permission and does not send this data elsewhere. You can turn " +
+                        "the service off at any time in Android Settings.",
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAccept) { Text("Continue to Settings") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) { Text("Not now") }
+        },
+    )
+}
+
+@Composable
+private fun PermissionStatus(
+    connected: Boolean,
+    onOpenSettings: () -> Unit,
+    onReviewDisclosure: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -2649,14 +3339,20 @@ private fun PermissionStatus(connected: Boolean, onOpenSettings: () -> Unit) {
                 fontSize = 13.sp,
             )
         }
-        if (!connected) {
-            Button(
-                onClick = onOpenSettings,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
-            ) { Text("Set up") }
+        Column(horizontalAlignment = Alignment.End) {
+            if (!connected) {
+                Button(
+                    onClick = onOpenSettings,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                    ),
+                ) { Text("Set up") }
+            }
+            TextButton(onClick = onReviewDisclosure) { Text("Details") }
         }
     }
 }
+
 
 @Composable
 private fun WorkflowRow(
@@ -2670,8 +3366,10 @@ private fun WorkflowRow(
     onSchedule: () -> Unit,
     onCancelSchedule: () -> Unit,
     onRun: () -> Unit,
+    onPreflight: () -> Unit,
     onStop: () -> Unit,
 ) {
+    val isReady = workflow.isReadyToRun()
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2679,7 +3377,7 @@ private fun WorkflowRow(
         Column(Modifier.weight(1f)) {
             Text(workflow.name, fontWeight = FontWeight.SemiBold)
             Text(
-                "${workflow.steps.size} steps",
+                "${workflow.effectiveState().name} · ${workflow.steps.size} steps",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
@@ -2694,7 +3392,10 @@ private fun WorkflowRow(
         Column(horizontalAlignment = Alignment.End) {
             Row {
                 TextButton(onClick = onEdit, enabled = !isRunning) { Text("Edit") }
-                Button(onClick = if (isRunning) onStop else onRun) {
+                Button(
+                    onClick = if (isRunning) onStop else onRun,
+                    enabled = isRunning || isReady,
+                ) {
                     Text(if (isRunning) "Stop" else "Run")
                 }
             }
@@ -2703,9 +3404,10 @@ private fun WorkflowRow(
                 TextButton(onClick = onDuplicate, enabled = !isRunning) { Text("Copy") }
                 TextButton(onClick = onDelete, enabled = !isRunning) { Text("Delete") }
             }
+            TextButton(onClick = onPreflight, enabled = !isRunning) { Text("Check") }
             TextButton(
                 onClick = if (schedule == null) onSchedule else onCancelSchedule,
-                enabled = !isRunning,
+                enabled = !isRunning && (schedule != null || isReady),
                 modifier = Modifier.align(Alignment.End),
             ) { Text(if (schedule == null) "Schedule" else "Cancel schedule") }
         }
@@ -2721,6 +3423,268 @@ private fun Workflow.exportFileName(): String {
 }
 
 @Composable
+private fun PreflightReportDialog(
+    workflow: Workflow,
+    report: WorkflowPreflightReport,
+    onDismiss: () -> Unit,
+    onEditStep: (StepPath) -> Unit,
+    onRecoveryAction: (PreflightRecoveryAction) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Check ${workflow.name}") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("State: ${report.state.name}", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Automation service: ${if (report.accessibilityConnected) "Connected" else "Not connected"}",
+                )
+                Text("Notification permission: ${report.notificationStatus.name}")
+                report.recoveryActions().forEach { action ->
+                    OutlinedButton(
+                        onClick = { onRecoveryAction(action) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            when (action) {
+                                PreflightRecoveryAction.SetUpAutomation -> "Set up automation"
+                                PreflightRecoveryAction.GrantNotifications -> "Allow notifications"
+                            },
+                        )
+                    }
+                }
+                if (report.validationIssues.isEmpty()) {
+                    Text("Workflow structure: Valid", color = Color(0xFF16815F))
+                } else {
+                    Text("Workflow structure: ${report.validationIssues.size} issues", color = Color(0xFFD04F3D))
+                    report.validationIssues.take(5).forEach { issue ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("• ${issue.message}", modifier = Modifier.weight(1f), fontSize = 12.sp)
+                            issue.stepId?.let(workflow.steps::uniquePathTo)?.let { path ->
+                                TextButton(onClick = { onEditStep(path) }) { Text("Edit step") }
+                            }
+                        }
+                    }
+                }
+                val validation = report.validation
+                val variables = buildString {
+                    append("Variables: ${validation.definedVariables.size} defined")
+                    if (validation.referencedVariables.isNotEmpty()) {
+                        append(", ${validation.referencedVariables.size} referenced")
+                    }
+                }
+                Text(variables, fontSize = 12.sp)
+                if (validation.definedVariables.isNotEmpty()) {
+                    Text(validation.definedVariables.joinToString(), fontSize = 12.sp)
+                }
+                Text(
+                    "Limits: ${validation.definedStepCount}/${WorkflowLimits.MAX_DEFINED_STEPS} steps · " +
+                        "${validation.maximumNestingDepth}/${WorkflowLimits.MAX_NESTING_DEPTH} levels · " +
+                        "${validation.maximumStepExecutions}/${WorkflowLimits.MAX_EXECUTED_STEPS} max executions",
+                    fontSize = 12.sp,
+                )
+                if (report.launchTargets.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text("LAUNCH TARGETS", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    report.launchTargets.forEach { target ->
+                        Text(
+                            "${if (target.isLaunchable) "Available" else "Not launchable"}: ${target.packageName}",
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                if (report.selectors.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text("SELECTOR SNAPSHOT", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    report.selectors.forEach { check ->
+                        val result = when (check.requiredMatchAvailable) {
+                            true -> "Available (${check.matchCount} matches)"
+                            false -> "Current match ${check.matchCount}; needs index ${check.use.selector.matchIndex}"
+                            null -> "Unavailable until the service is connected"
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "${check.use.role.name} · ${check.use.stepId}: $result",
+                                modifier = Modifier.weight(1f),
+                                fontSize = 12.sp,
+                            )
+                            workflow.steps.uniquePathTo(check.use.stepId)?.let { path ->
+                                TextButton(onClick = { onEditStep(path) }) { Text("Edit step") }
+                            }
+                        }
+                    }
+                    Text(
+                        "Selector counts reflect only the interface currently visible to the service.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun RunHistoryScreen(
+    records: List<RunRecord>,
+    workflows: List<Workflow>,
+    onBack: () -> Unit,
+    onOpenWorkflow: (Workflow, StepPath?) -> Unit,
+    onClear: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf<RunStatus?>(null) }
+    var selectedRecord by remember { mutableStateOf<RunRecord?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
+    val visibleRecords = filterRunRecords(records, query, status)
+
+    BackHandler(onBack = onBack)
+    Scaffold(containerColor = MaterialTheme.colorScheme.background) { contentPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(contentPadding)
+                .padding(horizontal = 20.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("Back") }
+                Text("Run history", modifier = Modifier.weight(1f), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                if (records.isNotEmpty()) {
+                    TextButton(onClick = { confirmClear = true }) { Text("Clear") }
+                }
+            }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("Filter by workflow name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text("STATUS", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            listOf<RunStatus?>(null, RunStatus.Completed, RunStatus.Failed)
+                .chunked(3)
+                .plus(listOf(listOf(RunStatus.Cancelled, RunStatus.Rejected)))
+                .forEach { options ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        options.forEach { option ->
+                            RadioButton(selected = status == option, onClick = { status = option })
+                            Text(
+                                option?.name ?: "All",
+                                modifier = Modifier.clickable { status = option },
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                }
+            Text(
+                "${visibleRecords.size} of ${records.size} runs",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+            HorizontalDivider()
+            when {
+                records.isEmpty() -> Text(
+                    "No runs recorded",
+                    modifier = Modifier.padding(vertical = 24.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                visibleRecords.isEmpty() -> Text(
+                    "No runs match these filters",
+                    modifier = Modifier.padding(vertical = 24.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                else -> LazyColumn(Modifier.fillMaxSize()) {
+                    items(visibleRecords, key = { it.id }) { record ->
+                        Box(Modifier.clickable { selectedRecord = record }) {
+                            RunRecordRow(record)
+                        }
+                        HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+
+    selectedRecord?.let { record ->
+        val destination = resolveRunHistoryDestination(record, workflows)
+        RunRecordDetailsDialog(
+            record = record,
+            destination = destination,
+            onDismiss = { selectedRecord = null },
+            onOpenWorkflow = { workflow, stepPath ->
+                selectedRecord = null
+                onOpenWorkflow(workflow, stepPath)
+            },
+        )
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Clear run history?") },
+            text = { Text("All local execution records will be permanently removed.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        selectedRecord = null
+                        confirmClear = false
+                        onClear()
+                    },
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun RunRecordDetailsDialog(
+    record: RunRecord,
+    destination: com.aiindexfinger.data.RunHistoryDestination?,
+    onDismiss: () -> Unit,
+    onOpenWorkflow: (Workflow, StepPath?) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(record.workflowName) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Status: ${record.status.name}")
+                Text("Workflow ID: ${record.workflowId}")
+                Text("Started: ${DateFormat.getDateTimeInstance().format(Date(record.startedAtMillis))}")
+                Text("Duration: ${record.durationMillis} ms")
+                record.failedStepId?.let { Text("Failed step: $it") }
+                record.failureMessage?.let { Text("Details: $it") }
+                if (destination == null) {
+                    Text(
+                        "The original workflow is no longer available.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else if (record.failedStepId != null && destination.stepPath == null) {
+                    Text(
+                        "The failed step has changed or is no longer available. The workflow will open at its first level.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            destination?.let {
+                TextButton(onClick = { onOpenWorkflow(it.workflow, it.stepPath) }) {
+                    Text(if (it.stepPath == null) "Open workflow" else "Edit failed step")
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
 private fun RunRecordRow(record: RunRecord) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
@@ -2733,9 +3697,10 @@ private fun RunRecordRow(record: RunRecord) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
-            if (record.status == RunStatus.Failed) {
+            if (record.failureMessage != null) {
                 Text(
-                    "Step ${record.failedStepId}: ${record.failureMessage}",
+                    record.failedStepId?.let { "Step $it: ${record.failureMessage}" }
+                        ?: requireNotNull(record.failureMessage),
                     color = Color(0xFFD04F3D),
                     fontSize = 12.sp,
                 )
@@ -2752,6 +3717,7 @@ private fun RunRecordRow(record: RunRecord) {
 private fun RunResult.message(): String = when (this) {
     RunResult.Completed -> "Workflow completed"
     RunResult.AlreadyRunning -> "Another workflow is already running"
+    is RunResult.NotReady -> "Cannot run: $message"
     RunResult.Cancelled -> "Workflow stopped"
     is RunResult.Failed -> "Step $stepId failed: $message"
 }

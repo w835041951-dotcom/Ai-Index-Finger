@@ -11,6 +11,7 @@ import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowLimits
+import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.model.evaluate
 import com.aiindexfinger.model.renderTemplate
 import kotlinx.coroutines.CancellationException
@@ -43,6 +44,7 @@ sealed interface RunState {
 sealed interface RunResult {
     data object Completed : RunResult
     data object AlreadyRunning : RunResult
+    data class NotReady(val message: String) : RunResult
     data object Cancelled : RunResult
     data class Failed(val stepId: String, val message: String) : RunResult
 }
@@ -57,6 +59,9 @@ class WorkflowExecutor(
     val state: StateFlow<RunState> = mutableState.asStateFlow()
 
     suspend fun run(workflow: Workflow): RunResult {
+        workflow.readinessIssues().firstOrNull()?.let { issue ->
+            return RunResult.NotReady(issue.message)
+        }
         if (!runMutex.tryLock()) return RunResult.AlreadyRunning
 
         return try {

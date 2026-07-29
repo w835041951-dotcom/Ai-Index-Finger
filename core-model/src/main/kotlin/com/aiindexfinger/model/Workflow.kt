@@ -10,6 +10,7 @@ data class Workflow(
     val name: String,
     val steps: List<Step>,
     val defaultStepTimeoutMillis: Long = 10_000,
+    val state: WorkflowState? = null,
 ) {
     init {
         require(schemaVersion > 0) { "Schema version must be positive" }
@@ -19,8 +20,14 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 12
+        const val CURRENT_SCHEMA_VERSION = 13
     }
+}
+
+@Serializable
+enum class WorkflowState {
+    Draft,
+    Ready,
 }
 
 @Serializable

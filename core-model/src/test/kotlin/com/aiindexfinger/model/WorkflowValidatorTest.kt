@@ -2,9 +2,51 @@ package com.aiindexfinger.model
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class WorkflowValidatorTest {
+    @Test
+    fun `legacy valid workflow is ready while invalid legacy workflow becomes draft`() {
+        val valid = Workflow(
+            schemaVersion = 12,
+            id = "valid",
+            name = "Valid",
+            steps = listOf(Step.Delay("delay", 1)),
+        )
+        val invalid = valid.copy(id = "invalid", steps = emptyList())
+
+        assertEquals(WorkflowState.Ready, valid.effectiveState())
+        assertTrue(valid.isReadyToRun())
+        assertEquals(WorkflowState.Draft, invalid.effectiveState())
+        assertFalse(invalid.isReadyToRun())
+    }
+
+    @Test
+    fun `explicit draft remains draft even when validation is clean`() {
+        val workflow = Workflow(
+            id = "draft",
+            name = "Draft",
+            steps = listOf(Step.Delay("delay", 1)),
+            state = WorkflowState.Draft,
+        )
+
+        assertEquals(WorkflowState.Draft, workflow.effectiveState())
+        assertEquals("Workflow is saved as a draft", workflow.readinessIssues().single().message)
+    }
+
+    @Test
+    fun `explicit ready workflow still requires clean validation`() {
+        val workflow = Workflow(
+            id = "invalid-ready",
+            name = "Invalid ready",
+            steps = emptyList(),
+            state = WorkflowState.Ready,
+        )
+
+        assertEquals(WorkflowState.Ready, workflow.effectiveState())
+        assertEquals("Workflow has no steps", workflow.readinessIssues().single().message)
+    }
     @Test
     fun `rejects an empty workflow`() {
         val workflow = Workflow(id = "empty", name = "Empty", steps = emptyList())
@@ -45,6 +87,38 @@ class WorkflowValidatorTest {
                     condition = Condition.Equals(Value.Variable("mode"), Value.Literal("ready")),
                     whenTrue = listOf(Step.Delay("wait", 100)),
                 ),
+            ),
+        )
+
+        assertTrue(WorkflowValidator.validate(workflow).isEmpty())
+    }
+
+    @Test
+    fun `accepts variables defined by every branch and rejects one branch definitions`() {
+        val bothBranches = branchVariableWorkflow(
+            whenFalse = listOf(Step.SetVariable("set-false", "result", Value.Literal("false"))),
+        )
+        val oneBranch = branchVariableWorkflow(whenFalse = emptyList())
+
+        assertTrue(WorkflowValidator.validate(bothBranches).isEmpty())
+        assertEquals(
+            "Variable 'result' is not defined",
+            WorkflowValidator.validate(oneBranch).single().message,
+        )
+    }
+
+    @Test
+    fun `accepts variables defined in a guaranteed repeat`() {
+        val workflow = Workflow(
+            id = "repeat-variable",
+            name = "Repeat variable",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1,
+                    steps = listOf(Step.SetVariable("set", "result", Value.Literal("ready"))),
+                ),
+                Step.SetVariable("consume", "copy", Value.Variable("result")),
             ),
         )
 
@@ -109,6 +183,59 @@ class WorkflowValidatorTest {
     }
 
     @Test
+    fun `retry attempts count toward the execution budget`() {
+        val workflow = Workflow(
+            id = "retry-budget",
+            name = "Retry budget",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 10_000,
+                    steps = listOf(
+                        Step.Delay(
+                            id = "delay",
+                            durationMillis = 1,
+                            failurePolicy = FailurePolicy.Retry(attempts = 10, delayMillis = 0),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(
+            WorkflowValidator.validate(workflow)
+                .any { it.message.contains("more than ${WorkflowLimits.MAX_EXECUTED_STEPS}") },
+        )
+    }
+
+    @Test
+    fun `inspection reports variables and structural limits from validation traversal`() {
+        val workflow = Workflow(
+            id = "inspection",
+            name = "Inspection",
+            steps = listOf(
+                Step.SetVariable("set", "source", Value.Literal("ready")),
+                Step.Repeat(
+                    id = "repeat",
+                    times = 3,
+                    steps = listOf(
+                        Step.SetVariable("copy", "result", Value.Variable("source")),
+                    ),
+                ),
+            ),
+        )
+
+        val summary = WorkflowValidator.inspect(workflow)
+
+        assertEquals(setOf("source", "result"), summary.definedVariables)
+        assertEquals(setOf("source"), summary.referencedVariables)
+        assertEquals(3, summary.definedStepCount)
+        assertEquals(2, summary.maximumNestingDepth)
+        assertEquals(5, summary.maximumStepExecutions)
+        assertTrue(summary.issues.isEmpty())
+    }
+
+    @Test
     fun `rejects excessive nesting`() {
         var nested: Step = Step.Delay("leaf", 1)
         repeat(WorkflowLimits.MAX_NESTING_DEPTH) { index ->
@@ -137,4 +264,19 @@ class WorkflowValidatorTest {
                 .any { it.message.contains("defines more than ${WorkflowLimits.MAX_DEFINED_STEPS}") },
         )
     }
+
+
+    private fun branchVariableWorkflow(whenFalse: List<Step>): Workflow = Workflow(
+        id = "branch-variable",
+        name = "Branch variable",
+        steps = listOf(
+            Step.IfElse(
+                id = "if",
+                condition = Condition.Equals(Value.Literal("yes"), Value.Literal("yes")),
+                whenTrue = listOf(Step.SetVariable("set-true", "result", Value.Literal("true"))),
+                whenFalse = whenFalse,
+            ),
+            Step.SetVariable("consume", "copy", Value.Variable("result")),
+        ),
+    )
 }

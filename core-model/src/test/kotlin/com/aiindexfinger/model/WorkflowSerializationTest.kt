@@ -61,4 +61,23 @@ class WorkflowSerializationTest {
 
         assertEquals(workflow, decoded)
     }
+
+    @Test
+    fun `round trips explicit draft and ready states`() {
+        val draft = Workflow(
+            id = "draft",
+            name = "Draft",
+            steps = emptyList(),
+            state = WorkflowState.Draft,
+        )
+        val ready = Workflow(
+            id = "ready",
+            name = "Ready",
+            steps = listOf(Step.Delay("delay", 1)),
+            state = WorkflowState.Ready,
+        )
+
+        assertEquals(draft, json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), draft)))
+        assertEquals(ready, json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), ready)))
+    }
 }

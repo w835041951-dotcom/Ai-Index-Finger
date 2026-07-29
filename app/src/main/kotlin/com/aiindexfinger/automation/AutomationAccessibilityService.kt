@@ -7,10 +7,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.content.ClipData
 import android.content.ClipboardManager
 import android.graphics.Rect
 import android.graphics.Path
+import android.graphics.Bitmap
+import android.os.Build
+import android.view.Display
 import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
@@ -31,11 +33,13 @@ import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.matches
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.isReadyToRun
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -47,6 +51,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private val runHistoryStore by lazy { RunHistoryStore(this) }
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var workflowJob: Job? = null
+    private var screenCaptureSettleJob: Job? = null
+    private var screenCaptureTimeoutJob: Job? = null
+    private var screenCaptureRequestId = 0L
     private var runningWorkflowName: String? = null
 
     override fun onServiceConnected() {
@@ -67,6 +74,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        handleArmedScreenCapture(event)
+        if (!observationController.isObservationRequested) return
         val packageName = event?.packageName?.toString() ?: return
         if (packageName == applicationContext.packageName) return
         val root = rootInActiveWindow ?: return
@@ -88,11 +97,14 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         currentStepId.value = null
         runningWorkflowId.value = null
         workflowStartedAtMillis.value = null
+        observationController.sourceDisconnected()
+        clearScreenCapture()
         mutableConnected.value = false
         super.onDestroy()
     }
 
     fun startWorkflow(workflow: Workflow): Boolean {
+        if (!workflow.isReadyToRun()) return false
         if (workflowJob?.isActive == true) return false
         workflowJob = serviceScope.launch {
             val startedAtMillis = System.currentTimeMillis()
@@ -117,6 +129,132 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     fun stopWorkflow() {
         workflowJob?.cancel()
+    }
+
+    fun capturePreviousApp(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            screenCaptureState.value = ScreenCaptureState.Error("Screen capture requires Android 11 or newer")
+            return false
+        }
+        if (screenCaptureState.value is ScreenCaptureState.Armed) return false
+        clearScreenCapture()
+        val requestId = ++screenCaptureRequestId
+        screenCaptureState.value = ScreenCaptureState.Armed
+        screenCaptureTimeoutJob = serviceScope.launch {
+            delay(SCREEN_CAPTURE_TIMEOUT_MILLIS)
+            if (requestId == screenCaptureRequestId && screenCaptureState.value is ScreenCaptureState.Armed) {
+                screenCaptureState.value = ScreenCaptureState.Error("Capture timed out. Open the target app and try again.")
+                returnToEditor()
+            }
+        }
+        return true
+    }
+
+    fun clearScreenCapture() {
+        screenCaptureRequestId++
+        screenCaptureSettleJob?.cancel()
+        screenCaptureSettleJob = null
+        screenCaptureTimeoutJob?.cancel()
+        screenCaptureTimeoutJob = null
+        (screenCaptureState.value as? ScreenCaptureState.Ready)?.bitmap?.recycle()
+        screenCaptureState.value = ScreenCaptureState.Idle
+    }
+
+    private fun handleArmedScreenCapture(event: AccessibilityEvent?) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        if (screenCaptureState.value !is ScreenCaptureState.Armed) return
+        val packageName = event?.packageName?.toString() ?: return
+        if (packageName == applicationContext.packageName) return
+        val requestId = screenCaptureRequestId
+        screenCaptureSettleJob?.cancel()
+        screenCaptureSettleJob = serviceScope.launch {
+            delay(SCREEN_CAPTURE_SETTLE_MILLIS)
+            if (requestId != screenCaptureRequestId || screenCaptureState.value !is ScreenCaptureState.Armed) {
+                return@launch
+            }
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        val bitmap = try {
+                            Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
+                                ?.copy(Bitmap.Config.ARGB_8888, false)
+                        } finally {
+                            screenshot.hardwareBuffer.close()
+                        }
+                        if (requestId != screenCaptureRequestId || screenCaptureState.value !is ScreenCaptureState.Armed) {
+                            bitmap?.recycle()
+                            return
+                        }
+                        screenCaptureTimeoutJob?.cancel()
+                        if (bitmap == null) {
+                            screenCaptureState.value = ScreenCaptureState.Error("Could not read the captured screen")
+                        } else {
+                            screenCaptureState.value = ScreenCaptureState.Ready(
+                                bitmap = bitmap,
+                                nodes = snapshotCaptureNodes(),
+                            )
+                        }
+                        returnToEditor()
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        if (requestId != screenCaptureRequestId || screenCaptureState.value !is ScreenCaptureState.Armed) {
+                            return
+                        }
+                        screenCaptureTimeoutJob?.cancel()
+                        screenCaptureState.value = ScreenCaptureState.Error(
+                            "Screen capture failed ($errorCode). Protected screens cannot be captured.",
+                        )
+                        returnToEditor()
+                    }
+                },
+            )
+        }
+    }
+
+    private fun snapshotCaptureNodes(): List<CaptureNode> {
+        var traversalOrder = 0
+        return windows.asSequence()
+            .mapNotNull { it.root }
+            .flatMap { root -> root.depthFirstWithDepth() }
+            .mapNotNull { (node, depth) ->
+                val packageName = node.packageName?.toString() ?: return@mapNotNull null
+                val bounds = Rect().also(node::getBoundsInScreen)
+                CaptureNode(
+                    packageName = packageName,
+                    viewId = node.viewIdResourceName,
+                    text = node.text.nonBlankString(),
+                    contentDescription = node.contentDescription.nonBlankString(),
+                    className = node.className.nonBlankString(),
+                    left = bounds.left,
+                    top = bounds.top,
+                    right = bounds.right,
+                    bottom = bounds.bottom,
+                    depth = depth,
+                    traversalOrder = traversalOrder++,
+                    clickable = node.isClickable,
+                )
+            }
+            .take(MAX_CAPTURE_NODES)
+            .toList()
+    }
+
+    private fun AccessibilityNodeInfo.depthFirstWithDepth(depth: Int = 0): Sequence<Pair<AccessibilityNodeInfo, Int>> =
+        sequence {
+            yield(this@depthFirstWithDepth to depth)
+            for (index in 0 until childCount) {
+                getChild(index)?.let { child -> yieldAll(child.depthFirstWithDepth(depth + 1)) }
+            }
+        }
+
+    private fun returnToEditor() {
+        startActivity(
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+            },
+        )
     }
 
     private fun showRunningNotification(workflowName: String, stepId: String? = null) {
@@ -217,9 +355,10 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
             }
             TextInputMethod.Paste -> {
-                getSystemService(ClipboardManager::class.java)
-                    .setPrimaryClip(ClipData.newPlainText("AI Index Finger", text))
-                node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                val clipboardManager = getSystemService(ClipboardManager::class.java)
+                ClipboardTransaction(AndroidClipboardAdapter(clipboardManager)).paste(text) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                }
             }
         }
     }
@@ -352,12 +491,19 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     companion object {
         private const val MAX_OBSERVED_NODES = 200
+        private const val MAX_CAPTURE_NODES = 1_000
+        private const val SCREEN_CAPTURE_SETTLE_MILLIS = 450L
+        private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
         private const val RUNNING_CHANNEL_ID = "workflow_execution"
         private const val RUNNING_NOTIFICATION_ID = 1001
         private const val TAP_DURATION_MILLIS = 50L
         private val mutableConnected = MutableStateFlow(false)
         val connected = mutableConnected.asStateFlow()
         val observedNodes = MutableStateFlow<List<ObservedNode>>(emptyList())
+        val screenCaptureState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.Idle)
+        private val observationController = AccessibilityObservationController {
+            observedNodes.value = emptyList()
+        }
         val currentStepId = MutableStateFlow<String?>(null)
         val runningWorkflowId = MutableStateFlow<String?>(null)
         val workflowStartedAtMillis = MutableStateFlow<Long?>(null)
@@ -366,7 +512,24 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         @Volatile
         var instance: AutomationAccessibilityService? = null
             private set
+
+        internal fun acquireObservationLease(): AutoCloseable =
+            observationController.acquire()
+
+        fun discardScreenCapture() {
+            instance?.clearScreenCapture() ?: run {
+                (screenCaptureState.value as? ScreenCaptureState.Ready)?.bitmap?.recycle()
+                screenCaptureState.value = ScreenCaptureState.Idle
+            }
+        }
     }
+}
+
+sealed interface ScreenCaptureState {
+    data object Idle : ScreenCaptureState
+    data object Armed : ScreenCaptureState
+    data class Ready(val bitmap: Bitmap, val nodes: List<CaptureNode>) : ScreenCaptureState
+    data class Error(val message: String) : ScreenCaptureState
 }
 
 data class RunOutcome(

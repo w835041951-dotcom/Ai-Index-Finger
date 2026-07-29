@@ -2,8 +2,10 @@ package com.aiindexfinger.data
 
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowState
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class WorkflowFileStoreTest {
@@ -29,6 +31,36 @@ class WorkflowFileStoreTest {
         directory.resolve("workflows.json").writeText("{truncated")
 
         assertEquals(listOf(first), store.load())
+    }
+
+    @Test
+    fun invalidDraftIsPersisted() = withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+        val draft = Workflow(
+            id = "draft",
+            name = "Draft",
+            steps = emptyList(),
+            state = WorkflowState.Draft,
+        )
+
+        store.save(listOf(draft))
+
+        assertEquals(listOf(draft), store.load())
+    }
+
+    @Test
+    fun invalidReadyWorkflowIsNotPersisted() = withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+        val invalidReady = Workflow(
+            id = "ready",
+            name = "Ready",
+            steps = emptyList(),
+            state = WorkflowState.Ready,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            store.save(listOf(invalidReady))
+        }
     }
 
     private fun workflow(id: String) = Workflow(

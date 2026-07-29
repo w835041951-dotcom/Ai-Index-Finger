@@ -3,6 +3,7 @@ package com.aiindexfinger.data
 import android.content.ContentResolver
 import android.net.Uri
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.WorkflowValidator
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -61,8 +62,10 @@ object WorkflowTransferCodec {
         require(workflow.schemaVersion <= Workflow.CURRENT_SCHEMA_VERSION) {
             "Workflow schema ${workflow.schemaVersion} is newer than this app supports"
         }
-        val issue = WorkflowValidator.validate(workflow).firstOrNull()
-        require(issue == null) { issue?.message ?: "Workflow is invalid" }
+        if (workflow.state == WorkflowState.Ready) {
+            val issue = WorkflowValidator.validate(workflow).firstOrNull()
+            require(issue == null) { issue?.message ?: "Ready workflow is invalid" }
+        }
     }
 }
 

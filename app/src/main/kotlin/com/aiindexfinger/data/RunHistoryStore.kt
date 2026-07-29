@@ -73,6 +73,7 @@ fun RunResult.toRunRecord(
     finishedAtMillis: Long,
 ): RunRecord {
     val failed = this as? RunResult.Failed
+    val notReady = this as? RunResult.NotReady
     return RunRecord(
         id = UUID.randomUUID().toString(),
         workflowId = workflow.id,
@@ -83,9 +84,10 @@ fun RunResult.toRunRecord(
             RunResult.Completed -> RunStatus.Completed
             RunResult.Cancelled -> RunStatus.Cancelled
             RunResult.AlreadyRunning -> RunStatus.Rejected
+            is RunResult.NotReady -> RunStatus.Rejected
             is RunResult.Failed -> RunStatus.Failed
         },
         failedStepId = failed?.stepId,
-        failureMessage = failed?.message,
+        failureMessage = failed?.message ?: notReady?.message,
     )
 }

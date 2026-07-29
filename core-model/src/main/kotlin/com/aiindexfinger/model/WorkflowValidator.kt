@@ -5,12 +5,23 @@ data class ValidationIssue(
     val message: String,
 )
 
+data class WorkflowValidationSummary(
+    val issues: List<ValidationIssue>,
+    val definedVariables: Set<String>,
+    val referencedVariables: Set<String>,
+    val definedStepCount: Int,
+    val maximumNestingDepth: Int,
+    val maximumStepExecutions: Long,
+)
+
 object WorkflowValidator {
-    fun validate(workflow: Workflow): List<ValidationIssue> {
+    fun validate(workflow: Workflow): List<ValidationIssue> = inspect(workflow).issues
+
+    fun inspect(workflow: Workflow): WorkflowValidationSummary {
         val issues = mutableListOf<ValidationIssue>()
         if (workflow.steps.isEmpty()) {
             issues += ValidationIssue(null, "Workflow has no steps")
-            return issues
+            return WorkflowValidationSummary(issues, emptySet(), emptySet(), 0, 0, 0)
         }
 
         val seenStepIds = mutableSetOf<String>()
@@ -29,7 +40,14 @@ object WorkflowValidator {
                 "Workflow can execute more than ${WorkflowLimits.MAX_EXECUTED_STEPS} steps",
             )
         }
-        return issues
+        return WorkflowValidationSummary(
+            issues = issues,
+            definedVariables = state.variableDefinitions,
+            referencedVariables = state.variableReferences,
+            definedStepCount = state.definedSteps,
+            maximumNestingDepth = state.maximumNestingDepth,
+            maximumStepExecutions = estimatedExecutions,
+        )
     }
 
     private fun validateSteps(
@@ -40,6 +58,7 @@ object WorkflowValidator {
         state: ValidationState,
         depth: Int,
     ): Long {
+        state.maximumNestingDepth = maxOf(state.maximumNestingDepth, depth)
         if (depth > WorkflowLimits.MAX_NESTING_DEPTH) {
             if (!state.reportedDepthLimit) {
                 issues += ValidationIssue(null, "Workflow nesting exceeds ${WorkflowLimits.MAX_NESTING_DEPTH} levels")
@@ -62,60 +81,74 @@ object WorkflowValidator {
 
             val nestedExecutions = when (step) {
                 is Step.SetVariable -> {
-                    step.value.referencedVariables()
+                    val references = step.value.referencedVariables()
+                    state.variableReferences += references
+                    references
                         .filterNot { it in definedVariables }
                         .forEach { variableName ->
                             issues += ValidationIssue(step.id, "Variable '$variableName' is not defined")
                         }
                     definedVariables += step.name
+                    state.variableDefinitions += step.name
                     0L
                 }
                 is Step.ReadNodeText -> {
                     definedVariables += step.variableName
+                    state.variableDefinitions += step.variableName
                     0L
                 }
                 is Step.InputText -> {
                     val variableName = step.variableName
+                    if (variableName != null) state.variableReferences += variableName
                     if (variableName != null && variableName !in definedVariables) {
                         issues += ValidationIssue(step.id, "Variable '$variableName' is not defined")
                     }
                     0L
                 }
                 is Step.IfElse -> {
-                    validateCondition(step.id, step.condition, definedVariables, issues)
-                    maxOf(
-                        validateSteps(
-                            step.whenTrue,
-                            definedVariables.toMutableSet(),
-                            seenStepIds,
-                            issues,
-                            state,
-                            depth + 1,
-                        ),
-                        validateSteps(
-                            step.whenFalse,
-                            definedVariables.toMutableSet(),
-                            seenStepIds,
-                            issues,
-                            state,
-                            depth + 1,
-                        ),
-                    )
-                }
-                is Step.Repeat -> saturatingMultiply(
-                    validateSteps(
-                        step.steps,
-                        definedVariables.toMutableSet(),
+                    validateCondition(step.id, step.condition, definedVariables, issues, state)
+                    val trueVariables = definedVariables.toMutableSet()
+                    val falseVariables = definedVariables.toMutableSet()
+                    val trueExecutions = validateSteps(
+                        step.whenTrue,
+                        trueVariables,
                         seenStepIds,
                         issues,
                         state,
                         depth + 1,
-                    ),
-                    step.times.toLong(),
-                )
+                    )
+                    val falseExecutions = validateSteps(
+                        step.whenFalse,
+                        falseVariables,
+                        seenStepIds,
+                        issues,
+                        state,
+                        depth + 1,
+                    )
+                    definedVariables += trueVariables.intersect(falseVariables)
+                    maxOf(trueExecutions, falseExecutions)
+                }
+                is Step.Repeat -> {
+                    val repeatedVariables = definedVariables.toMutableSet()
+                    val repeatedExecutions = validateSteps(
+                        step.steps,
+                        repeatedVariables,
+                        seenStepIds,
+                        issues,
+                        state,
+                        depth + 1,
+                    )
+                    definedVariables += repeatedVariables
+                    saturatingMultiply(repeatedExecutions, step.times.toLong())
+                }
                 else -> 0L
             }
-            estimatedExecutions = saturatingAdd(estimatedExecutions, saturatingAdd(1, nestedExecutions))
+            val attempts = (step.failurePolicy as? FailurePolicy.Retry)?.attempts?.plus(1) ?: 1
+            val maximumStepExecutions = saturatingMultiply(
+                saturatingAdd(1, nestedExecutions),
+                attempts.toLong(),
+            )
+            estimatedExecutions = saturatingAdd(estimatedExecutions, maximumStepExecutions)
         }
         return estimatedExecutions
     }
@@ -125,12 +158,16 @@ object WorkflowValidator {
         condition: Condition,
         definedVariables: Set<String>,
         issues: MutableList<ValidationIssue>,
+        state: ValidationState,
     ) {
         if (condition is Condition.Equals) {
-            listOf(condition.left, condition.right)
-                .filterIsInstance<Value.Variable>()
-                .filterNot { it.name in definedVariables }
-                .forEach { issues += ValidationIssue(stepId, "Variable '${it.name}' is not defined") }
+            val references = listOf(condition.left, condition.right)
+                .flatMap { it.referencedVariables() }
+                .toSet()
+            state.variableReferences += references
+            references
+                .filterNot { it in definedVariables }
+                .forEach { issues += ValidationIssue(stepId, "Variable '$it' is not defined") }
         }
     }
 
@@ -153,7 +190,20 @@ object WorkflowValidator {
 
     private data class ValidationState(
         var definedSteps: Int = 0,
+        var maximumNestingDepth: Int = 0,
         var reportedDepthLimit: Boolean = false,
         var reportedStepLimit: Boolean = false,
+        val variableDefinitions: MutableSet<String> = linkedSetOf(),
+        val variableReferences: MutableSet<String> = linkedSetOf(),
     )
 }
+
+fun Workflow.effectiveState(): WorkflowState =
+    state ?: if (WorkflowValidator.validate(this).isEmpty()) WorkflowState.Ready else WorkflowState.Draft
+
+fun Workflow.readinessIssues(): List<ValidationIssue> = when (effectiveState()) {
+    WorkflowState.Draft -> listOf(ValidationIssue(null, "Workflow is saved as a draft"))
+    WorkflowState.Ready -> WorkflowValidator.validate(this)
+}
+
+fun Workflow.isReadyToRun(): Boolean = readinessIssues().isEmpty()

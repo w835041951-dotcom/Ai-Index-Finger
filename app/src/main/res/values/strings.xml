@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">AI Index Finger</string>
     <string name="accessibility_service_label">AI Index Finger automation</string>
-    <string name="accessibility_service_description">Finds user-selected interface elements and performs workflow actions after explicit setup.</string>
+    <string name="accessibility_service_description">Finds user-selected interface elements, captures a screen only when requested for visual selection, and performs workflow actions after explicit setup.</string>
 </resources>

@@ -2,6 +2,8 @@ package com.aiindexfinger.data
 
 import android.content.Context
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowState
+import com.aiindexfinger.model.WorkflowValidator
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -29,6 +31,10 @@ internal class WorkflowFileStore(directory: File) {
     }
 
     fun save(workflows: List<Workflow>) {
+        workflows.filter { it.state == WorkflowState.Ready }.forEach { workflow ->
+            val issue = WorkflowValidator.validate(workflow).firstOrNull()
+            require(issue == null) { issue?.message ?: "Ready workflow is invalid" }
+        }
         val content = json.encodeToString(ListSerializer(Workflow.serializer()), workflows)
         if (decode(file) != null) {
             Files.copy(file.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING)

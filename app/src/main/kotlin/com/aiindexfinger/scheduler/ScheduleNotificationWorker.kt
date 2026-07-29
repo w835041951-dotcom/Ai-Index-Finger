@@ -8,6 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.net.Uri
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import com.aiindexfinger.MainActivity
@@ -34,11 +37,12 @@ class ScheduleNotificationWorker(
         )
         val openAppIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            data = Uri.parse(scheduleIntentData(workflowId))
             putExtra(EXTRA_WORKFLOW_ID, workflowId)
         }
         val pendingIntent = PendingIntent.getActivity(
             applicationContext,
-            workflowId.hashCode(),
+            0,
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -49,7 +53,7 @@ class ScheduleNotificationWorker(
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .build()
-        notificationManager.notify(workflowId.hashCode(), notification)
+        notificationManager.notify(workflowId, SCHEDULE_NOTIFICATION_ID, notification)
         return Result.success()
     }
 
@@ -58,5 +62,10 @@ class ScheduleNotificationWorker(
         const val KEY_WORKFLOW_NAME = "workflow_name"
         const val EXTRA_WORKFLOW_ID = "scheduled_workflow_id"
         private const val CHANNEL_ID = "workflow_schedules"
+        private const val SCHEDULE_NOTIFICATION_ID = 1
     }
 }
+
+internal fun scheduleIntentData(workflowId: String): String =
+    "aiindexfinger://schedule/" + Base64.getUrlEncoder().withoutPadding()
+        .encodeToString(workflowId.toByteArray(StandardCharsets.UTF_8))

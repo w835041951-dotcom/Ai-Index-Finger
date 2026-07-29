@@ -8,6 +8,8 @@ import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowState
+import com.aiindexfinger.model.effectiveState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -158,11 +160,39 @@ class WorkflowTransferCodecTest {
     }
 
     @Test
-    fun emptyWorkflowIsRejected() {
+    fun legacyEmptyWorkflowImportsAsDraft() {
         val invalid = """{"schemaVersion":1,"id":"empty","name":"Empty","steps":[]}"""
 
+        assertEquals(WorkflowState.Draft, WorkflowTransferCodec.decode(invalid).effectiveState())
+    }
+
+    @Test
+    fun explicitInvalidDraftRoundTrips() {
+        val draft = Workflow(
+            id = "draft",
+            name = "Draft",
+            steps = emptyList(),
+            state = WorkflowState.Draft,
+        )
+
+        assertEquals(draft, WorkflowTransferCodec.decode(WorkflowTransferCodec.encode(draft)))
+        assertEquals(listOf(draft), WorkflowTransferCodec.decodeMany(WorkflowTransferCodec.encodeBundle(listOf(draft))))
+    }
+
+    @Test
+    fun explicitInvalidReadyWorkflowIsRejected() {
+        val invalidReady = Workflow(
+            id = "ready",
+            name = "Ready",
+            steps = emptyList(),
+            state = WorkflowState.Ready,
+        )
+
         assertThrows(IllegalArgumentException::class.java) {
-            WorkflowTransferCodec.decode(invalid)
+            WorkflowTransferCodec.decode(WorkflowTransferCodec.encode(invalidReady))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            WorkflowTransferCodec.encodeBundle(listOf(invalidReady))
         }
     }
 

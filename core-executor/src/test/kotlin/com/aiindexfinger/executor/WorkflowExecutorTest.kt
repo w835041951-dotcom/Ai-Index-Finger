@@ -21,6 +21,42 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
 class WorkflowExecutorTest {
+    @Test
+    fun `draft workflow is rejected before driver actions`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "draft",
+            name = "Draft",
+            steps = listOf(Step.Click("click", selector)),
+            state = com.aiindexfinger.model.WorkflowState.Draft,
+        )
+
+        assertEquals(
+            RunResult.NotReady("Workflow is saved as a draft"),
+            WorkflowExecutor(driver).run(workflow),
+        )
+        assertEquals(0, driver.clickCount)
+    }
+
+    @Test
+    fun `invalid ready workflow is rejected before driver actions`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "invalid-ready",
+            name = "Invalid ready",
+            steps = listOf(
+                Step.Click("duplicate", selector),
+                Step.Click("duplicate", selector),
+            ),
+            state = com.aiindexfinger.model.WorkflowState.Ready,
+        )
+
+        assertEquals(
+            RunResult.NotReady("Step ID is duplicated"),
+            WorkflowExecutor(driver).run(workflow),
+        )
+        assertEquals(0, driver.clickCount)
+    }
     private val selector = NodeSelector(
         packageName = "com.example.target",
         viewId = "com.example.target:id/submit",
