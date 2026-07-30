@@ -1,6 +1,7 @@
 package com.aiindexfinger.automation
 
 import com.aiindexfinger.model.SelectorUse
+import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.ValidationIssue
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
@@ -18,14 +19,10 @@ enum class NotificationPreflightStatus {
 
 enum class PreflightRecoveryAction {
     SetUpAutomation,
-    GrantNotifications,
 }
 
 fun WorkflowPreflightReport.recoveryActions(): List<PreflightRecoveryAction> = buildList {
     if (!accessibilityConnected) add(PreflightRecoveryAction.SetUpAutomation)
-    if (notificationStatus == NotificationPreflightStatus.Denied) {
-        add(PreflightRecoveryAction.GrantNotifications)
-    }
 }
 
 data class LaunchTargetCheck(
@@ -48,6 +45,8 @@ data class WorkflowPreflightReport(
     val notificationStatus: NotificationPreflightStatus,
     val launchTargets: List<LaunchTargetCheck>,
     val selectors: List<SelectorPreflightCheck>,
+    val requiresImageCapture: Boolean,
+    val imageCaptureSupported: Boolean,
 ) {
     val validationIssues: List<ValidationIssue>
         get() = validation.issues
@@ -59,6 +58,7 @@ fun buildWorkflowPreflightReport(
     notificationStatus: NotificationPreflightStatus,
     isLaunchable: (String) -> Boolean,
     countMatches: (com.aiindexfinger.model.NodeSelector) -> Int,
+    imageCaptureSupported: Boolean = true,
 ): WorkflowPreflightReport = WorkflowPreflightReport(
     state = workflow.effectiveState(),
     validation = WorkflowValidator.inspect(workflow),
@@ -73,4 +73,13 @@ fun buildWorkflowPreflightReport(
             matchCount = if (accessibilityConnected) countMatches(use.selector) else null,
         )
     },
+    requiresImageCapture = workflow.steps.any(Step::containsImageClick),
+    imageCaptureSupported = imageCaptureSupported,
 )
+
+private fun Step.containsImageClick(): Boolean = when (this) {
+    is Step.ImageClick -> true
+    is Step.Repeat -> steps.any(Step::containsImageClick)
+    is Step.IfElse -> (whenTrue + whenFalse).any(Step::containsImageClick)
+    else -> false
+}

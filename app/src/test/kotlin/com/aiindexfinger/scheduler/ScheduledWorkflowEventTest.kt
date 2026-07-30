@@ -7,6 +7,17 @@ import org.junit.Test
 
 class ScheduledWorkflowEventTest {
     @Test
+    fun `finds reminders that fired without being consumed`() {
+        val schedules = listOf(
+            WorkflowSchedule("past", "Past", 99, ScheduleStatus.Missed),
+            WorkflowSchedule("now", "Now", 100),
+            WorkflowSchedule("future", "Future", 101),
+        )
+
+        assertEquals(listOf(schedules[0]), missedSchedules(schedules))
+    }
+
+    @Test
     fun `publishes the same workflow as distinct consumable events`() {
         val controller = ScheduledWorkflowEventController()
 

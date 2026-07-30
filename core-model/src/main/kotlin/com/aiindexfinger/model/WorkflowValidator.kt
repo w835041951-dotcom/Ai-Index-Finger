@@ -81,6 +81,9 @@ object WorkflowValidator {
 
             val nestedExecutions = when (step) {
                 is Step.SetVariable -> {
+                    if (step.name.isBlank()) {
+                        issues += ValidationIssue(step.id, "Variable name must not be blank")
+                    }
                     val references = step.value.referencedVariables()
                     state.variableReferences += references
                     references
@@ -95,6 +98,12 @@ object WorkflowValidator {
                 is Step.ReadNodeText -> {
                     definedVariables += step.variableName
                     state.variableDefinitions += step.variableName
+                    0L
+                }
+                is Step.Delay -> {
+                    if (step.durationMillis < 0) {
+                        issues += ValidationIssue(step.id, "Delay duration must not be negative")
+                    }
                     0L
                 }
                 is Step.InputText -> {

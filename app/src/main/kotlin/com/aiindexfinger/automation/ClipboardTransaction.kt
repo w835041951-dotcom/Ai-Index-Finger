@@ -46,6 +46,7 @@ internal class ClipboardTransaction<T>(
 
 internal class AndroidClipboardAdapter(
     private val clipboardManager: ClipboardManager,
+    private val clipLabel: String,
 ) : ClipboardAdapter<ClipData> {
     override fun capture(): ClipboardSnapshot<ClipData> {
         if (!clipboardManager.hasPrimaryClip()) return ClipboardSnapshot.Empty
@@ -54,7 +55,7 @@ internal class AndroidClipboardAdapter(
     }
 
     override fun temporaryClip(text: String, token: String): ClipData =
-        ClipData.newPlainText(CLIP_LABEL, text).apply {
+        ClipData.newPlainText(clipLabel, text).apply {
             description.extras = PersistableBundle().apply {
                 putString(CLIP_TOKEN_KEY, token)
             }
@@ -71,12 +72,11 @@ internal class AndroidClipboardAdapter(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             clipboardManager.clearPrimaryClip()
         } else {
-            clipboardManager.setPrimaryClip(ClipData.newPlainText(CLIP_LABEL, ""))
+            clipboardManager.setPrimaryClip(ClipData.newPlainText(clipLabel, ""))
         }
     }
 
     private companion object {
-        const val CLIP_LABEL = "AI Index Finger temporary input"
         const val CLIP_TOKEN_KEY = "com.aiindexfinger.clipboard.OPERATION_TOKEN"
     }
 }

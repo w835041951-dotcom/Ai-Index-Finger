@@ -31,4 +31,14 @@ class StepExecutionSettingsTest {
             Step.Delay("delay", 100).withExecutionSettings(0, FailurePolicy.Stop)
         }
     }
+
+    @Test
+    fun `updates image click settings without changing template`() {
+        val original = Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24)
+
+        assertEquals(
+            original.copy(timeoutMillis = 3_000, failurePolicy = FailurePolicy.Continue),
+            original.withExecutionSettings(3_000, FailurePolicy.Continue),
+        )
+    }
 }

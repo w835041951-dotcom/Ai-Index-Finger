@@ -18,7 +18,7 @@ class WorkflowScheduler(
     private val store = ScheduleStore(appContext)
 
     fun schedule(workflow: Workflow, targetEpochMillis: Long): List<WorkflowSchedule> {
-        require(workflow.isReadyToRun()) { "Only ready workflows can be scheduled" }
+        require(workflow.isReadyToRun()) { "只能计划就绪状态的工作流" }
         val delayMillis = scheduleDelayMillis(targetEpochMillis, currentTimeMillis())
         val input = Data.Builder()
             .putString(ScheduleNotificationWorker.KEY_WORKFLOW_ID, workflow.id)
@@ -52,9 +52,9 @@ class WorkflowScheduler(
 }
 
 internal fun scheduleDelayMillis(targetEpochMillis: Long, currentEpochMillis: Long): Long {
-    require(targetEpochMillis > currentEpochMillis) { "Schedule time must be in the future" }
+    require(targetEpochMillis > currentEpochMillis) { "计划时间必须晚于当前时间" }
     val delayMillis = targetEpochMillis - currentEpochMillis
-    require(delayMillis in 1..MAX_SCHEDULE_DELAY_MILLIS) { "Schedule time must be within 1 year" }
+    require(delayMillis in 1..MAX_SCHEDULE_DELAY_MILLIS) { "计划时间必须在一年以内" }
     return delayMillis
 }
 

@@ -13,6 +13,7 @@ fun Workflow.matchesSearch(query: String): Boolean {
 private fun Step.addSearchTerms(terms: MutableList<String>) {
     terms += when (this) {
         is Step.Click -> "click element"
+        is Step.ImageClick -> "click image screenshot $packageName"
         is Step.Delay -> "wait delay"
         is Step.GlobalAction -> "global ${action.name}"
         is Step.IfElse -> "if condition"
@@ -29,6 +30,7 @@ private fun Step.addSearchTerms(terms: MutableList<String>) {
     }
     when (this) {
         is Step.Click -> selector.addSearchTerms(terms)
+        is Step.ImageClick -> Unit
         is Step.IfElse -> {
             condition.addSearchTerms(terms)
             (whenTrue + whenFalse).forEach { it.addSearchTerms(terms) }

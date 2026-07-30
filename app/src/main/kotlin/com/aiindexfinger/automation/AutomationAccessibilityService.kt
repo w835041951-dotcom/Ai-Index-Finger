@@ -1,5 +1,6 @@
 package com.aiindexfinger.automation
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
@@ -8,17 +9,22 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.ClipboardManager
+import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.graphics.Path
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.view.Display
 import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import androidx.annotation.RequiresApi
 import com.aiindexfinger.MainActivity
+import com.aiindexfinger.R
 import com.aiindexfinger.executor.AutomationDriver
+import com.aiindexfinger.executor.ImageClickResult
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.RunState
 import com.aiindexfinger.executor.WorkflowExecutor
@@ -28,6 +34,7 @@ import com.aiindexfinger.data.toRunRecord
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.ScrollDirection
+import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.SystemAction
 import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.TextInputMethod
@@ -38,12 +45,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import java.util.Base64
 import kotlin.coroutines.resume
 
 class AutomationAccessibilityService : AccessibilityService(), AutomationDriver {
@@ -93,7 +104,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     override fun onDestroy() {
         if (instance === this) instance = null
         serviceScope.cancel()
-        notificationManager.cancel(RUNNING_NOTIFICATION_ID)
+        cancelRunningNotification()
         currentStepId.value = null
         runningWorkflowId.value = null
         workflowStartedAtMillis.value = null
@@ -121,7 +132,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 runningWorkflowId.value = null
                 workflowStartedAtMillis.value = null
                 runningWorkflowName = null
-                notificationManager.cancel(RUNNING_NOTIFICATION_ID)
+                cancelRunningNotification()
             }
         }
         return true
@@ -133,7 +144,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     fun capturePreviousApp(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            screenCaptureState.value = ScreenCaptureState.Error("Screen capture requires Android 11 or newer")
+            screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_requires_android_11))
             return false
         }
         if (screenCaptureState.value is ScreenCaptureState.Armed) return false
@@ -143,7 +154,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         screenCaptureTimeoutJob = serviceScope.launch {
             delay(SCREEN_CAPTURE_TIMEOUT_MILLIS)
             if (requestId == screenCaptureRequestId && screenCaptureState.value is ScreenCaptureState.Armed) {
-                screenCaptureState.value = ScreenCaptureState.Error("Capture timed out. Open the target app and try again.")
+                screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_timed_out))
                 returnToEditor()
             }
         }
@@ -189,7 +200,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                         }
                         screenCaptureTimeoutJob?.cancel()
                         if (bitmap == null) {
-                            screenCaptureState.value = ScreenCaptureState.Error("Could not read the captured screen")
+                            screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_unreadable))
                         } else {
                             screenCaptureState.value = ScreenCaptureState.Ready(
                                 bitmap = bitmap,
@@ -205,7 +216,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                         }
                         screenCaptureTimeoutJob?.cancel()
                         screenCaptureState.value = ScreenCaptureState.Error(
-                            "Screen capture failed ($errorCode). Protected screens cannot be captured.",
+                            getString(R.string.capture_failed, errorCode),
                         )
                         returnToEditor()
                     }
@@ -258,10 +269,11 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     }
 
     private fun showRunningNotification(workflowName: String, stepId: String? = null) {
+        if (!canPostNotifications()) return
         notificationManager.createNotificationChannel(
             NotificationChannel(
                 RUNNING_CHANNEL_ID,
-                "Workflow execution",
+                getString(R.string.running_notification_channel),
                 NotificationManager.IMPORTANCE_LOW,
             ),
         )
@@ -283,8 +295,11 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         )
         val notification = android.app.Notification.Builder(this, RUNNING_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("Running $workflowName")
-            .setContentText(stepId?.let { "Current step: $it" } ?: "Preparing workflow")
+            .setContentTitle(getString(R.string.running_notification_title, workflowName))
+            .setContentText(
+                stepId?.let { getString(R.string.running_notification_step, it) }
+                    ?: getString(R.string.running_notification_preparing),
+            )
             .setContentIntent(openAppPendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -292,13 +307,21 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             .addAction(
                 android.app.Notification.Action.Builder(
                     Icon.createWithResource(this, android.R.drawable.ic_media_pause),
-                    "Stop",
+                    getString(R.string.stop),
                     stopPendingIntent,
                 ).build(),
             )
             .build()
         notificationManager.notify(RUNNING_NOTIFICATION_ID, notification)
     }
+
+    private fun cancelRunningNotification() {
+        if (canPostNotifications()) notificationManager.cancel(RUNNING_NOTIFICATION_ID)
+    }
+
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+        PackageManager.PERMISSION_GRANTED
 
     private val notificationManager: NotificationManager
         get() = getSystemService(NotificationManager::class.java)
@@ -316,6 +339,87 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             .firstOrNull { it.isClickable }
             ?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             ?: false
+    }
+
+    override suspend fun clickImage(step: Step.ImageClick): ImageClickResult {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return ImageClickResult.Unsupported
+        if (rootInActiveWindow?.packageName?.toString() != step.packageName) {
+            return ImageClickResult.WrongPackage
+        }
+        val template = decodeImageTemplate(step) ?: return ImageClickResult.MissingOrInvalidTemplate
+        val screen = captureBitmapOnce() ?: run {
+            template.recycle()
+            return ImageClickResult.CaptureFailed
+        }
+        return try {
+            when (val match = withContext(Dispatchers.Default) {
+                val matchingContext = currentCoroutineContext()
+                matchTemplate(
+                    screen.toLumaImage(),
+                    template.toLumaImage(),
+                    step.minimumScorePermille,
+                    step.ambiguityMarginPermille,
+                    checkCancellation = { matchingContext.ensureActive() },
+                )
+            }) {
+                is TemplateMatchResult.Unique -> if (tap(match.centerX, match.centerY)) {
+                    ImageClickResult.Clicked(match.scorePermille)
+                } else {
+                    ImageClickResult.GestureFailed
+                }
+                TemplateMatchResult.NoMatch -> ImageClickResult.NoMatch
+                TemplateMatchResult.Ambiguous -> ImageClickResult.Ambiguous
+            }
+        } finally {
+            screen.recycle()
+            template.recycle()
+        }
+    }
+
+    private fun decodeImageTemplate(step: Step.ImageClick): Bitmap? = runCatching {
+        val bytes = Base64.getDecoder().decode(step.templatePngBase64)
+        if (bytes.size > MAX_TEMPLATE_PNG_BYTES) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth != step.templateWidth || bounds.outHeight != step.templateHeight) return null
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?.takeIf { it.width == step.templateWidth && it.height == step.templateHeight }
+    }.getOrNull()
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun captureBitmapOnce(): Bitmap? = suspendCancellableCoroutine { continuation ->
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(screenshot: ScreenshotResult) {
+                    val bitmap = try {
+                        Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, screenshot.colorSpace)
+                            ?.copy(Bitmap.Config.ARGB_8888, false)
+                    } finally {
+                        screenshot.hardwareBuffer.close()
+                    }
+                    if (continuation.isActive) continuation.resume(bitmap) else bitmap?.recycle()
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            },
+        )
+    }
+
+    private fun Bitmap.toLumaImage(): LumaImage {
+        val colors = IntArray(width * height)
+        getPixels(colors, 0, width, 0, 0, width, height)
+        val luma = ByteArray(colors.size)
+        colors.forEachIndexed { index, color ->
+            val red = color shr 16 and 0xff
+            val green = color shr 8 and 0xff
+            val blue = color and 0xff
+            luma[index] = ((red * 77 + green * 150 + blue * 29) shr 8).toByte()
+        }
+        return LumaImage(width, height, luma)
     }
 
     override suspend fun longClick(selector: NodeSelector): Boolean {
@@ -356,7 +460,12 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             }
             TextInputMethod.Paste -> {
                 val clipboardManager = getSystemService(ClipboardManager::class.java)
-                ClipboardTransaction(AndroidClipboardAdapter(clipboardManager)).paste(text) {
+                ClipboardTransaction(
+                    AndroidClipboardAdapter(
+                        clipboardManager,
+                        getString(R.string.temporary_input_clip_label),
+                    ),
+                ).paste(text) {
                     node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
                 }
             }
@@ -494,6 +603,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         private const val MAX_CAPTURE_NODES = 1_000
         private const val SCREEN_CAPTURE_SETTLE_MILLIS = 450L
         private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
+        private const val MAX_TEMPLATE_PNG_BYTES = 96 * 1024
         private const val RUNNING_CHANNEL_ID = "workflow_execution"
         private const val RUNNING_NOTIFICATION_ID = 1001
         private const val TAP_DURATION_MILLIS = 50L

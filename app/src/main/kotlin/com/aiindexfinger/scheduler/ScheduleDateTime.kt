@@ -12,6 +12,6 @@ internal fun localScheduleEpochMillis(
 ): Long {
     val localDateTime = LocalDateTime.of(date, time)
     val validOffsets = zoneId.rules.getValidOffsets(localDateTime)
-    require(validOffsets.isNotEmpty()) { "The selected local time does not exist due to daylight saving time" }
+    require(validOffsets.isNotEmpty()) { "由于夏令时调整，所选本地时间不存在" }
     return localDateTime.atOffset(validOffsets.first()).toInstant().toEpochMilli()
 }

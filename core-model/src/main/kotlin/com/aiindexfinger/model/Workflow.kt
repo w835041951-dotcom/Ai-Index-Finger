@@ -20,7 +20,7 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 13
+        const val CURRENT_SCHEMA_VERSION = 14
     }
 }
 
@@ -57,6 +57,37 @@ sealed interface Step {
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step
+
+    @Serializable
+    @SerialName("image_click")
+    data class ImageClick(
+        override val id: String,
+        val packageName: String,
+        val templatePngBase64: String,
+        val templateWidth: Int,
+        val templateHeight: Int,
+        val minimumScorePermille: Int = 920,
+        val ambiguityMarginPermille: Int = 25,
+        override val timeoutMillis: Long? = null,
+        override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
+    ) : Step {
+        init {
+            require(packageName.isNotBlank()) { "Package name must not be blank" }
+            require(templateWidth in MIN_TEMPLATE_SIZE..MAX_TEMPLATE_SIZE) { "Template width is out of range" }
+            require(templateHeight in MIN_TEMPLATE_SIZE..MAX_TEMPLATE_SIZE) { "Template height is out of range" }
+            require(templatePngBase64.isNotBlank() && templatePngBase64.length <= MAX_TEMPLATE_BASE64_LENGTH) {
+                "Template image is missing or too large"
+            }
+            require(minimumScorePermille in 0..1_000) { "Image match score must be between 0 and 1000" }
+            require(ambiguityMarginPermille in 0..1_000) { "Image ambiguity margin must be between 0 and 1000" }
+        }
+
+        companion object {
+            const val MIN_TEMPLATE_SIZE = 12
+            const val MAX_TEMPLATE_SIZE = 256
+            const val MAX_TEMPLATE_BASE64_LENGTH = 128 * 1024
+        }
+    }
 
     @Serializable
     @SerialName("long_click")

@@ -13,7 +13,14 @@ data class WorkflowSchedule(
     val workflowId: String,
     val workflowName: String,
     val scheduledAtMillis: Long,
+    val status: ScheduleStatus = ScheduleStatus.Pending,
 )
+
+@Serializable
+enum class ScheduleStatus {
+    Pending,
+    Missed,
+}
 
 class ScheduleStore(context: Context) {
     private val file = File(context.filesDir, FILE_NAME)
@@ -37,6 +44,15 @@ class ScheduleStore(context: Context) {
     @Synchronized
     fun remove(workflowId: String): List<WorkflowSchedule> {
         val updated = load().filterNot { it.workflowId == workflowId }
+        save(updated)
+        return updated
+    }
+
+    @Synchronized
+    fun markMissed(workflowId: String): List<WorkflowSchedule> {
+        val updated = load().map { schedule ->
+            if (schedule.workflowId == workflowId) schedule.copy(status = ScheduleStatus.Missed) else schedule
+        }
         save(updated)
         return updated
     }

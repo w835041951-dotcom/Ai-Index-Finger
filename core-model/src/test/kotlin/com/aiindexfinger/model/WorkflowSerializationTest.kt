@@ -3,6 +3,7 @@ package com.aiindexfinger.model
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class WorkflowSerializationTest {
     private val json = Json { prettyPrint = true }
@@ -79,5 +80,38 @@ class WorkflowSerializationTest {
 
         assertEquals(draft, json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), draft)))
         assertEquals(ready, json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), ready)))
+    }
+
+    @Test
+    fun `round trips image click and decodes schema 13 workflows`() {
+        val imageClick = Step.ImageClick(
+            id = "image",
+            packageName = "com.example.target",
+            templatePngBase64 = "aGVsbG8=",
+            templateWidth = 24,
+            templateHeight = 18,
+            minimumScorePermille = 940,
+            ambiguityMarginPermille = 30,
+            timeoutMillis = 4_000,
+            failurePolicy = FailurePolicy.Continue,
+        )
+        val workflow = Workflow(id = "image-workflow", name = "Image", steps = listOf(imageClick))
+        val legacyJson = """{"schemaVersion":13,"id":"legacy","name":"Legacy","steps":[]}"""
+
+        assertEquals(
+            workflow,
+            json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), workflow)),
+        )
+        assertEquals(13, json.decodeFromString(Workflow.serializer(), legacyJson).schemaVersion)
+    }
+
+    @Test
+    fun `rejects invalid image template metadata`() {
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 11, 24)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "x".repeat(Step.ImageClick.MAX_TEMPLATE_BASE64_LENGTH + 1), 24, 24)
+        }
     }
 }

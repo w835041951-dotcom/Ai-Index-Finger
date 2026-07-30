@@ -26,6 +26,7 @@ import kotlinx.coroutines.withTimeout
 interface AutomationDriver {
     suspend fun launchApp(packageName: String): Boolean
     suspend fun click(selector: NodeSelector): Boolean
+    suspend fun clickImage(step: Step.ImageClick): ImageClickResult
     suspend fun longClick(selector: NodeSelector): Boolean
     suspend fun tap(x: Int, y: Int): Boolean
     suspend fun scroll(selector: NodeSelector, direction: ScrollDirection): Boolean
@@ -34,6 +35,17 @@ interface AutomationDriver {
     suspend fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMillis: Long): Boolean
     suspend fun performSystemAction(action: SystemAction): Boolean
     suspend fun nodeExists(selector: NodeSelector): Boolean
+}
+
+sealed interface ImageClickResult {
+    data class Clicked(val scorePermille: Int) : ImageClickResult
+    data object Unsupported : ImageClickResult
+    data object WrongPackage : ImageClickResult
+    data object MissingOrInvalidTemplate : ImageClickResult
+    data object NoMatch : ImageClickResult
+    data object Ambiguous : ImageClickResult
+    data object CaptureFailed : ImageClickResult
+    data object GestureFailed : ImageClickResult
 }
 
 sealed interface RunState {
@@ -123,6 +135,16 @@ class WorkflowExecutor(
     private suspend fun executeStep(step: Step, context: ExecutionContext) {
         when (step) {
             is Step.Click -> check(driver.click(step.selector)) { "Target node was not clickable" }
+            is Step.ImageClick -> when (driver.clickImage(step)) {
+                is ImageClickResult.Clicked -> Unit
+                ImageClickResult.Unsupported -> error("Image click requires Android 11 or newer")
+                ImageClickResult.WrongPackage -> error("The target app is not currently visible")
+                ImageClickResult.MissingOrInvalidTemplate -> error("The image template is missing or invalid")
+                ImageClickResult.NoMatch -> error("The image template was not found")
+                ImageClickResult.Ambiguous -> error("Multiple similar image matches were found")
+                ImageClickResult.CaptureFailed -> error("The current screen could not be captured")
+                ImageClickResult.GestureFailed -> error("The matched image could not be clicked")
+            }
             is Step.Delay -> delay(step.durationMillis)
             is Step.GlobalAction -> check(driver.performSystemAction(step.action)) { "System action failed" }
             is Step.IfElse -> {

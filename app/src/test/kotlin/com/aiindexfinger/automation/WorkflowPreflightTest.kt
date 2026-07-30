@@ -94,7 +94,7 @@ class WorkflowPreflightTest {
     }
 
     @Test
-    fun recoveryActionsOnlyIncludeUnmetServiceAndPermissionRequirements() {
+    fun recoveryActionsOnlyIncludeRequiredAutomationSetup() {
         val workflow = Workflow(
             id = "ready",
             name = "Ready",
@@ -118,12 +118,31 @@ class WorkflowPreflightTest {
         )
 
         assertEquals(
-            listOf(
-                PreflightRecoveryAction.SetUpAutomation,
-                PreflightRecoveryAction.GrantNotifications,
-            ),
+            listOf(PreflightRecoveryAction.SetUpAutomation),
             blocked.recoveryActions(),
         )
         assertTrue(available.recoveryActions().isEmpty())
+    }
+
+    @Test
+    fun imageClickReportsUnsupportedScreenshotCapabilityIncludingNestedSteps() {
+        val imageClick = Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24)
+        val workflow = Workflow(
+            id = "image",
+            name = "Image",
+            steps = listOf(Step.Repeat("repeat", 1, listOf(imageClick))),
+        )
+
+        val report = buildWorkflowPreflightReport(
+            workflow = workflow,
+            accessibilityConnected = true,
+            notificationStatus = NotificationPreflightStatus.NotRequired,
+            isLaunchable = { true },
+            countMatches = { 0 },
+            imageCaptureSupported = false,
+        )
+
+        assertTrue(report.requiresImageCapture)
+        assertFalse(report.imageCaptureSupported)
     }
 }

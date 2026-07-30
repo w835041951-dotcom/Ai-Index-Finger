@@ -394,12 +394,53 @@ class WorkflowExecutorTest {
         assertEquals("Workflow exceeded 3 step executions", result.message)
     }
 
+    @Test
+    fun `image click completes only when driver reports a click`() = runTest {
+        val workflow = imageClickWorkflow()
+
+        assertEquals(
+            RunResult.Completed,
+            WorkflowExecutor(FakeDriver(imageClickResult = ImageClickResult.Clicked(975))).run(workflow),
+        )
+    }
+
+    @Test
+    fun `image click no match and ambiguity fail without coordinate fallback`() = runTest {
+        listOf(
+            ImageClickResult.NoMatch to "The image template was not found",
+            ImageClickResult.Ambiguous to "Multiple similar image matches were found",
+        ).forEach { (driverResult, expectedMessage) ->
+            val driver = FakeDriver(imageClickResult = driverResult)
+
+            val result = WorkflowExecutor(driver).run(imageClickWorkflow())
+
+            assertIs<RunResult.Failed>(result)
+            assertEquals(expectedMessage, result.message)
+            assertEquals(null, driver.lastTap)
+        }
+    }
+
+    private fun imageClickWorkflow() = Workflow(
+        id = "image-click",
+        name = "Image click",
+        steps = listOf(
+            Step.ImageClick(
+                id = "image",
+                packageName = "com.example.target",
+                templatePngBase64 = "a".repeat(16),
+                templateWidth = 12,
+                templateHeight = 12,
+            ),
+        ),
+    )
+
     private class FakeDriver(
         private val clickResult: Boolean = true,
         private val clickGate: CompletableDeferred<Unit>? = null,
         private val failClicksBeforeSuccess: Int = 0,
         private val nodeExistsResult: Boolean = true,
         private val nodeTextResult: String? = "node text",
+        private val imageClickResult: ImageClickResult = ImageClickResult.Clicked(1_000),
     ) : AutomationDriver {
         var clickCount = 0
         var longClickCount = 0
@@ -463,6 +504,8 @@ class WorkflowExecutorTest {
             clickCount++
             return clickResult && clickCount > failClicksBeforeSuccess
         }
+
+        override suspend fun clickImage(step: Step.ImageClick): ImageClickResult = imageClickResult
 
         override suspend fun nodeExists(selector: NodeSelector) = nodeExistsResult
     }

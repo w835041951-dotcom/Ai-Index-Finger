@@ -1,28 +1,20 @@
 package com.aiindexfinger.model
 
-enum class WorkflowStarterTemplate(
-    val title: String,
-    val description: String,
-) {
-    PauseThenHome(
-        title = "Pause, then Home",
-        description = "Wait five seconds, then return to the device Home screen.",
-    ),
-    RepeatWithPause(
-        title = "Repeat with a pause",
-        description = "Run a one-second pause three times and explore nested editing.",
-    ),
-    VariableDecision(
-        title = "Variable and decision",
-        description = "Set a variable and use true and false conditional branches.",
-    ),
+enum class WorkflowStarterTemplate {
+    PauseThenHome,
+    RepeatWithPause,
+    VariableDecision,
 }
 
 object WorkflowStarterTemplates {
-    fun create(template: WorkflowStarterTemplate, newId: () -> String): Workflow = when (template) {
+    fun create(
+        template: WorkflowStarterTemplate,
+        name: String = template.defaultName,
+        newId: () -> String,
+    ): Workflow = when (template) {
         WorkflowStarterTemplate.PauseThenHome -> Workflow(
             id = newId(),
-            name = template.title,
+            name = name,
             state = WorkflowState.Draft,
             steps = listOf(
                 Step.Delay(newId(), 5_000),
@@ -31,7 +23,7 @@ object WorkflowStarterTemplates {
         )
         WorkflowStarterTemplate.RepeatWithPause -> Workflow(
             id = newId(),
-            name = template.title,
+            name = name,
             state = WorkflowState.Draft,
             steps = listOf(
                 Step.Repeat(
@@ -43,7 +35,7 @@ object WorkflowStarterTemplates {
         )
         WorkflowStarterTemplate.VariableDecision -> Workflow(
             id = newId(),
-            name = template.title,
+            name = name,
             state = WorkflowState.Draft,
             steps = listOf(
                 Step.SetVariable(newId(), "mode", Value.Literal("demo")),
@@ -60,3 +52,10 @@ object WorkflowStarterTemplates {
         )
     }
 }
+
+private val WorkflowStarterTemplate.defaultName: String
+    get() = when (this) {
+        WorkflowStarterTemplate.PauseThenHome -> "Pause, then go Home"
+        WorkflowStarterTemplate.RepeatWithPause -> "Repeated pause"
+        WorkflowStarterTemplate.VariableDecision -> "Variable decision"
+    }

@@ -5,6 +5,7 @@ import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -31,6 +32,34 @@ class WorkflowFileStoreTest {
         directory.resolve("workflows.json").writeText("{truncated")
 
         assertEquals(listOf(first), store.load())
+        assertEquals(WorkflowLoadResult.RecoveredFromBackup(listOf(first)), store.loadDetailed())
+    }
+
+    @Test
+    fun missingFilesAreDistinguishedFromCorruptFiles() = withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+
+        assertEquals(WorkflowLoadResult.Missing, store.loadDetailed())
+
+        directory.resolve("workflows.json").writeText("{truncated")
+        directory.resolve("workflows.backup.json").writeText("also invalid")
+
+        assertTrue(store.loadDetailed() is WorkflowLoadResult.Corrupt)
+        assertThrows(IllegalStateException::class.java) {
+            store.save(listOf(workflow("replacement")))
+        }
+        assertEquals("{truncated", directory.resolve("workflows.json").readText())
+    }
+
+    @Test
+    fun futureSchemaIsProtectedFromOverwrite() = withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+        directory.resolve("workflows.json").writeText(
+            """[{"schemaVersion":999,"id":"future","name":"Future","steps":[],"futureField":true}]""",
+        )
+
+        assertTrue(store.loadDetailed() is WorkflowLoadResult.UnsupportedVersion)
+        assertThrows(IllegalStateException::class.java) { store.save(emptyList()) }
     }
 
     @Test

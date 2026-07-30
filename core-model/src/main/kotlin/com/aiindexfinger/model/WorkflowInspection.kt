@@ -33,6 +33,7 @@ private fun MutableList<SelectorUse>.collectSelectorUses(steps: List<Step>) {
     steps.forEach { step ->
         when (step) {
             is Step.Click -> add(SelectorUse(step.id, SelectorRole.Click, step.selector))
+            is Step.ImageClick -> Unit
             is Step.LongClick -> add(SelectorUse(step.id, SelectorRole.LongClick, step.selector))
             is Step.InputText -> add(SelectorUse(step.id, SelectorRole.InputText, step.selector))
             is Step.ReadNodeText -> add(SelectorUse(step.id, SelectorRole.ReadNodeText, step.selector))
@@ -55,6 +56,7 @@ private fun MutableSet<String>.collectLaunchPackages(steps: List<Step>) {
     steps.forEach { step ->
         when (step) {
             is Step.LaunchApp -> add(step.packageName)
+            is Step.ImageClick -> add(step.packageName)
             is Step.IfElse -> {
                 collectLaunchPackages(step.whenTrue)
                 collectLaunchPackages(step.whenFalse)

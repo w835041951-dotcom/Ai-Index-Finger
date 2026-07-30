@@ -28,9 +28,9 @@ object WorkflowTransferCodec {
     fun encode(workflow: Workflow): String = json.encodeToString(Workflow.serializer(), workflow)
 
     fun encodeBundle(workflows: List<Workflow>): String {
-        require(workflows.size <= MAX_BUNDLE_WORKFLOWS) { "Bundle contains too many workflows" }
+        require(workflows.size <= MAX_BUNDLE_WORKFLOWS) { "工作流包包含的工作流过多" }
         require(workflows.map { it.id }.distinct().size == workflows.size) {
-            "Bundle contains duplicate workflow IDs"
+            "工作流包包含重复的工作流 ID"
         }
         workflows.forEach(::validate)
         return json.encodeToString(WorkflowBundle.serializer(), WorkflowBundle(workflows = workflows))
@@ -44,15 +44,15 @@ object WorkflowTransferCodec {
 
     fun decodeMany(content: String): List<Workflow> {
         val root = json.parseToJsonElement(content)
-        val objectRoot = root as? JsonObject ?: error("Workflow file must contain a JSON object")
+        val objectRoot = root as? JsonObject ?: error("工作流文件必须包含 JSON 对象")
         if ("workflows" !in objectRoot) return listOf(decode(content))
         val bundle = json.decodeFromJsonElement(WorkflowBundle.serializer(), objectRoot)
         require(bundle.formatVersion <= CURRENT_BUNDLE_FORMAT_VERSION) {
-            "Bundle format ${bundle.formatVersion} is newer than this app supports"
+            "工作流包格式 ${bundle.formatVersion} 高于此应用支持的版本"
         }
-        require(bundle.workflows.size <= MAX_BUNDLE_WORKFLOWS) { "Bundle contains too many workflows" }
+        require(bundle.workflows.size <= MAX_BUNDLE_WORKFLOWS) { "工作流包包含的工作流过多" }
         require(bundle.workflows.map { it.id }.distinct().size == bundle.workflows.size) {
-            "Bundle contains duplicate workflow IDs"
+            "工作流包包含重复的工作流 ID"
         }
         bundle.workflows.forEach(::validate)
         return bundle.workflows
@@ -60,11 +60,11 @@ object WorkflowTransferCodec {
 
     private fun validate(workflow: Workflow) {
         require(workflow.schemaVersion <= Workflow.CURRENT_SCHEMA_VERSION) {
-            "Workflow schema ${workflow.schemaVersion} is newer than this app supports"
+            "工作流架构版本 ${workflow.schemaVersion} 高于此应用支持的版本"
         }
         if (workflow.state == WorkflowState.Ready) {
             val issue = WorkflowValidator.validate(workflow).firstOrNull()
-            require(issue == null) { issue?.message ?: "Ready workflow is invalid" }
+            require(issue == null) { issue?.message ?: "就绪工作流无效" }
         }
     }
 }
@@ -82,7 +82,7 @@ class WorkflowTransfer(
 
     private fun writeContent(uri: Uri, content: String) {
         val output = contentResolver.openOutputStream(uri, "wt")
-            ?: error("The selected file cannot be opened for writing")
+            ?: error("无法打开所选文件进行写入")
         output.bufferedWriter(Charsets.UTF_8).use { writer ->
             writer.write(content)
         }
@@ -92,14 +92,14 @@ class WorkflowTransfer(
 
     fun readMany(uri: Uri): List<Workflow> {
         val input = contentResolver.openInputStream(uri)
-            ?: error("The selected file cannot be opened")
+            ?: error("无法打开所选文件")
         val bytes = input.use { stream ->
             val output = ByteArrayOutputStream()
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             while (true) {
                 val count = stream.read(buffer)
                 if (count < 0) break
-                require(output.size() + count <= MAX_IMPORT_BYTES) { "Workflow file is larger than 2 MiB" }
+                require(output.size() + count <= MAX_IMPORT_BYTES) { "工作流文件大于 2 MiB" }
                 output.write(buffer, 0, count)
             }
             output.toByteArray()

@@ -37,6 +37,7 @@ class RunHistoryStore(context: Context) {
         prettyPrint = true
     }
 
+    @Synchronized
     fun load(): List<RunRecord> {
         if (!file.exists()) return emptyList()
         return runCatching {
@@ -44,12 +45,14 @@ class RunHistoryStore(context: Context) {
         }.getOrDefault(emptyList())
     }
 
+    @Synchronized
     fun append(records: List<RunRecord>, record: RunRecord): List<RunRecord> {
-        val updated = (listOf(record) + records).take(MAX_RECORDS)
+        val updated = (listOf(record) + load()).distinctBy { it.id }.take(MAX_RECORDS)
         save(updated)
         return updated
     }
 
+    @Synchronized
     fun clear() {
         Files.deleteIfExists(file.toPath())
     }

@@ -55,6 +55,34 @@ class WorkflowValidatorTest {
     }
 
     @Test
+    fun `rejects negative delays while preserving zero delay compatibility`() {
+        val negative = Workflow(
+            id = "negative-delay",
+            name = "Negative delay",
+            steps = listOf(Step.Delay("delay", -1)),
+        )
+        val zero = negative.copy(
+            id = "zero-delay",
+            name = "Zero delay",
+            steps = listOf(Step.Delay("delay", 0)),
+        )
+
+        assertEquals("Delay duration must not be negative", WorkflowValidator.validate(negative).single().message)
+        assertTrue(WorkflowValidator.validate(zero).isEmpty())
+    }
+
+    @Test
+    fun `rejects a blank variable name`() {
+        val workflow = Workflow(
+            id = "blank-variable",
+            name = "Blank variable",
+            steps = listOf(Step.SetVariable("set", " ", Value.Literal("value"))),
+        )
+
+        assertEquals("Variable name must not be blank", WorkflowValidator.validate(workflow).single().message)
+    }
+
+    @Test
     fun `reports duplicate IDs and undefined variables`() {
         val workflow = Workflow(
             id = "invalid",
@@ -261,7 +289,7 @@ class WorkflowValidatorTest {
 
         assertTrue(
             WorkflowValidator.validate(workflow)
-                .any { it.message.contains("defines more than ${WorkflowLimits.MAX_DEFINED_STEPS}") },
+                .any { it.message.contains("more than ${WorkflowLimits.MAX_DEFINED_STEPS} steps") },
         )
     }
 

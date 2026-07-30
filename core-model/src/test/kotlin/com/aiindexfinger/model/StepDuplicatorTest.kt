@@ -28,6 +28,15 @@ class StepDuplicatorTest {
         assertEquals(4, duplicate.ids().size)
     }
 
+    @Test
+    fun `duplicates image click with a new id and unchanged template`() {
+        val original = Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24)
+
+        val duplicate = original.duplicateWithNewIds { "copy" }
+
+        assertEquals(original.copy(id = "copy"), duplicate)
+    }
+
     private fun Step.ids(): Set<String> = when (this) {
         is Step.IfElse -> setOf(id) + (whenTrue + whenFalse).flatMap { it.ids() }
         is Step.Repeat -> setOf(id) + steps.flatMap { it.ids() }

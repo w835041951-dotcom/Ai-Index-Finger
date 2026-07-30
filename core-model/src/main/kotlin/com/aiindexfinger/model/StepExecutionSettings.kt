@@ -4,6 +4,7 @@ fun Step.withExecutionSettings(timeoutMillis: Long?, failurePolicy: FailurePolic
     require(timeoutMillis == null || timeoutMillis > 0) { "Step timeout must be positive" }
     return when (this) {
         is Step.Click -> copy(timeoutMillis = timeoutMillis, failurePolicy = failurePolicy)
+        is Step.ImageClick -> copy(timeoutMillis = timeoutMillis, failurePolicy = failurePolicy)
         is Step.Delay -> copy(timeoutMillis = timeoutMillis, failurePolicy = failurePolicy)
         is Step.GlobalAction -> copy(timeoutMillis = timeoutMillis, failurePolicy = failurePolicy)
         is Step.IfElse -> copy(timeoutMillis = timeoutMillis, failurePolicy = failurePolicy)
