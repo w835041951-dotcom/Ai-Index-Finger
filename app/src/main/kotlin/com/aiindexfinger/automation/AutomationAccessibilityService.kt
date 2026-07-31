@@ -48,6 +48,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -132,7 +133,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                     System.currentTimeMillis(),
                     execution.diagnostics,
                 )
-                runHistoryStore.append(runHistoryStore.load(), record)
+                withContext(Dispatchers.IO + NonCancellable) {
+                    runHistoryStore.append(record)
+                }
                 latestRun.value = RunOutcome(result, record)
             } finally {
                 runningWorkflowId.value = null

@@ -16,6 +16,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.aiindexfinger.data.SettingsWorkflowPack
 import com.aiindexfinger.data.ClockWorkflowPack
 import com.aiindexfinger.data.FilesWorkflowPack
+import com.aiindexfinger.data.AiIndexFingerSelfTestPack
 import com.aiindexfinger.data.WorkflowLibrary
 import com.aiindexfinger.model.WorkflowState
 import org.junit.Assert.assertEquals
@@ -29,7 +30,7 @@ class SettingsWorkflowPackFlowTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun installActionCreatesThreeFoldersWithTwentyOneDraftWorkflowsIdempotently() {
+    fun installActionCreatesFourFoldersWithTwentyTwoRunnableWorkflowsIdempotently() {
         var latestLibrary = WorkflowLibrary()
         composeRule.setContent {
             var library by remember { mutableStateOf(latestLibrary) }
@@ -69,6 +70,11 @@ class SettingsWorkflowPackFlowTest {
                             ),
                             Triple(ClockWorkflowPack.definition, "Clock", listOf("Open Clock", "Verify time", "Verify date")),
                             Triple(FilesWorkflowPack.definition, "Files", listOf("Open Files", "Verify header", "Verify list")),
+                            Triple(
+                                AiIndexFingerSelfTestPack.definition,
+                                "AI Index Finger",
+                                listOf("Verify workflow home", "Verify observation and runtime"),
+                            ),
                         ).forEach { (pack, folderName, names) ->
                             library = pack.install(library, folderName, names).library
                         }
@@ -100,13 +106,18 @@ class SettingsWorkflowPackFlowTest {
         composeRule.onNodeWithTag(folderFilterTag(ClockWorkflowPack.FOLDER_ID))
             .performScrollTo().performClick().assertIsSelected()
         composeRule.onNodeWithText("Open Clock").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag(SETTINGS_PACK_INSTALL_TAG).performScrollTo()
+        composeRule.onNodeWithTag(folderFilterTag(AiIndexFingerSelfTestPack.FOLDER_ID))
+            .performScrollTo().performClick().assertIsSelected()
+        composeRule.onNodeWithText("Verify workflow home").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Verify observation and runtime").performScrollTo().assertIsDisplayed()
 
         composeRule.onNodeWithTag(SETTINGS_PACK_INSTALL_TAG).performScrollTo().performClick()
         composeRule.runOnIdle {
-            assertEquals(21, latestLibrary.workflows.size)
-            assertEquals(listOf(WorkflowState.Draft), latestLibrary.workflows.map { it.state }.distinct())
-            assertEquals(3, latestLibrary.folders.size)
-            assertEquals(21, latestLibrary.workflowFolderIds.size)
+            assertEquals(23, latestLibrary.workflows.size)
+            assertEquals(listOf(WorkflowState.Ready), latestLibrary.workflows.map { it.state }.distinct())
+            assertEquals(4, latestLibrary.folders.size)
+            assertEquals(23, latestLibrary.workflowFolderIds.size)
         }
     }
 }

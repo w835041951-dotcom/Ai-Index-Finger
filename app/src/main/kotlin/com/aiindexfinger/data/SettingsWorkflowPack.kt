@@ -1,9 +1,12 @@
 package com.aiindexfinger.data
 
-import com.aiindexfinger.model.NodeSelector
-import com.aiindexfinger.model.Step
-import com.aiindexfinger.model.ScrollDirection
+import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.FailurePolicy
+import com.aiindexfinger.model.NodeAttribute
+import com.aiindexfinger.model.NodeSelector
+import com.aiindexfinger.model.ScrollDirection
+import com.aiindexfinger.model.Step
+import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 
@@ -21,6 +24,7 @@ data class SystemWorkflowPack(
     val id: String,
     val folderId: String,
     val packageName: String,
+    val installationState: WorkflowState,
     val templates: List<SystemWorkflowTemplate>,
 ) {
     val workflowIds: List<String> = templates.map(SystemWorkflowTemplate::id)
@@ -44,7 +48,7 @@ data class SystemWorkflowPack(
             Workflow(
                 id = template.id,
                 name = name,
-                state = WorkflowState.Draft,
+                state = installationState,
                 steps = template.steps,
             )
         }
@@ -155,6 +159,7 @@ object SettingsWorkflowPack {
         id = "settings",
         folderId = FOLDER_ID,
         packageName = SETTINGS_PACKAGE,
+        installationState = WorkflowState.Ready,
         templates = listOf(
             readOnlyTemplate(OPEN_HOME_WORKFLOW_ID, SETTINGS_PACKAGE, "com.android.settings:id/settings_homepage_container"),
             readOnlyTemplate(VERIFY_LIST_WORKFLOW_ID, SETTINGS_PACKAGE, "com.android.settings:id/recycler_view"),
@@ -208,6 +213,7 @@ object ClockWorkflowPack {
         id = "clock",
         folderId = FOLDER_ID,
         packageName = CLOCK_PACKAGE,
+        installationState = WorkflowState.Ready,
         templates = listOf(
             readOnlyTemplate(OPEN_WORKFLOW_ID, CLOCK_PACKAGE, "com.google.android.deskclock:id/action_bar_title"),
             readOnlyTemplate(VERIFY_TIME_WORKFLOW_ID, CLOCK_PACKAGE, "com.google.android.deskclock:id/digital_clock"),
@@ -228,10 +234,81 @@ object FilesWorkflowPack {
         id = "files",
         folderId = FOLDER_ID,
         packageName = FILES_PACKAGE,
+        installationState = WorkflowState.Ready,
         templates = listOf(
             readOnlyTemplate(OPEN_WORKFLOW_ID, FILES_PACKAGE, "com.google.android.documentsui:id/drawer_layout"),
             readOnlyTemplate(VERIFY_HEADER_WORKFLOW_ID, FILES_PACKAGE, "com.google.android.documentsui:id/header_container"),
             readOnlyTemplate(VERIFY_LIST_WORKFLOW_ID, FILES_PACKAGE, "com.google.android.documentsui:id/dir_list"),
+        ),
+    )
+}
+
+object AiIndexFingerSelfTestPack {
+    const val FOLDER_ID = "built-in-pack-ai-index-finger"
+    const val VERIFY_HOME_WORKFLOW_ID = "built-in-ai-index-finger-verify-home"
+    const val VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID =
+        "built-in-ai-index-finger-verify-observation-runtime"
+    const val HOME_MARKER_TEXT = "AI Index Finger"
+
+    val definition = SystemWorkflowPack(
+        id = "ai-index-finger",
+        folderId = FOLDER_ID,
+        packageName = "com.aiindexfinger",
+        installationState = WorkflowState.Ready,
+        templates = listOf(
+            SystemWorkflowTemplate(
+                id = VERIFY_HOME_WORKFLOW_ID,
+                steps = listOf(
+                    Step.WaitForNode(
+                        "$VERIFY_HOME_WORKFLOW_ID-wait",
+                        NodeSelector("com.aiindexfinger", text = HOME_MARKER_TEXT),
+                    ),
+                ),
+            ),
+            SystemWorkflowTemplate(
+                id = VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID,
+                steps = listOf(
+                    Step.WaitForNode(
+                        "$VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID-wait",
+                        NodeSelector("com.aiindexfinger", text = HOME_MARKER_TEXT),
+                    ),
+                    Step.ReadNodeText(
+                        "$VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID-read",
+                        NodeSelector("com.aiindexfinger", text = HOME_MARKER_TEXT),
+                        "observed_brand",
+                        NodeAttribute.Text,
+                    ),
+                    Step.IfElse(
+                        id = "$VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID-if",
+                        condition = Condition.Equals(
+                            Value.Variable("observed_brand"),
+                            Value.Literal(HOME_MARKER_TEXT),
+                        ),
+                        whenTrue = listOf(
+                            Step.Repeat(
+                                "$VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID-repeat",
+                                times = 2,
+                                steps = listOf(
+                                    Step.WaitForNode(
+                                        "$VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID-repeat-wait",
+                                        NodeSelector("com.aiindexfinger", text = HOME_MARKER_TEXT),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        whenFalse = listOf(
+                            Step.WaitForNode(
+                                "$VERIFY_OBSERVATION_RUNTIME_WORKFLOW_ID-failure",
+                                NodeSelector(
+                                    "com.aiindexfinger",
+                                    text = "__ai_index_finger_self_test_failure__",
+                                ),
+                                timeoutMillis = 500,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
         ),
     )
 }

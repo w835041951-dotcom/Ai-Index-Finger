@@ -50,8 +50,13 @@ enum class RunStatus {
     Rejected,
 }
 
-class RunHistoryStore(context: Context) {
-    private val file = File(context.filesDir, FILE_NAME)
+class RunHistoryStore private constructor(
+    private val file: File,
+) {
+    constructor(context: Context) : this(File(context.filesDir, FILE_NAME))
+
+    internal constructor(directory: File, fileName: String = FILE_NAME) : this(File(directory, fileName))
+
     private val json = Json {
         ignoreUnknownKeys = true
         prettyPrint = true
@@ -66,7 +71,7 @@ class RunHistoryStore(context: Context) {
     }
 
     @Synchronized
-    fun append(records: List<RunRecord>, record: RunRecord): List<RunRecord> {
+    fun append(record: RunRecord): List<RunRecord> {
         val updated = (listOf(record) + load()).distinctBy { it.id }.take(MAX_RECORDS)
         save(updated)
         return updated

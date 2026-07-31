@@ -2,6 +2,8 @@ package com.aiindexfinger.data
 
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.matchesSearch
+import java.text.Collator
+import java.util.Locale
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -73,16 +75,42 @@ sealed interface WorkflowFolderSelection {
     data class Folder(val id: String) : WorkflowFolderSelection
 }
 
+fun sortedFolders(
+    folders: List<WorkflowFolder>,
+    locale: Locale = Locale.getDefault(),
+): List<WorkflowFolder> {
+    val collator = primaryCollator(locale)
+    return folders.sortedWith { left, right ->
+        compareDisplayText(collator, left.name, right.name)
+            ?: left.id.compareTo(right.id)
+    }
+}
+
 fun filterWorkflows(
     workflows: List<Workflow>,
     workflowFolderIds: Map<String, String>,
     query: String,
     selection: WorkflowFolderSelection,
-): List<Workflow> = workflows.filter { workflow ->
-    val matchesFolder = when (selection) {
-        WorkflowFolderSelection.All -> true
-        WorkflowFolderSelection.Unfiled -> workflowFolderIds[workflow.id] == null
-        is WorkflowFolderSelection.Folder -> workflowFolderIds[workflow.id] == selection.id
+    locale: Locale = Locale.getDefault(),
+): List<Workflow> {
+    val collator = primaryCollator(locale)
+    return workflows.filter { workflow ->
+        val matchesFolder = when (selection) {
+            WorkflowFolderSelection.All -> true
+            WorkflowFolderSelection.Unfiled -> workflowFolderIds[workflow.id] == null
+            is WorkflowFolderSelection.Folder -> workflowFolderIds[workflow.id] == selection.id
+        }
+        matchesFolder && workflow.matchesSearch(query)
     }
-    matchesFolder && workflow.matchesSearch(query)
+        .sortedWith { left, right ->
+            compareDisplayText(collator, left.name, right.name)
+                ?: left.id.compareTo(right.id)
+        }
 }
+
+private fun primaryCollator(locale: Locale): Collator =
+    Collator.getInstance(locale).apply { strength = Collator.PRIMARY }
+
+private fun compareDisplayText(collator: Collator, left: String, right: String): Int? =
+    collator.compare(left, right).takeIf { it != 0 }
+        ?: left.compareTo(right).takeIf { it != 0 }

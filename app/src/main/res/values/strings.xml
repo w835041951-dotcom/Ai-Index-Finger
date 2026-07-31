@@ -384,7 +384,7 @@
     <string name="settings_pack_installed">Installed %1$d Settings workflows as drafts</string>
     <string name="settings_pack_already_installed">Settings workflows are already installed</string>
     <string name="install_system_examples">Install tested system app examples</string>
-    <string name="system_packs_installed">Installed %1$d system app workflows as drafts</string>
+    <string name="system_packs_installed">Installed %1$d system app workflows, ready to run</string>
     <string name="system_packs_already_installed">Available system app workflows are already installed</string>
     <string name="clock_folder_name">Clock</string>
     <string name="clock_workflow_open">Open Clock</string>
@@ -394,6 +394,9 @@
     <string name="files_workflow_open">Open Files</string>
     <string name="files_workflow_verify_header">Verify Files header</string>
     <string name="files_workflow_verify_list">Verify Files list</string>
+    <string name="self_test_folder_name">AI Index Finger</string>
+    <string name="self_test_workflow_verify_home">Verify workflow home</string>
+    <string name="self_test_workflow_verify_observation_runtime">Verify observation and runtime</string>
     <string name="workflow_schedule_cancelled">Cancelled the schedule for %1$s</string>
     <string name="cannot_run">Cannot run: %1$s</string>
     <string name="enable_automation_before_run">Enable the automation service before running a workflow</string>

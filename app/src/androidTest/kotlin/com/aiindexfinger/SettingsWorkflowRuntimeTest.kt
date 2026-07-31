@@ -99,16 +99,14 @@ class SettingsWorkflowRuntimeTest {
         ).forEach { (pack, folderName, names) ->
             installed = pack.install(installed, folderName, names).library
         }
-        val readyLibrary = installed.copy(
-            workflows = installed.workflows.map { it.copy(state = WorkflowState.Ready) },
-        )
-        store.saveLibrary(readyLibrary)
+        store.saveLibrary(installed)
 
         assertEquals(
             setOf(SettingsWorkflowPack.FOLDER_ID, ClockWorkflowPack.FOLDER_ID, FilesWorkflowPack.FOLDER_ID),
-            readyLibrary.folders.map { it.id }.toSet(),
+            installed.folders.map { it.id }.toSet(),
         )
-        readyLibrary.workflows.forEach { workflow ->
+        assertTrue(installed.workflows.all { it.state == WorkflowState.Ready })
+        installed.workflows.forEach { workflow ->
             val launchPackageName = workflow.steps.filterIsInstance<Step.LaunchApp>().single().packageName
             val terminalPackageName = workflow.steps.filterIsInstance<Step.WaitForNode>().last().selector.packageName
             shell("am force-stop $launchPackageName")
@@ -131,9 +129,9 @@ class SettingsWorkflowRuntimeTest {
         }
 
         val records = RunHistoryStore(context).load()
-        assertEquals(21, records.count { it.workflowId in readyLibrary.workflows.map { workflow -> workflow.id } })
+        assertEquals(21, records.count { it.workflowId in installed.workflows.map { workflow -> workflow.id } })
         assertTrue(records.all { it.status == RunStatus.Completed })
-        assertEquals(readyLibrary, store.loadLibrary())
+        assertEquals(installed, store.loadLibrary())
     }
 
     private fun restoreSecureSetting(key: String, value: String) {

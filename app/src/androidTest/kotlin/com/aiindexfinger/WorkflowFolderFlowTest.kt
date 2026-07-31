@@ -91,7 +91,7 @@ class WorkflowFolderFlowTest {
         val createdFolderId = requireNotNull(folderId)
         composeRule.onNodeWithTag(folderFilterTag(createdFolderId))
             .assertIsDisplayed()
-            .assertTextContains("Alpha")
+            .assertTextContains("Alpha", substring = true)
 
         composeRule.onNodeWithTag(FOLDER_MANAGE_TAG).performClick()
         composeRule.onNodeWithTag(folderRenameTag(createdFolderId)).performClick()
@@ -101,13 +101,13 @@ class WorkflowFolderFlowTest {
         nameInput.performTextInput("Beta")
         composeRule.onNodeWithTag(FOLDER_NAME_SAVE_TAG).performClick()
 
-        composeRule.onNodeWithTag(folderFilterTag(createdFolderId)).assertTextContains("Beta")
+        composeRule.onNodeWithTag(folderFilterTag(createdFolderId)).assertTextContains("Beta", substring = true)
         composeRule.onNodeWithTag(folderMoveWorkflowTag(WORKFLOW_ID)).performScrollTo().performClick()
         composeRule.onNodeWithTag(FOLDER_DESTINATION_UNFILED_TAG).assertIsSelected()
         composeRule.onNodeWithTag(folderDestinationTag(createdFolderId)).performClick()
 
         composeRule.onNodeWithTag(folderFilterTag(createdFolderId))
-            .assertTextContains("Beta")
+            .assertTextContains("Beta", substring = true)
             .performClick()
             .assertIsSelected()
         composeRule.onNodeWithText(WORKFLOW_NAME).assertIsDisplayed()

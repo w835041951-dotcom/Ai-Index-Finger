@@ -33,6 +33,40 @@ fun matchTemplate(
     minimumScorePermille: Int,
     ambiguityMarginPermille: Int,
     checkCancellation: () -> Unit = {},
+): TemplateMatchResult = matchTemplateInternal(
+    screen,
+    template,
+    minimumScorePermille,
+    ambiguityMarginPermille,
+    checkCancellation,
+)
+
+internal fun matchTemplateMeasured(
+    screen: LumaImage,
+    template: LumaImage,
+    minimumScorePermille: Int,
+    ambiguityMarginPermille: Int,
+    checkCancellation: () -> Unit = {},
+): TemplateMatchMeasurement {
+    val work = TemplateMatchingWork()
+    val result = matchTemplateInternal(
+        screen,
+        template,
+        minimumScorePermille,
+        ambiguityMarginPermille,
+        checkCancellation,
+        work,
+    )
+    return TemplateMatchMeasurement(result, work.fineEvaluations)
+}
+
+private fun matchTemplateInternal(
+    screen: LumaImage,
+    template: LumaImage,
+    minimumScorePermille: Int,
+    ambiguityMarginPermille: Int,
+    checkCancellation: () -> Unit,
+    work: TemplateMatchingWork? = null,
 ): TemplateMatchResult {
     if (template.width > screen.width || template.height > screen.height) return TemplateMatchResult.NoMatch
     if (templateVariance(template) < MIN_TEMPLATE_VARIANCE) return TemplateMatchResult.NoMatch
@@ -55,6 +89,7 @@ fun matchTemplate(
     }
 
     val refined = mutableListOf<ScoredPosition>()
+    val refinedCoordinates = mutableSetOf<Long>()
     coarseCandidates.forEach { candidate ->
         val startX = (candidate.left - coarseStride).coerceAtLeast(0)
         val endX = (candidate.left + coarseStride).coerceAtMost(screen.width - template.width)
@@ -63,6 +98,9 @@ fun matchTemplate(
         for (top in startY..endY) {
             checkCancellation()
             for (left in startX..endX) {
+                val coordinate = top.toLong() shl Int.SIZE_BITS or left.toLong()
+                if (!refinedCoordinates.add(coordinate)) continue
+                if (work != null) work.fineEvaluations++
                 retainBest(
                     refined,
                     ScoredPosition(
@@ -100,6 +138,13 @@ fun matchTemplate(
         scorePermille = best.scorePermille,
     )
 }
+
+internal data class TemplateMatchMeasurement(
+    val result: TemplateMatchResult,
+    val fineEvaluations: Int,
+)
+
+private class TemplateMatchingWork(var fineEvaluations: Int = 0)
 
 private fun similarity(
     screen: LumaImage,

@@ -10,6 +10,12 @@ data class LaunchableApp(
     val packageName: String,
 )
 
+internal fun sortLaunchableApps(apps: List<LaunchableApp>): List<LaunchableApp> = apps.sortedWith(
+    compareBy<LaunchableApp, String>(String.CASE_INSENSITIVE_ORDER) { it.label }
+        .thenBy(LaunchableApp::label)
+        .thenBy(LaunchableApp::packageName),
+)
+
 class LaunchableAppCatalog(private val context: Context) {
     fun load(): List<LaunchableApp> {
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -31,6 +37,6 @@ class LaunchableAppCatalog(private val context: Context) {
             }
             .filterNot { it.packageName == context.packageName }
             .distinctBy { it.packageName }
-            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
+            .let(::sortLaunchableApps)
     }
 }

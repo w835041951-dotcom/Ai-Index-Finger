@@ -18,6 +18,17 @@ class ImageTemplateMatcherTest {
     }
 
     @Test
+    fun `exact match evaluates each fine position only once`() {
+        val template = pattern(12, 12)
+        val screen = canvas(40, 36, listOf(7 to 9), template)
+
+        val measurement = matchTemplateMeasured(screen, template, 920, 25)
+
+        assertEquals(TemplateMatchResult.Unique(13, 15, 1_000), measurement.result)
+        assertEquals(189, measurement.fineEvaluations)
+    }
+
+    @Test
     fun `rejects absent and low variance templates`() {
         val template = pattern(12, 12)
         val blank = LumaImage(32, 32, ByteArray(32 * 32))
@@ -32,7 +43,10 @@ class ImageTemplateMatcherTest {
         val template = pattern(12, 12)
         val screen = canvas(48, 40, listOf(3 to 4, 29 to 20), template)
 
-        assertEquals(TemplateMatchResult.Ambiguous, matchTemplate(screen, template, 920, 25))
+        val measurement = matchTemplateMeasured(screen, template, 920, 25)
+
+        assertEquals(TemplateMatchResult.Ambiguous, measurement.result)
+        assertEquals(186, measurement.fineEvaluations)
     }
 
     @Test

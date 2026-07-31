@@ -112,6 +112,8 @@ import com.aiindexfinger.data.filterWorkflows
 import com.aiindexfinger.data.SettingsWorkflowPack
 import com.aiindexfinger.data.ClockWorkflowPack
 import com.aiindexfinger.data.FilesWorkflowPack
+import com.aiindexfinger.data.AiIndexFingerSelfTestPack
+import com.aiindexfinger.data.sortedFolders
 import com.aiindexfinger.data.WorkflowTransfer
 import com.aiindexfinger.data.WorkflowVersion
 import com.aiindexfinger.data.mergeImportedLibrary
@@ -569,6 +571,14 @@ private fun WorkflowApp(
                             R.string.files_workflow_verify_list,
                         ),
                     ),
+                    Triple(
+                        AiIndexFingerSelfTestPack.definition,
+                        R.string.self_test_folder_name,
+                        listOf(
+                            R.string.self_test_workflow_verify_home,
+                            R.string.self_test_workflow_verify_observation_runtime,
+                        ),
+                    ),
                 ).filter { (pack) ->
                     context.packageManager.getLaunchIntentForPackage(pack.packageName) != null
                 }
@@ -968,7 +978,7 @@ internal fun WorkflowHome(
                     modifier = Modifier.testTag(FOLDER_FILTER_UNFILED_TAG),
                     onClick = { selectedFolderFilter = WorkflowFolderSelection.Unfiled },
                 )
-                folders.sortedBy { it.name.lowercase() }.forEach { folder ->
+                sortedFolders(folders).forEach { folder ->
                     FolderFilterButton(
                         label = folder.name,
                         count = workflows.count { workflowFolderIds[it.id] == folder.id },
@@ -1279,7 +1289,7 @@ private fun WorkflowFolderManagerDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                folders.sortedBy { it.name.lowercase() }.forEach { folder ->
+                sortedFolders(folders).forEach { folder ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1394,7 +1404,7 @@ private fun WorkflowMoveDialog(
                     modifier = Modifier.testTag(FOLDER_DESTINATION_UNFILED_TAG),
                     onClick = { onMove(null) },
                 )
-                folders.sortedBy { it.name.lowercase() }.forEach { folder ->
+                sortedFolders(folders).forEach { folder ->
                     FolderDestinationRow(
                         name = folder.name,
                         selected = currentFolderId == folder.id,

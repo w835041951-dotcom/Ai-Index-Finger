@@ -11,13 +11,13 @@ import org.junit.Test
 
 class SettingsWorkflowPackTest {
     @Test
-    fun firstInstallCreatesFifteenDraftsInSettingsFolder() {
+    fun firstInstallCreatesFifteenRunnableWorkflowsInSettingsFolder() {
         val result = SettingsWorkflowPack.install(WorkflowLibrary(), "Settings", names)
 
         assertEquals(15, result.addedWorkflowCount)
         assertEquals(listOf("Settings"), result.library.folders.map(WorkflowFolder::name))
         assertEquals(15, result.library.workflows.size)
-        assertTrue(result.library.workflows.all { it.state == WorkflowState.Draft })
+        assertTrue(result.library.workflows.all { it.state == WorkflowState.Ready })
         assertTrue(result.library.workflows.all { WorkflowValidator.validate(it).isEmpty() })
         assertTrue(result.library.workflows.all {
             result.library.folderIdFor(it.id) == SettingsWorkflowPack.FOLDER_ID

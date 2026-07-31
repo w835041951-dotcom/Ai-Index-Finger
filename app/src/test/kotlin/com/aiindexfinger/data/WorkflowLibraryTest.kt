@@ -2,6 +2,7 @@ package com.aiindexfinger.data
 
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
+import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -90,6 +91,49 @@ class WorkflowLibraryTest {
                 WorkflowFolderSelection.Folder("personal"),
             ),
         )
+    }
+
+    @Test
+    fun workflowDisplayOrderIsPredictableAcrossFiltersAndSearchWithoutMutatingStorageOrder() {
+        val zulu = workflow().copy(id = "zulu", name = "Zulu task")
+        val alphaLower = workflow().copy(id = "alpha-lower", name = "alpha task")
+        val bravo = workflow().copy(id = "bravo", name = "Bravo task")
+        val alphaUpper = workflow().copy(id = "alpha-upper", name = "Alpha task")
+        val stored = listOf(zulu, alphaLower, bravo, alphaUpper)
+        val folderIds = mapOf(zulu.id to "work", bravo.id to "work")
+
+        assertEquals(
+            listOf(alphaUpper, alphaLower, bravo, zulu),
+            filterWorkflows(stored, folderIds, "", WorkflowFolderSelection.All, Locale.ENGLISH),
+        )
+        assertEquals(
+            listOf(alphaUpper, alphaLower),
+            filterWorkflows(stored, folderIds, "task", WorkflowFolderSelection.Unfiled, Locale.ENGLISH),
+        )
+        assertEquals(
+            listOf(bravo, zulu),
+            filterWorkflows(stored, folderIds, "task", WorkflowFolderSelection.Folder("work"), Locale.ENGLISH),
+        )
+        assertEquals(
+            listOf(zulu),
+            filterWorkflows(stored, folderIds, "zulu", WorkflowFolderSelection.All, Locale.ENGLISH),
+        )
+        assertEquals(listOf(zulu, alphaLower, bravo, alphaUpper), stored)
+    }
+
+    @Test
+    fun foldersUseLocaleAwareDeterministicDisplayOrderWithoutMutatingStorageOrder() {
+        val zulu = WorkflowFolder("zulu", "Zulu")
+        val alphaLower = WorkflowFolder("alpha-lower", "alpha")
+        val bravo = WorkflowFolder("bravo", "Bravo")
+        val alphaUpper = WorkflowFolder("alpha-upper", "Alpha")
+        val stored = listOf(zulu, alphaLower, bravo, alphaUpper)
+
+        assertEquals(
+            listOf(alphaUpper, alphaLower, bravo, zulu),
+            sortedFolders(stored, Locale.ENGLISH),
+        )
+        assertEquals(listOf(zulu, alphaLower, bravo, alphaUpper), stored)
     }
 
     private fun library() = WorkflowLibrary(workflows = listOf(workflow()))

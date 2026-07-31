@@ -77,6 +77,21 @@ class BilingualResourcesTest {
         assertEquals("Chinese workflow example descriptions must be unique", 100, chineseDescriptions.distinct().size)
     }
 
+    @Test
+    fun `self test workflow is fully localized`() {
+        val defaultStrings = strings(File("src/main/res/values/strings.xml"))
+        val chineseStrings = strings(File("src/main/res/values-zh-rCN/strings.xml"))
+
+        setOf(
+            "self_test_folder_name",
+            "self_test_workflow_verify_home",
+            "self_test_workflow_verify_observation_runtime",
+        ).forEach { key ->
+            assertTrue("Missing default resource: $key", defaultStrings.getValue(key).isNotBlank())
+            assertTrue("Missing Simplified Chinese resource: $key", chineseStrings.getValue(key).isNotBlank())
+        }
+    }
+
     private fun strings(file: File): Map<String, String> {
         val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
         val strings = document.getElementsByTagName("string")
