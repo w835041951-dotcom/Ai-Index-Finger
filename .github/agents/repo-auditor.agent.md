@@ -24,15 +24,17 @@ Find one concrete, high-value improvement that can be implemented and verified i
 
 1. Read the parent task and inspect only the relevant ownership path.
 2. Run the cheapest focused test or static check that can expose the suspected gap when practical.
-3. Compare production behavior with nearby tests and call sites.
-4. Rank findings by user impact, confidence, implementation size, and verification cost.
-5. Return the best next task plus up to two alternatives. Report no finding when evidence is insufficient.
+3. Compare production behavior with nearby tests and call sites. Cross-check planning documents, but mark documentation claims stale when code and tests disagree.
+4. Search explicitly for equivalent existing behavior before calling a candidate new. State the evidence that confirms novelty or disqualifies the candidate.
+5. Rank findings by user impact, confidence, implementation size, and verification cost.
+6. Return the best next task plus up to two alternatives. Report no finding when evidence is insufficient.
 
 ## Output
 
 Return a concise report containing:
 
 - `Primary finding`: behavior, evidence with file paths, and user impact.
+- `Baseline check`: equivalent capabilities inspected, novelty evidence, and any stale documentation.
 - `Proposed change`: smallest implementation boundary and acceptance criteria.
 - `Verification`: exact focused command or test to run.
 - `Risks`: regression or Android lifecycle concerns.

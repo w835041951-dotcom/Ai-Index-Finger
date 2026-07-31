@@ -20,7 +20,7 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 14
+        const val CURRENT_SCHEMA_VERSION = 15
     }
 }
 
@@ -41,11 +41,13 @@ sealed interface Step {
     data class LaunchApp(
         override val id: String,
         val packageName: String,
+        val intentAction: String? = null,
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step {
         init {
             require(packageName.isNotBlank()) { "Package name must not be blank" }
+            require(intentAction == null || intentAction.isNotBlank()) { "Intent action must not be blank" }
         }
     }
 

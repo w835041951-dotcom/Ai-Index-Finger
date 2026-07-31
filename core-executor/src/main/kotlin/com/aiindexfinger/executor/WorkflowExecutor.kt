@@ -24,7 +24,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeout
 
 interface AutomationDriver {
-    suspend fun launchApp(packageName: String): Boolean
+    suspend fun launchApp(packageName: String, intentAction: String? = null): Boolean
     suspend fun click(selector: NodeSelector): Boolean
     suspend fun clickImage(step: Step.ImageClick): ImageClickResult
     suspend fun longClick(selector: NodeSelector): Boolean
@@ -61,29 +61,55 @@ sealed interface RunResult {
     data class Failed(val stepId: String, val message: String) : RunResult
 }
 
+data class RunExecution(
+    val result: RunResult,
+    val diagnostics: List<StepExecutionDiagnostic>,
+)
+
+data class StepExecutionDiagnostic(
+    val sequence: Long,
+    val stepId: String,
+    val durationMillis: Long,
+    val attemptCount: Int,
+    val outcome: StepExecutionOutcome,
+)
+
+enum class StepExecutionOutcome {
+    Completed,
+    ContinuedAfterFailure,
+    Failed,
+    Cancelled,
+}
+
 class WorkflowExecutor(
     private val driver: AutomationDriver,
     private val maxExecutedSteps: Long = WorkflowLimits.MAX_EXECUTED_STEPS,
+    private val nanoTime: () -> Long = System::nanoTime,
 ) {
     private val runMutex = Mutex()
     private val mutableState = MutableStateFlow<RunState>(RunState.Idle)
 
     val state: StateFlow<RunState> = mutableState.asStateFlow()
 
-    suspend fun run(workflow: Workflow): RunResult {
-        workflow.readinessIssues().firstOrNull()?.let { issue ->
-            return RunResult.NotReady(issue.message)
-        }
-        if (!runMutex.tryLock()) return RunResult.AlreadyRunning
+    suspend fun run(workflow: Workflow): RunResult = runWithDiagnostics(workflow).result
 
+    suspend fun runWithDiagnostics(workflow: Workflow): RunExecution {
+        workflow.readinessIssues().firstOrNull()?.let { issue ->
+            return RunExecution(RunResult.NotReady(issue.message), emptyList())
+        }
+        if (!runMutex.tryLock()) return RunExecution(RunResult.AlreadyRunning, emptyList())
+
+        val context = ExecutionContext(workflow, nanoTime = nanoTime)
         return try {
-            val context = ExecutionContext(workflow)
             executeSteps(workflow.steps, context)
-            RunResult.Completed
+            RunExecution(RunResult.Completed, context.diagnostics.toList())
         } catch (_: CancellationException) {
-            RunResult.Cancelled
+            RunExecution(RunResult.Cancelled, context.diagnostics.toList())
         } catch (failure: StepFailure) {
-            RunResult.Failed(failure.stepId, failure.message ?: "Step failed")
+            RunExecution(
+                RunResult.Failed(failure.stepId, failure.message ?: "Step failed"),
+                context.diagnostics.toList(),
+            )
         } finally {
             mutableState.value = RunState.Idle
             runMutex.unlock()
@@ -93,11 +119,34 @@ class WorkflowExecutor(
     private suspend fun executeSteps(steps: List<Step>, context: ExecutionContext) {
         for (step in steps) {
             mutableState.value = RunState.Running(context.workflow.id, step.id)
-            executeWithPolicy(step, context)
+            val sequence = context.nextDiagnosticSequence++
+            val startedAtNanos = nanoTime()
+            try {
+                val policyResult = executeWithPolicy(step, context)
+                context.recordDiagnostic(
+                    step = step,
+                    sequence = sequence,
+                    startedAtNanos = startedAtNanos,
+                    attemptCount = policyResult.attemptCount,
+                    outcome = policyResult.outcome,
+                )
+            } catch (cancelled: CancellationException) {
+                context.recordDiagnostic(step, sequence, startedAtNanos, 1, StepExecutionOutcome.Cancelled)
+                throw cancelled
+            } catch (failure: StepFailure) {
+                context.recordDiagnostic(
+                    step,
+                    sequence,
+                    startedAtNanos,
+                    failure.attemptCount,
+                    StepExecutionOutcome.Failed,
+                )
+                throw failure
+            }
         }
     }
 
-    private suspend fun executeWithPolicy(step: Step, context: ExecutionContext) {
+    private suspend fun executeWithPolicy(step: Step, context: ExecutionContext): PolicyExecutionResult {
         val retry = step.failurePolicy as? FailurePolicy.Retry
         val attempts = retry?.attempts?.plus(1) ?: 1
 
@@ -109,14 +158,14 @@ class WorkflowExecutor(
             try {
                 val timeoutMillis = step.timeoutMillis ?: context.workflow.defaultStepTimeoutMillis
                 withTimeout(timeoutMillis) { executeStep(step, context) }
-                return
+                return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.Completed)
             } catch (error: TimeoutCancellationException) {
                 if (attempt + 1 < attempts) {
                     delay(retry?.delayMillis ?: 0)
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
-                    return
+                    return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.ContinuedAfterFailure)
                 } else {
-                    throw StepFailure(step.id, "Step timed out", error)
+                    throw StepFailure(step.id, "Step timed out", attempt + 1, error)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -124,12 +173,13 @@ class WorkflowExecutor(
                 if (attempt + 1 < attempts) {
                     delay(retry?.delayMillis ?: 0)
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
-                    return
+                    return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.ContinuedAfterFailure)
                 } else {
-                    throw StepFailure(step.id, error.message ?: "Step failed", error)
+                    throw StepFailure(step.id, error.message ?: "Step failed", attempt + 1, error)
                 }
             }
         }
+        error("Execution policy completed without a result")
     }
 
     private suspend fun executeStep(step: Step, context: ExecutionContext) {
@@ -153,7 +203,9 @@ class WorkflowExecutor(
             }
             is Step.Repeat -> repeat(step.times) { executeSteps(step.steps, context) }
             is Step.Scroll -> check(driver.scroll(step.selector, step.direction)) { "Target node was not scrollable" }
-            is Step.LaunchApp -> check(driver.launchApp(step.packageName)) { "App could not be launched" }
+            is Step.LaunchApp -> check(driver.launchApp(step.packageName, step.intentAction)) {
+                "App could not be launched"
+            }
             is Step.LongClick -> check(driver.longClick(step.selector)) { "Target node was not long-clickable" }
             is Step.InputText -> {
                 val text = step.variableName?.let { variableName ->
@@ -208,16 +260,47 @@ class WorkflowExecutor(
 
     private data class ExecutionContext(
         val workflow: Workflow,
+        val nanoTime: () -> Long,
         val variables: MutableMap<String, String> = mutableMapOf(),
+        val diagnostics: MutableList<StepExecutionDiagnostic> = mutableListOf(),
         var executedSteps: Long = 0,
+        var nextDiagnosticSequence: Long = 0,
+    ) {
+        fun recordDiagnostic(
+            step: Step,
+            sequence: Long,
+            startedAtNanos: Long,
+            attemptCount: Int,
+            outcome: StepExecutionOutcome,
+        ) {
+            if (diagnostics.size >= MAX_DIAGNOSTIC_EVENTS) return
+            diagnostics += StepExecutionDiagnostic(
+                sequence = sequence,
+                stepId = step.id,
+                durationMillis = ((nanoTime() - startedAtNanos).coerceAtLeast(0) / 1_000_000),
+                attemptCount = attemptCount,
+                outcome = outcome,
+            )
+        }
+    }
+
+    private data class PolicyExecutionResult(
+        val attemptCount: Int,
+        val outcome: StepExecutionOutcome,
     )
 
-    private class StepFailure(stepId: String, message: String, cause: Throwable? = null) :
+    private class StepFailure(
+        stepId: String,
+        message: String,
+        val attemptCount: Int = 1,
+        cause: Throwable? = null,
+    ) :
         IllegalStateException(message, cause) {
         val stepId: String = stepId
     }
 
     private companion object {
         const val NODE_POLL_INTERVAL_MILLIS = 100L
+        const val MAX_DIAGNOSTIC_EVENTS = 1_000
     }
 }

@@ -1,5 +1,7 @@
 package com.aiindexfinger.data
 
+import com.aiindexfinger.executor.StepExecutionDiagnostic
+import com.aiindexfinger.executor.StepExecutionOutcome
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,6 +19,9 @@ class RunRecordSerializationTest {
             status = RunStatus.Failed,
             failedStepId = "click-submit",
             failureMessage = "Target node was not clickable",
+            diagnostics = listOf(
+                RunStepDiagnostic(0, "click-submit", 25, 2, RunStepOutcome.Failed),
+            ),
         )
 
         val encoded = Json.encodeToString(RunRecord.serializer(), record)
@@ -26,5 +31,14 @@ class RunRecordSerializationTest {
         assertFalse(encoded.contains("steps"))
         assertFalse(encoded.contains("variables"))
         assertFalse(encoded.contains("inputText"))
+    }
+
+    @Test
+    fun oldRunRecordWithoutDiagnosticsRemainsReadable() {
+        val encoded = """{"id":"old","workflowId":"workflow","workflowName":"Old","startedAtMillis":1,"durationMillis":2,"status":"Completed"}"""
+
+        val decoded = Json.decodeFromString(RunRecord.serializer(), encoded)
+
+        assertEquals(emptyList<RunStepDiagnostic>(), decoded.diagnostics)
     }
 }

@@ -20,12 +20,14 @@ class WorkflowScheduleSerializationTest {
     }
 
     @Test
-    fun legacyScheduleDefaultsToPending() {
+    fun legacyScheduleDefaultsToPendingAndOnce() {
         val decoded = Json.decodeFromString(
             WorkflowSchedule.serializer(),
             """{"workflowId":"legacy","workflowName":"Legacy","scheduledAtMillis":123}""",
         )
 
         assertEquals(ScheduleStatus.Pending, decoded.status)
+        assertEquals(ScheduleRecurrence.Once, decoded.recurrence)
+        assertEquals(false, decoded.missedOccurrencePending)
     }
 }

@@ -41,6 +41,29 @@ class WorkflowTransferCodecTest {
     }
 
     @Test
+    fun workflowLibraryRoundTripsFoldersAndAssignments() {
+        val workflow = Workflow(id = "first", name = "First", steps = listOf(Step.Delay("wait", 100)))
+        val library = WorkflowLibrary(
+            workflows = listOf(workflow),
+            folders = listOf(WorkflowFolder("folder", "Personal"), WorkflowFolder("empty", "Empty")),
+            workflowFolderIds = mapOf(workflow.id to "folder"),
+        )
+
+        assertEquals(library, WorkflowTransferCodec.decodeLibrary(WorkflowTransferCodec.encodeLibrary(library)))
+    }
+
+    @Test
+    fun formatOneBundleImportsWorkflowsAsUnfiled() {
+        val content = """{"formatVersion":1,"workflows":[{"id":"legacy","name":"Legacy","steps":[]}]}"""
+
+        val library = WorkflowTransferCodec.decodeLibrary(content)
+
+        assertEquals(listOf("legacy"), library.workflows.map(Workflow::id))
+        assertEquals(emptyList<WorkflowFolder>(), library.folders)
+        assertEquals(emptyMap<String, String>(), library.workflowFolderIds)
+    }
+
+    @Test
     fun bundleWithDuplicateWorkflowIdsIsRejected() {
         val workflows = listOf(
             Workflow(id = "same", name = "First", steps = listOf(Step.Delay("wait-1", 100))),

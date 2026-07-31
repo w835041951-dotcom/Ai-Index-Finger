@@ -29,8 +29,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -72,6 +74,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
@@ -93,12 +100,21 @@ import com.aiindexfinger.automation.buildWorkflowPreflightReport
 import com.aiindexfinger.automation.recoveryActions
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
+import com.aiindexfinger.data.RunStepOutcome
 import com.aiindexfinger.data.RunStatus
 import com.aiindexfinger.data.filterRunRecords
 import com.aiindexfinger.data.WorkflowStore
 import com.aiindexfinger.data.WorkflowLoadResult
+import com.aiindexfinger.data.WorkflowLibrary
+import com.aiindexfinger.data.WorkflowFolder
+import com.aiindexfinger.data.WorkflowFolderSelection
+import com.aiindexfinger.data.filterWorkflows
+import com.aiindexfinger.data.SettingsWorkflowPack
+import com.aiindexfinger.data.ClockWorkflowPack
+import com.aiindexfinger.data.FilesWorkflowPack
 import com.aiindexfinger.data.WorkflowTransfer
-import com.aiindexfinger.data.normalizeImportedWorkflows
+import com.aiindexfinger.data.WorkflowVersion
+import com.aiindexfinger.data.mergeImportedLibrary
 import com.aiindexfinger.data.resolveRunHistoryDestination
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.model.Condition
@@ -106,6 +122,9 @@ import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.NodeSelector
+import com.aiindexfinger.model.StepComparisonBranch
+import com.aiindexfinger.model.StepComparisonField
+import com.aiindexfinger.model.StepComparisonPath
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.StepBranch
@@ -117,12 +136,18 @@ import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.ValidationIssue
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowDifference
+import com.aiindexfinger.model.WorkflowExample
+import com.aiindexfinger.model.WorkflowExampleCapability
+import com.aiindexfinger.model.WorkflowExampleCategory
+import com.aiindexfinger.model.SearchableWorkflowExample
 import com.aiindexfinger.model.WorkflowLimits
+import com.aiindexfinger.model.WorkflowMetadataField
 import com.aiindexfinger.model.WorkflowState
-import com.aiindexfinger.model.WorkflowStarterTemplate
 import com.aiindexfinger.model.WorkflowStarterTemplates
 import com.aiindexfinger.model.WorkflowValidator
 import com.aiindexfinger.model.duplicateStep
+import com.aiindexfinger.model.compareWorkflows
 import com.aiindexfinger.model.insertStep
 import com.aiindexfinger.model.matchesSearch
 import com.aiindexfinger.model.moveStep
@@ -133,9 +158,11 @@ import com.aiindexfinger.model.stepsAt
 import com.aiindexfinger.model.withExecutionSettings
 import com.aiindexfinger.model.uniquePathTo
 import com.aiindexfinger.model.effectiveState
+import com.aiindexfinger.model.filterWorkflowExamples
 import com.aiindexfinger.model.isReadyToRun
 import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.scheduler.ScheduleNotificationWorker
+import com.aiindexfinger.scheduler.ScheduleRecurrence
 import com.aiindexfinger.scheduler.ScheduledWorkflowEvent
 import com.aiindexfinger.scheduler.ScheduledWorkflowEventController
 import com.aiindexfinger.scheduler.WorkflowSchedule
@@ -173,7 +200,8 @@ class MainActivity : ComponentActivity() {
         getSharedPreferences(RELEASE_PREFERENCES_NAME, MODE_PRIVATE)
     }
     private val scheduledWorkflowEvents = ScheduledWorkflowEventController()
-    private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+    private val persistenceDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val persistenceScope = CoroutineScope(SupervisorJob() + persistenceDispatcher)
     private val mutablePersistenceError = MutableStateFlow<String?>(null)
     private val persistenceError = mutablePersistenceError.asStateFlow()
 
@@ -194,18 +222,24 @@ class MainActivity : ComponentActivity() {
                     val scheduledWorkflowEvent by scheduledWorkflowEvents.event.collectAsStateWithLifecycle()
                     val persistenceFailure by persistenceError.collectAsStateWithLifecycle()
                     WorkflowApp(
-                        initialWorkflows = state.workflows,
+                        initialLibrary = state.library,
                         initialRunRecords = state.runRecords,
                         initialSchedules = state.schedules,
                         initialRunMessage = state.loadMessageRes?.let { stringResource(it) },
                         persistenceFailure = persistenceFailure,
                         scheduledWorkflowEvent = scheduledWorkflowEvent,
                         onScheduledWorkflowEventConsumed = scheduledWorkflowEvents::consume,
-                        onSave = { workflows ->
+                        onSave = { library ->
                             persistenceScope.launch {
-                                runCatching { workflowStore.save(workflows) }
+                                runCatching { workflowStore.saveLibrary(library) }
                                     .onFailure { mutablePersistenceError.value = getString(R.string.save_failed) }
                             }
+                        },
+                        onListVersions = { workflowId ->
+                            withContext(persistenceDispatcher) { workflowStore.listVersions(workflowId) }
+                        },
+                        onRollback = { workflowId, versionId ->
+                            withContext(persistenceDispatcher) { workflowStore.rollback(workflowId, versionId) }
                         },
                         onClearRunHistory = {
                             persistenceScope.launch {
@@ -215,6 +249,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onSchedule = workflowScheduler::schedule,
                         onCancelSchedule = workflowScheduler::cancel,
+                        onReloadSchedules = workflowScheduler::load,
                         onOpenAccessibilitySettings = ::openAccessibilitySettings,
                         accessibilityDisclosureAcknowledged = releasePreferences.getBoolean(
                             ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED,
@@ -233,16 +268,18 @@ class MainActivity : ComponentActivity() {
 
     private fun loadInitialState(): InitialAppState {
         val workflowResult = workflowStore.loadDetailed()
-        val workflows = workflowResult.workflows
-        val loadedSchedules = workflowScheduler.load(workflows.filter { it.isReadyToRun() }.map { it.id }.toSet())
+        val library = workflowResult.library
+        val loadedSchedules = workflowScheduler.load(
+            library.workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
+        )
         val missed = missedSchedules(loadedSchedules)
-        missed.forEach { workflowScheduler.cancel(it.workflowId) }
-        val schedules = loadedSchedules.filterNot { schedule ->
-            missed.any { it.workflowId == schedule.workflowId }
+        var schedules = loadedSchedules
+        missed.forEach { schedule ->
+            schedules = workflowScheduler.consumeMissedOccurrence(schedule.workflowId)
         }
         val hasMissedSchedule = missed.isNotEmpty()
         return InitialAppState(
-            workflows = workflows,
+            library = library,
             runRecords = runHistoryStore.load(),
             schedules = schedules,
             loadMessageRes = when (workflowResult) {
@@ -271,7 +308,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class InitialAppState(
-    val workflows: List<Workflow>,
+    val library: WorkflowLibrary,
     val runRecords: List<RunRecord>,
     val schedules: List<WorkflowSchedule>,
     val loadMessageRes: Int?,
@@ -279,27 +316,38 @@ private data class InitialAppState(
 
 @Composable
 private fun WorkflowApp(
-    initialWorkflows: List<Workflow>,
+    initialLibrary: WorkflowLibrary,
     initialRunRecords: List<RunRecord>,
     initialSchedules: List<WorkflowSchedule>,
     initialRunMessage: String?,
     persistenceFailure: String?,
     scheduledWorkflowEvent: ScheduledWorkflowEvent?,
     onScheduledWorkflowEventConsumed: (Long) -> Unit,
-    onSave: (List<Workflow>) -> Unit,
+    onSave: (WorkflowLibrary) -> Unit,
+        onListVersions: suspend (String) -> List<WorkflowVersion>,
+        onRollback: suspend (String, String) -> Workflow,
     onClearRunHistory: () -> Unit,
-    onSchedule: (Workflow, Long) -> List<WorkflowSchedule>,
+    onSchedule: (Workflow, Long, ScheduleRecurrence) -> List<WorkflowSchedule>,
     onCancelSchedule: (String) -> List<WorkflowSchedule>,
+    onReloadSchedules: (Set<String>) -> List<WorkflowSchedule>,
     onOpenAccessibilitySettings: () -> Unit,
     accessibilityDisclosureAcknowledged: Boolean,
     onAccessibilityDisclosureAcknowledged: () -> Unit,
 ) {
-    var workflows by remember { mutableStateOf(initialWorkflows) }
+    var library by remember { mutableStateOf(initialLibrary) }
+    val workflows = library.workflows
+    val persist: (WorkflowLibrary) -> Unit = { updated ->
+        val normalized = updated.normalized()
+        onSave(normalized)
+        library = normalized
+    }
     var runRecords by remember { mutableStateOf(initialRunRecords) }
     var schedules by remember { mutableStateOf(initialSchedules) }
     var editingWorkflow by remember { mutableStateOf<Workflow?>(null) }
     var initialEditingStepPath by remember { mutableStateOf<StepPath?>(null) }
     var showRunHistory by remember { mutableStateOf(false) }
+    var workflowComparison by remember { mutableStateOf<Pair<Workflow, Workflow>?>(null) }
+        var versionHistory by remember { mutableStateOf<Pair<Workflow, List<WorkflowVersion>>?>(null) }
     var runMessage by remember { mutableStateOf(initialRunMessage) }
     LaunchedEffect(persistenceFailure) {
         if (persistenceFailure != null) runMessage = persistenceFailure
@@ -308,7 +356,7 @@ private fun WorkflowApp(
     val runningWorkflowId by AutomationAccessibilityService.runningWorkflowId.collectAsStateWithLifecycle()
     val latestRun by AutomationAccessibilityService.latestRun.collectAsStateWithLifecycle()
     var pendingExport by remember { mutableStateOf<Workflow?>(null) }
-    var pendingBundleExport by remember { mutableStateOf<List<Workflow>?>(null) }
+    var pendingBundleExport by remember { mutableStateOf<WorkflowLibrary?>(null) }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val workflowTransfer = remember { WorkflowTransfer(context.contentResolver) }
@@ -334,7 +382,9 @@ private fun WorkflowApp(
     LaunchedEffect(scheduledWorkflowEvent?.sequence) {
         scheduledWorkflowEvent?.let { event ->
             val id = event.workflowId
-            schedules = removeTriggeredSchedule(schedules, id)
+            schedules = onReloadSchedules(
+                workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
+            )
             val workflowName = workflows.firstOrNull { it.id == id }?.name
                 ?: context.getString(R.string.scheduled_workflow_fallback_name)
             runMessage = context.getString(R.string.workflow_ready_to_run, workflowName)
@@ -349,14 +399,14 @@ private fun WorkflowApp(
             runMessage = outcome.result.message()
         }
     }
-    var pendingSchedule by remember { mutableStateOf<Pair<Workflow, Long>?>(null) }
+    var pendingSchedule by remember { mutableStateOf<Triple<Workflow, Long, ScheduleRecurrence>?>(null) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         val request = pendingSchedule
         pendingSchedule = null
         if (granted && request != null && request.first.isReadyToRun()) {
-            runCatching { onSchedule(request.first, request.second) }
+            runCatching { onSchedule(request.first, request.second, request.third) }
                 .onSuccess {
                     schedules = it
                     runMessage = context.getString(R.string.workflow_scheduled, request.first.name)
@@ -390,15 +440,20 @@ private fun WorkflowApp(
     val bundleExportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        val workflowSnapshot = pendingBundleExport
+        val librarySnapshot = pendingBundleExport
         pendingBundleExport = null
-        if (uri != null && workflowSnapshot != null) {
+        if (uri != null && librarySnapshot != null) {
             coroutineScope.launch {
                 val outcome = withContext(Dispatchers.IO) {
-                    runCatching { workflowTransfer.writeBundle(uri, workflowSnapshot) }
+                    runCatching { workflowTransfer.writeLibrary(uri, librarySnapshot) }
                 }
                 outcome
-                    .onSuccess { runMessage = context.getString(R.string.workflows_backed_up, workflowSnapshot.size) }
+                    .onSuccess {
+                        runMessage = context.getString(
+                            R.string.workflows_backed_up,
+                            librarySnapshot.workflows.size,
+                        )
+                    }
                     .onFailure { runMessage = context.getString(R.string.backup_failed, it.message.orEmpty()) }
             }
         }
@@ -409,21 +464,29 @@ private fun WorkflowApp(
         if (uri != null) {
             coroutineScope.launch {
                 val outcome = withContext(Dispatchers.IO) {
-                    runCatching { workflowTransfer.readMany(uri) }
+                    runCatching { workflowTransfer.readLibrary(uri) }
                 }
-                outcome.onSuccess { importedWorkflows ->
-                    val normalized = normalizeImportedWorkflows(workflows, importedWorkflows, ::newId)
-                    val updated = workflows + normalized
-                    onSave(updated)
-                    workflows = updated
-                    runMessage = context.getString(R.string.workflows_imported, normalized.size)
+                outcome.onSuccess { importedLibrary ->
+                    val updated = mergeImportedLibrary(library, importedLibrary, ::newId)
+                    persist(updated)
+                    runMessage = context.getString(
+                        R.string.workflows_imported,
+                        updated.workflows.size - workflows.size,
+                    )
                 }
                         .onFailure { runMessage = context.getString(R.string.import_failed, it.message.orEmpty()) }
                     }
         }
     }
 
-    if (editingWorkflow != null) {
+    if (workflowComparison != null) {
+        val (before, after) = requireNotNull(workflowComparison)
+        WorkflowComparisonScreen(
+            before = before,
+            after = after,
+            onBack = { workflowComparison = null },
+        )
+    } else if (editingWorkflow != null) {
         WorkflowEditor(
             workflow = requireNotNull(editingWorkflow),
             initialEditingStepPath = initialEditingStepPath,
@@ -436,8 +499,7 @@ private fun WorkflowApp(
                     schedules = onCancelSchedule(workflow.id)
                 }
                 val updated = workflows.filterNot { it.id == workflow.id } + workflow
-                onSave(updated)
-                workflows = updated
+                persist(library.copy(workflows = updated))
                 editingWorkflow = null
                 initialEditingStepPath = null
             },
@@ -459,6 +521,75 @@ private fun WorkflowApp(
     } else {
         WorkflowHome(
             workflows = workflows,
+            folders = library.folders,
+            workflowFolderIds = library.workflowFolderIds,
+            onSaveFolder = { folder -> persist(library.withFolder(folder)) },
+            onDeleteFolder = { folderId -> persist(library.withoutFolder(folderId)) },
+            onMoveWorkflow = { workflowId, folderId ->
+                persist(library.moveWorkflow(workflowId, folderId))
+            },
+            onInstallSettingsPack = {
+                val availablePacks = listOf(
+                    Triple(
+                        SettingsWorkflowPack.definition,
+                        R.string.settings_folder_name,
+                        listOf(
+                            R.string.settings_workflow_open_home,
+                            R.string.settings_workflow_verify_list,
+                            R.string.settings_workflow_scroll_list,
+                            R.string.settings_workflow_open_network,
+                            R.string.settings_workflow_open_connected_devices,
+                            R.string.settings_workflow_open_apps,
+                            R.string.settings_workflow_open_notifications,
+                            R.string.settings_workflow_open_sound,
+                            R.string.settings_workflow_open_modes,
+                            R.string.settings_workflow_open_display,
+                            R.string.settings_workflow_open_storage,
+                            R.string.settings_workflow_open_location,
+                            R.string.settings_workflow_open_accessibility,
+                            R.string.settings_workflow_open_accounts,
+                            R.string.settings_workflow_open_languages,
+                        ),
+                    ),
+                    Triple(
+                        ClockWorkflowPack.definition,
+                        R.string.clock_folder_name,
+                        listOf(
+                            R.string.clock_workflow_open,
+                            R.string.clock_workflow_verify_time,
+                            R.string.clock_workflow_verify_date,
+                        ),
+                    ),
+                    Triple(
+                        FilesWorkflowPack.definition,
+                        R.string.files_folder_name,
+                        listOf(
+                            R.string.files_workflow_open,
+                            R.string.files_workflow_verify_header,
+                            R.string.files_workflow_verify_list,
+                        ),
+                    ),
+                ).filter { (pack) ->
+                    context.packageManager.getLaunchIntentForPackage(pack.packageName) != null
+                }
+                var updatedLibrary = library
+                var addedCount = 0
+                availablePacks.forEach { (pack, folderNameRes, workflowNameResources) ->
+                    val result = pack.install(
+                        library = updatedLibrary,
+                        folderName = context.getString(folderNameRes),
+                        workflowNames = workflowNameResources.map(context::getString),
+                    )
+                    updatedLibrary = result.library
+                    addedCount += result.addedWorkflowCount
+                }
+                persist(updatedLibrary)
+                runMessage = if (addedCount == 0) {
+                    context.getString(R.string.system_packs_already_installed)
+                } else {
+                    context.getString(R.string.system_packs_installed, addedCount)
+                }
+            },
             runRecords = runRecords,
             schedules = schedules,
             onCreate = { workflow ->
@@ -471,7 +602,7 @@ private fun WorkflowApp(
             },
             onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
             onExportAll = {
-                pendingBundleExport = workflows.toList()
+                pendingBundleExport = library
                 bundleExportLauncher.launch("ai-index-finger-backup.json")
             },
             onExport = { workflow ->
@@ -483,17 +614,30 @@ private fun WorkflowApp(
                     id = newId(),
                     name = context.getString(R.string.workflow_copy_name, workflow.name),
                 )
-                val updated = workflows + duplicate
-                onSave(updated)
-                workflows = updated
+                persist(
+                    library.copy(
+                        workflows = workflows + duplicate,
+                        workflowFolderIds = library.folderIdFor(workflow.id)?.let { folderId ->
+                            library.workflowFolderIds + (duplicate.id to folderId)
+                        } ?: library.workflowFolderIds,
+                    ),
+                )
             },
+            onCompare = { before, after -> workflowComparison = before to after },
+                        onViewVersions = { workflow ->
+                            coroutineScope.launch {
+                                runCatching { onListVersions(workflow.id) }
+                                    .onSuccess { versions -> versionHistory = workflow to versions }
+                                    .onFailure {
+                                        runMessage = context.getString(R.string.workflow_versions_load_failed)
+                                    }
+                            }
+                        },
             onDelete = { workflow ->
                 schedules = onCancelSchedule(workflow.id)
-                val updated = workflows.filterNot { it.id == workflow.id }
-                onSave(updated)
-                workflows = updated
+                persist(library.copy(workflows = workflows.filterNot { it.id == workflow.id }))
             },
-            onSchedule = { workflow, targetEpochMillis ->
+            onSchedule = { workflow, targetEpochMillis, recurrence ->
                 if (!workflow.isReadyToRun()) {
                     runMessage = context.getString(
                         R.string.cannot_schedule,
@@ -503,10 +647,10 @@ private fun WorkflowApp(
                     context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                     PackageManager.PERMISSION_GRANTED
                 ) {
-                    pendingSchedule = workflow to targetEpochMillis
+                    pendingSchedule = Triple(workflow, targetEpochMillis, recurrence)
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
-                    runCatching { onSchedule(workflow, targetEpochMillis) }
+                    runCatching { onSchedule(workflow, targetEpochMillis, recurrence) }
                         .onSuccess {
                             schedules = it
                             runMessage = context.getString(R.string.workflow_scheduled, workflow.name)
@@ -557,8 +701,11 @@ private fun WorkflowApp(
                     workflow = workflow,
                     accessibilityConnected = service != null,
                     notificationStatus = notificationStatus,
-                    isLaunchable = { packageName ->
-                        context.packageManager.getLaunchIntentForPackage(packageName) != null
+                    isLaunchable = { packageName, intentAction ->
+                        intentAction?.let { Intent(it).setPackage(packageName) }
+                            ?.resolveActivity(context.packageManager) != null ||
+                            intentAction == null &&
+                            context.packageManager.getLaunchIntentForPackage(packageName) != null
                     },
                     countMatches = { selector -> service?.countMatches(selector) ?: 0 },
                     imageCaptureSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
@@ -571,6 +718,35 @@ private fun WorkflowApp(
                     AccessibilityDisclosureAction.ShowDisclosure
                 ) {
                     showAccessibilityDisclosure = true
+                }
+            },
+        )
+    }
+    versionHistory?.let { (current, versions) ->
+        WorkflowVersionHistoryDialog(
+            current = current,
+            versions = versions,
+            onDismiss = { versionHistory = null },
+            onPreview = { version ->
+                versionHistory = null
+                workflowComparison = version.workflow to current
+            },
+            onRollback = { version ->
+                coroutineScope.launch {
+                    runCatching { onRollback(current.id, version.versionId) }
+                        .onSuccess { restored ->
+                            library = library.copy(
+                                workflows = workflows.map { workflow ->
+                                    if (workflow.id == restored.id) restored else workflow
+                                },
+                            )
+                            versionHistory = restored to runCatching { onListVersions(restored.id) }
+                                .getOrDefault(emptyList())
+                            runMessage = context.getString(R.string.workflow_rollback_complete, restored.name)
+                        }
+                        .onFailure {
+                            runMessage = context.getString(R.string.workflow_rollback_failed)
+                        }
                 }
             },
         )
@@ -613,8 +789,14 @@ private fun WorkflowApp(
 }
 
 @Composable
-private fun WorkflowHome(
+internal fun WorkflowHome(
     workflows: List<Workflow>,
+    folders: List<WorkflowFolder>,
+    workflowFolderIds: Map<String, String>,
+    onSaveFolder: (WorkflowFolder) -> Unit,
+    onDeleteFolder: (String) -> Unit,
+    onMoveWorkflow: (String, String?) -> Unit,
+    onInstallSettingsPack: () -> Unit,
     runRecords: List<RunRecord>,
     schedules: List<WorkflowSchedule>,
     onCreate: (Workflow) -> Unit,
@@ -623,8 +805,10 @@ private fun WorkflowHome(
     onExportAll: () -> Unit,
     onExport: (Workflow) -> Unit,
     onDuplicate: (Workflow) -> Unit,
+    onCompare: (Workflow, Workflow) -> Unit,
+        onViewVersions: (Workflow) -> Unit,
     onDelete: (Workflow) -> Unit,
-    onSchedule: (Workflow, Long) -> Unit,
+    onSchedule: (Workflow, Long, ScheduleRecurrence) -> Unit,
     onCancelSchedule: (Workflow) -> Unit,
     onClearRunHistory: () -> Unit,
     onViewRunHistory: () -> Unit,
@@ -647,6 +831,13 @@ private fun WorkflowHome(
     var workflowToSchedule by remember { mutableStateOf<Workflow?>(null) }
     var workflowQuery by remember { mutableStateOf("") }
     var showCreateWorkflow by remember { mutableStateOf(false) }
+    var selectedWorkflowExample by remember { mutableStateOf<WorkflowExample?>(null) }
+    var workflowToCompare by remember { mutableStateOf<Workflow?>(null) }
+    var selectedFolderFilter by remember { mutableStateOf<WorkflowFolderSelection>(WorkflowFolderSelection.All) }
+    var showFolderManager by remember { mutableStateOf(false) }
+    var folderToEdit by remember { mutableStateOf<WorkflowFolder?>(null) }
+    var folderToDelete by remember { mutableStateOf<WorkflowFolder?>(null) }
+    var workflowToMove by remember { mutableStateOf<Workflow?>(null) }
     val untitledWorkflowName = stringResource(R.string.untitled_workflow)
     DisposableEffect(showNodeInspector) {
         val observationLease = if (showNodeInspector) {
@@ -656,8 +847,14 @@ private fun WorkflowHome(
         }
         onDispose { observationLease?.close() }
     }
-    val visibleWorkflows = remember(workflows, workflowQuery) {
-        workflows.filter { it.matchesSearch(workflowQuery) }
+    LaunchedEffect(folders, selectedFolderFilter) {
+        val selected = selectedFolderFilter as? WorkflowFolderSelection.Folder
+        if (selected != null && folders.none { it.id == selected.id }) {
+            selectedFolderFilter = WorkflowFolderSelection.All
+        }
+    }
+    val visibleWorkflows = remember(workflows, workflowQuery, selectedFolderFilter, workflowFolderIds) {
+        filterWorkflows(workflows, workflowFolderIds, workflowQuery, selectedFolderFilter)
     }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     LaunchedEffect(workflowStartedAtMillis) {
@@ -729,6 +926,15 @@ private fun WorkflowHome(
                 ) { Text(stringResource(R.string.backup)) }
                 TextButton(onClick = onImport, enabled = runningWorkflowId == null) { Text(stringResource(R.string.import_action)) }
             }
+            OutlinedButton(
+                onClick = onInstallSettingsPack,
+                enabled = runningWorkflowId == null,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(SETTINGS_PACK_INSTALL_TAG),
+            ) {
+                Text(stringResource(R.string.install_system_examples))
+            }
             if (workflows.isNotEmpty()) {
                 OutlinedTextField(
                     value = workflowQuery,
@@ -742,6 +948,41 @@ private fun WorkflowHome(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FolderFilterButton(
+                    label = stringResource(R.string.folder_all),
+                    count = workflows.size,
+                    selected = selectedFolderFilter == WorkflowFolderSelection.All,
+                    modifier = Modifier.testTag(FOLDER_FILTER_ALL_TAG),
+                    onClick = { selectedFolderFilter = WorkflowFolderSelection.All },
+                )
+                FolderFilterButton(
+                    label = stringResource(R.string.folder_unfiled),
+                    count = workflows.count { workflowFolderIds[it.id] == null },
+                    selected = selectedFolderFilter == WorkflowFolderSelection.Unfiled,
+                    modifier = Modifier.testTag(FOLDER_FILTER_UNFILED_TAG),
+                    onClick = { selectedFolderFilter = WorkflowFolderSelection.Unfiled },
+                )
+                folders.sortedBy { it.name.lowercase() }.forEach { folder ->
+                    FolderFilterButton(
+                        label = folder.name,
+                        count = workflows.count { workflowFolderIds[it.id] == folder.id },
+                        selected = selectedFolderFilter == WorkflowFolderSelection.Folder(folder.id),
+                        modifier = Modifier.testTag(folderFilterTag(folder.id)),
+                        onClick = { selectedFolderFilter = WorkflowFolderSelection.Folder(folder.id) },
+                    )
+                }
+                TextButton(
+                    onClick = { showFolderManager = true },
+                    modifier = Modifier.testTag(FOLDER_MANAGE_TAG),
+                ) {
+                    Text(stringResource(R.string.manage_folders))
+                }
             }
             Spacer(Modifier.height(8.dp))
             HorizontalDivider()
@@ -763,10 +1004,15 @@ private fun WorkflowHome(
                 WorkflowRow(
                     workflow = workflow,
                     isRunning = workflow.id == runningWorkflowId,
+                    canCompare = workflows.size > 1,
                     schedule = schedule,
                     onEdit = { onEdit(workflow) },
                     onExport = { onExport(workflow) },
                     onDuplicate = { onDuplicate(workflow) },
+                    onMove = { workflowToMove = workflow },
+                    moveTag = folderMoveWorkflowTag(workflow.id),
+                    onCompare = { workflowToCompare = workflow },
+                                        onViewVersions = { onViewVersions(workflow) },
                     onDelete = { workflowToDelete = workflow },
                     onSchedule = { workflowToSchedule = workflow },
                     onCancelSchedule = { onCancelSchedule(workflow) },
@@ -819,60 +1065,138 @@ private fun WorkflowHome(
             },
         )
     }
-    if (showCreateWorkflow) {
+
+    if (showFolderManager) {
+        WorkflowFolderManagerDialog(
+            folders = folders,
+            workflowFolderIds = workflowFolderIds,
+            onDismiss = { showFolderManager = false },
+            onCreate = {
+                folderToEdit = WorkflowFolder(newId(), "")
+                showFolderManager = false
+            },
+            onRename = {
+                folderToEdit = it
+                showFolderManager = false
+            },
+            onDelete = {
+                folderToDelete = it
+                showFolderManager = false
+            },
+        )
+    }
+    folderToEdit?.let { folder ->
+        WorkflowFolderNameDialog(
+            folder = folder,
+            folders = folders,
+            onDismiss = { folderToEdit = null },
+            onSave = {
+                onSaveFolder(it)
+                folderToEdit = null
+            },
+        )
+    }
+    folderToDelete?.let { folder ->
+        val affectedCount = workflowFolderIds.count { it.value == folder.id }
         AlertDialog(
-            onDismissRequest = { showCreateWorkflow = false },
-            title = { Text(stringResource(R.string.create_workflow)) },
+            onDismissRequest = { folderToDelete = null },
+            title = { Text(stringResource(R.string.delete_folder_title)) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            showCreateWorkflow = false
-                            onCreate(
-                                Workflow(
-                                    id = newId(),
-                                    name = untitledWorkflowName,
-                                    steps = emptyList(),
-                                    state = WorkflowState.Draft,
-                                ),
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.fillMaxWidth()) {
-                            Text(stringResource(R.string.blank_workflow), fontWeight = FontWeight.SemiBold)
-                            Text(
-                                stringResource(R.string.blank_workflow_description),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
-                    WorkflowStarterTemplate.entries.forEach { template ->
-                        val templateTitle = template.localizedTitle()
-                        val templateDescription = template.localizedDescription()
+                Text(
+                    if (affectedCount == 0) {
+                        stringResource(R.string.delete_empty_folder_message, folder.name)
+                    } else {
+                        stringResource(R.string.delete_folder_message, folder.name, affectedCount)
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteFolder(folder.id)
+                        folderToDelete = null
+                    },
+                    modifier = Modifier.testTag(FOLDER_DELETE_CONFIRM_TAG),
+                ) { Text(stringResource(R.string.delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { folderToDelete = null }) { Text(stringResource(R.string.cancel)) }
+            },
+        )
+    }
+    workflowToMove?.let { workflow ->
+        WorkflowMoveDialog(
+            workflow = workflow,
+            folders = folders,
+            currentFolderId = workflowFolderIds[workflow.id],
+            onDismiss = { workflowToMove = null },
+            onMove = { folderId ->
+                onMoveWorkflow(workflow.id, folderId)
+                workflowToMove = null
+            },
+        )
+    }
+
+    workflowToCompare?.let { source ->
+        AlertDialog(
+            onDismissRequest = { workflowToCompare = null },
+            title = { Text(stringResource(R.string.compare_with_workflow, source.name)) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    workflows.filterNot { it.id == source.id }.forEach { candidate ->
                         OutlinedButton(
                             onClick = {
-                                showCreateWorkflow = false
-                                onCreate(WorkflowStarterTemplates.create(template, templateTitle, ::newId))
+                                workflowToCompare = null
+                                onCompare(source, candidate)
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Column(Modifier.fillMaxWidth()) {
-                                Text(templateTitle, fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    templateDescription,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 12.sp,
-                                )
-                            }
+                            Text(candidate.name, modifier = Modifier.fillMaxWidth())
                         }
                     }
                 }
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showCreateWorkflow = false }) { Text(stringResource(R.string.cancel)) }
+                TextButton(onClick = { workflowToCompare = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+    if (showCreateWorkflow) {
+        WorkflowExampleCatalogDialog(
+            onDismiss = { showCreateWorkflow = false },
+            onCreateBlank = {
+                showCreateWorkflow = false
+                onCreate(
+                    Workflow(
+                        id = newId(),
+                        name = untitledWorkflowName,
+                        steps = emptyList(),
+                        state = WorkflowState.Draft,
+                    ),
+                )
+            },
+            onSelectExample = { example ->
+                showCreateWorkflow = false
+                selectedWorkflowExample = example
+            },
+        )
+    }
+    selectedWorkflowExample?.let { example ->
+        WorkflowExampleDetailsDialog(
+            example = example,
+            onDismiss = {
+                selectedWorkflowExample = null
+                showCreateWorkflow = true
+            },
+            onUse = { localizedTitle ->
+                selectedWorkflowExample = null
+                onCreate(example.create(localizedTitle, ::newId))
             },
         )
     }
@@ -904,8 +1228,8 @@ private fun WorkflowHome(
         ScheduleDialog(
             workflowName = workflow.name,
             onDismiss = { workflowToSchedule = null },
-            onSchedule = { targetEpochMillis ->
-                onSchedule(workflow, targetEpochMillis)
+            onSchedule = { targetEpochMillis, recurrence ->
+                onSchedule(workflow, targetEpochMillis, recurrence)
                 workflowToSchedule = null
             },
         )
@@ -913,15 +1237,210 @@ private fun WorkflowHome(
 }
 
 @Composable
+private fun FolderFilterButton(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val selectionModifier = modifier.semantics { this.selected = selected }
+    if (selected) {
+        Button(onClick = onClick, modifier = selectionModifier) {
+            Text(stringResource(R.string.folder_filter_count, label, count))
+        }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = selectionModifier) {
+            Text(stringResource(R.string.folder_filter_count, label, count))
+        }
+    }
+}
+
+@Composable
+private fun WorkflowFolderManagerDialog(
+    folders: List<WorkflowFolder>,
+    workflowFolderIds: Map<String, String>,
+    onDismiss: () -> Unit,
+    onCreate: () -> Unit,
+    onRename: (WorkflowFolder) -> Unit,
+    onDelete: (WorkflowFolder) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.manage_folders)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (folders.isEmpty()) {
+                    Text(
+                        stringResource(R.string.no_folders),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                folders.sortedBy { it.name.lowercase() }.forEach { folder ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            stringResource(
+                                R.string.folder_item_count,
+                                folder.name,
+                                workflowFolderIds.count { it.value == folder.id },
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                        val renameDescription = stringResource(R.string.rename_folder_accessibility, folder.name)
+                        TextButton(
+                            onClick = { onRename(folder) },
+                            modifier = Modifier
+                                .testTag(folderRenameTag(folder.id))
+                                .semantics { contentDescription = renameDescription },
+                        ) {
+                            Text(stringResource(R.string.rename))
+                        }
+                        val deleteDescription = stringResource(R.string.delete_folder_accessibility, folder.name)
+                        TextButton(
+                            onClick = { onDelete(folder) },
+                            modifier = Modifier
+                                .testTag(folderDeleteTag(folder.id))
+                                .semantics { contentDescription = deleteDescription },
+                        ) {
+                            Text(stringResource(R.string.delete))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onCreate,
+                modifier = Modifier.testTag(FOLDER_CREATE_TAG),
+            ) { Text(stringResource(R.string.create_folder)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+    )
+}
+
+@Composable
+private fun WorkflowFolderNameDialog(
+    folder: WorkflowFolder,
+    folders: List<WorkflowFolder>,
+    onDismiss: () -> Unit,
+    onSave: (WorkflowFolder) -> Unit,
+) {
+    var name by remember(folder.id) { mutableStateOf(folder.name) }
+    val normalizedName = name.trim()
+    val duplicate = folders.any {
+        it.id != folder.id && it.name.equals(normalizedName, ignoreCase = true)
+    }
+    val errorRes = when {
+        normalizedName.isEmpty() -> R.string.folder_name_required
+        duplicate -> R.string.folder_name_duplicate
+        else -> null
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(stringResource(if (folder.name.isEmpty()) R.string.create_folder else R.string.rename_folder))
+        },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                modifier = Modifier.testTag(FOLDER_NAME_INPUT_TAG),
+                label = { Text(stringResource(R.string.folder_name)) },
+                supportingText = { errorRes?.let { Text(stringResource(it)) } },
+                isError = errorRes != null,
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = errorRes == null,
+                onClick = { onSave(folder.copy(name = normalizedName)) },
+                modifier = Modifier.testTag(FOLDER_NAME_SAVE_TAG),
+            ) { Text(stringResource(R.string.save)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun WorkflowMoveDialog(
+    workflow: Workflow,
+    folders: List<WorkflowFolder>,
+    currentFolderId: String?,
+    onDismiss: () -> Unit,
+    onMove: (String?) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.move_workflow_title, workflow.name)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                FolderDestinationRow(
+                    name = stringResource(R.string.folder_unfiled),
+                    selected = currentFolderId == null,
+                    modifier = Modifier.testTag(FOLDER_DESTINATION_UNFILED_TAG),
+                    onClick = { onMove(null) },
+                )
+                folders.sortedBy { it.name.lowercase() }.forEach { folder ->
+                    FolderDestinationRow(
+                        name = folder.name,
+                        selected = currentFolderId == folder.id,
+                        modifier = Modifier.testTag(folderDestinationTag(folder.id)),
+                        onClick = { onMove(folder.id) },
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun FolderDestinationRow(
+    name: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics { this.selected = selected }
+            .clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Text(name)
+    }
+}
+
+@Composable
 private fun ScheduleDialog(
     workflowName: String,
     onDismiss: () -> Unit,
-    onSchedule: (Long) -> Unit,
+    onSchedule: (Long, ScheduleRecurrence) -> Unit,
 ) {
     val context = LocalContext.current
     val initialDateTime = remember { LocalDateTime.now().plusMinutes(15).withSecond(0).withNano(0) }
     var selectedDate by remember { mutableStateOf(initialDateTime.toLocalDate()) }
     var selectedTime by remember { mutableStateOf(initialDateTime.toLocalTime()) }
+    var recurrence by remember { mutableStateOf(ScheduleRecurrence.Once) }
     val targetResult = runCatching {
         localScheduleEpochMillis(selectedDate, selectedTime, ZoneId.systemDefault()).also {
             scheduleDelayMillis(it, System.currentTimeMillis())
@@ -964,6 +1483,21 @@ private fun ScheduleDialog(
                         },
                     ) { Text(stringResource(R.string.choose_time)) }
                 }
+                Text(stringResource(R.string.schedule_recurrence), fontWeight = FontWeight.SemiBold)
+                ScheduleRecurrence.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { recurrence = option },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = recurrence == option,
+                            onClick = { recurrence = option },
+                        )
+                        Text(option.localizedLabel())
+                    }
+                }
                 targetResult.exceptionOrNull()?.message?.let { message ->
                     Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
                 }
@@ -977,7 +1511,7 @@ private fun ScheduleDialog(
         confirmButton = {
             TextButton(
                 enabled = targetResult.isSuccess,
-                onClick = { onSchedule(targetResult.getOrThrow()) },
+                onClick = { onSchedule(targetResult.getOrThrow(), recurrence) },
             ) { Text(stringResource(R.string.schedule)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
@@ -3684,10 +4218,15 @@ private fun PermissionStatus(
 private fun WorkflowRow(
     workflow: Workflow,
     isRunning: Boolean,
+    canCompare: Boolean,
     schedule: WorkflowSchedule?,
     onEdit: () -> Unit,
     onExport: () -> Unit,
     onDuplicate: () -> Unit,
+    onMove: () -> Unit,
+    moveTag: String,
+    onCompare: () -> Unit,
+        onViewVersions: () -> Unit,
     onDelete: () -> Unit,
     onSchedule: () -> Unit,
     onCancelSchedule: () -> Unit,
@@ -3709,7 +4248,12 @@ private fun WorkflowRow(
             )
             schedule?.let {
                 Text(
-                    "计划于 ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it.scheduledAtMillis))}",
+                    stringResource(
+                        R.string.schedule_summary,
+                        DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                            .format(Date(it.scheduledAtMillis)),
+                        it.recurrence.localizedLabel(),
+                    ),
                     color = MaterialTheme.colorScheme.primary,
                     fontSize = 12.sp,
                 )
@@ -3728,7 +4272,20 @@ private fun WorkflowRow(
             Row {
                 TextButton(onClick = onExport, enabled = !isRunning) { Text("导出") }
                 TextButton(onClick = onDuplicate, enabled = !isRunning) { Text("复制") }
+                TextButton(
+                    onClick = onMove,
+                    enabled = !isRunning,
+                    modifier = Modifier.testTag(moveTag),
+                ) {
+                    Text(stringResource(R.string.move_to_folder))
+                }
                 TextButton(onClick = onDelete, enabled = !isRunning) { Text("删除") }
+            }
+            TextButton(onClick = onCompare, enabled = !isRunning && canCompare) {
+                Text(stringResource(R.string.compare_workflow))
+            }
+            TextButton(onClick = onViewVersions, enabled = !isRunning) {
+                Text(stringResource(R.string.workflow_version_history))
             }
             TextButton(onClick = onPreflight, enabled = !isRunning) { Text("检查") }
             TextButton(
@@ -3739,6 +4296,247 @@ private fun WorkflowRow(
         }
     }
 }
+
+internal const val FOLDER_MANAGE_TAG = "folder-manage"
+internal const val SETTINGS_PACK_INSTALL_TAG = "settings-pack-install"
+internal const val FOLDER_CREATE_TAG = "folder-create"
+internal const val FOLDER_NAME_INPUT_TAG = "folder-name-input"
+internal const val FOLDER_NAME_SAVE_TAG = "folder-name-save"
+internal const val FOLDER_DELETE_CONFIRM_TAG = "folder-delete-confirm"
+internal const val FOLDER_FILTER_ALL_TAG = "folder-filter-all"
+internal const val FOLDER_FILTER_UNFILED_TAG = "folder-filter-unfiled"
+internal const val FOLDER_DESTINATION_UNFILED_TAG = "folder-destination-unfiled"
+internal fun folderFilterTag(folderId: String) = "folder-filter-$folderId"
+internal fun folderRenameTag(folderId: String) = "folder-rename-$folderId"
+internal fun folderDeleteTag(folderId: String) = "folder-delete-$folderId"
+internal fun folderMoveWorkflowTag(workflowId: String) = "folder-move-workflow-$workflowId"
+internal fun folderDestinationTag(folderId: String) = "folder-destination-$folderId"
+
+@Composable
+private fun ScheduleRecurrence.localizedLabel(): String = stringResource(
+    when (this) {
+        ScheduleRecurrence.Once -> R.string.schedule_recurrence_once
+        ScheduleRecurrence.Daily -> R.string.schedule_recurrence_daily
+        ScheduleRecurrence.Weekly -> R.string.schedule_recurrence_weekly
+    },
+)
+
+@Composable
+private fun WorkflowVersionHistoryDialog(
+    current: Workflow,
+    versions: List<WorkflowVersion>,
+    onDismiss: () -> Unit,
+    onPreview: (WorkflowVersion) -> Unit,
+    onRollback: (WorkflowVersion) -> Unit,
+) {
+    var pendingRollback by remember(current.id) { mutableStateOf<WorkflowVersion?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.workflow_version_history_title, current.name)) },
+        text = {
+            if (versions.isEmpty()) {
+                Text(stringResource(R.string.workflow_version_history_empty))
+            } else {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    versions.forEach { version ->
+                        Column {
+                            Text(
+                                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM)
+                                    .format(Date(version.createdAtEpochMillis)),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                stringResource(R.string.workflow_version_name, version.workflow.name),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp,
+                            )
+                            Row {
+                                TextButton(onClick = { onPreview(version) }) {
+                                    Text(stringResource(R.string.preview_changes))
+                                }
+                                TextButton(onClick = { pendingRollback = version }) {
+                                    Text(stringResource(R.string.rollback))
+                                }
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+    )
+    pendingRollback?.let { version ->
+        AlertDialog(
+            onDismissRequest = { pendingRollback = null },
+            title = { Text(stringResource(R.string.confirm_rollback_title)) },
+            text = { Text(stringResource(R.string.confirm_rollback_message, version.workflow.name)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingRollback = null
+                        onRollback(version)
+                    },
+                ) { Text(stringResource(R.string.rollback)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRollback = null }) { Text(stringResource(R.string.cancel)) }
+            },
+        )
+    }
+}
+
+@Composable
+private fun WorkflowComparisonScreen(
+    before: Workflow,
+    after: Workflow,
+    onBack: () -> Unit,
+) {
+    val comparison = remember(before, after) { compareWorkflows(before, after) }
+    BackHandler(onBack = onBack)
+    Scaffold(containerColor = MaterialTheme.colorScheme.background) { contentPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(contentPadding)
+                .padding(horizontal = 20.dp),
+        ) {
+            TextButton(onClick = onBack) { Text(stringResource(R.string.back)) }
+            Text(
+                stringResource(R.string.workflow_comparison),
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                stringResource(R.string.workflow_comparison_names, before.name, after.name),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+            if (comparison.isIdentical) {
+                Text(
+                    stringResource(R.string.workflows_identical),
+                    modifier = Modifier.padding(vertical = 24.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text(
+                    stringResource(R.string.workflow_difference_count, comparison.differences.size),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                HorizontalDivider()
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(comparison.differences) { difference ->
+                        WorkflowDifferenceRow(difference)
+                        HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkflowDifferenceRow(difference: WorkflowDifference) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        when (difference) {
+            is WorkflowDifference.MetadataChanged -> Text(
+                stringResource(R.string.workflow_metadata_changed, difference.field.localizedName()),
+                fontWeight = FontWeight.SemiBold,
+            )
+            is WorkflowDifference.StepAdded -> {
+                Text(difference.path.localizedName(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    stringResource(R.string.workflow_step_added, difference.stepType.localizedStepType()),
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            is WorkflowDifference.StepRemoved -> {
+                Text(difference.path.localizedName(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    stringResource(R.string.workflow_step_removed, difference.stepType.localizedStepType()),
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            is WorkflowDifference.StepChanged -> {
+                Text(difference.path.localizedName(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    when (difference.field) {
+                        StepComparisonField.Type -> stringResource(
+                            R.string.workflow_step_type_changed,
+                            difference.beforeStepType.localizedStepType(),
+                            difference.afterStepType.localizedStepType(),
+                        )
+                        StepComparisonField.Configuration -> stringResource(
+                            R.string.workflow_step_configuration_changed,
+                            difference.beforeStepType.localizedStepType(),
+                        )
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StepComparisonPath.localizedName(): String {
+    val segments = buildList {
+        parent?.let { add(it.localizedName()) }
+        branch?.let { add(it.localizedName()) }
+        add(stringResource(R.string.workflow_step_position, index + 1))
+    }
+    return segments.joinToString(" › ")
+}
+
+@Composable
+private fun StepComparisonBranch.localizedName(): String = stringResource(
+    when (this) {
+        StepComparisonBranch.Repeat -> R.string.workflow_branch_repeat
+        StepComparisonBranch.WhenTrue -> R.string.workflow_branch_when_true
+        StepComparisonBranch.WhenFalse -> R.string.workflow_branch_when_false
+    },
+)
+
+@Composable
+private fun WorkflowMetadataField.localizedName(): String = stringResource(
+    when (this) {
+        WorkflowMetadataField.Name -> R.string.workflow_metadata_name
+        WorkflowMetadataField.State -> R.string.workflow_metadata_state
+        WorkflowMetadataField.DefaultStepTimeout -> R.string.workflow_metadata_timeout
+    },
+)
+
+@Composable
+private fun String.localizedStepType(): String = stringResource(
+    when (this) {
+        "launch_app" -> R.string.workflow_step_type_launch_app
+        "click" -> R.string.workflow_step_type_click
+        "image_click" -> R.string.workflow_step_type_image_click
+        "long_click" -> R.string.workflow_step_type_long_click
+        "input_text" -> R.string.workflow_step_type_input_text
+        "read_node_text" -> R.string.workflow_step_type_read_node_text
+        "swipe" -> R.string.workflow_step_type_swipe
+        "scroll" -> R.string.workflow_step_type_scroll
+        "tap" -> R.string.workflow_step_type_tap
+        "global_action" -> R.string.workflow_step_type_global_action
+        "wait_for_node" -> R.string.workflow_step_type_wait_for_node
+        "delay" -> R.string.workflow_step_type_delay
+        "set_variable" -> R.string.workflow_step_type_set_variable
+        "if_else" -> R.string.workflow_step_type_if_else
+        "repeat" -> R.string.workflow_step_type_repeat
+        else -> R.string.workflow_step_type_unknown
+    },
+)
 
 private fun Workflow.exportFileName(): String {
     val safeName = name
@@ -3994,6 +4792,24 @@ private fun RunRecordDetailsDialog(
                 Text("持续时间：${record.durationMillis} 毫秒")
                 record.failedStepId?.let { Text("失败步骤：$it") }
                 record.failureMessage?.let { Text("详情：$it") }
+                if (record.diagnostics.isNotEmpty()) {
+                    Text(
+                        stringResource(R.string.execution_diagnostics),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    record.diagnostics.sortedBy { it.sequence }.forEach { diagnostic ->
+                        Text(
+                            stringResource(
+                                R.string.execution_diagnostic_row,
+                                diagnostic.stepId,
+                                diagnostic.outcome.localizedName(),
+                                diagnostic.durationMillis,
+                                diagnostic.attemptCount,
+                            ),
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
                 if (destination == null) {
                     Text(
                         "原始工作流已不存在。",
@@ -4017,6 +4833,16 @@ private fun RunRecordDetailsDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
     )
 }
+
+@Composable
+private fun RunStepOutcome.localizedName(): String = stringResource(
+    when (this) {
+        RunStepOutcome.Completed -> R.string.execution_outcome_completed
+        RunStepOutcome.ContinuedAfterFailure -> R.string.execution_outcome_continued
+        RunStepOutcome.Failed -> R.string.execution_outcome_failed
+        RunStepOutcome.Cancelled -> R.string.execution_outcome_cancelled
+    },
+)
 
 @Composable
 private fun RunRecordRow(record: RunRecord) {
@@ -4108,20 +4934,212 @@ private fun ValidationIssue.localizedMessage(): String = when {
 }
 
 @Composable
-private fun WorkflowStarterTemplate.localizedTitle(): String = stringResource(
+private fun WorkflowExampleCatalogDialog(
+    onDismiss: () -> Unit,
+    onCreateBlank: () -> Unit,
+    onSelectExample: (WorkflowExample) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf<WorkflowExampleCategory?>(null) }
+    val localizedCategories = WorkflowExampleCategory.entries.associateWith { it.localizedName() }
+    val localizedExamples = WorkflowStarterTemplates.catalog.map { example ->
+        SearchableWorkflowExample(
+            example = example,
+            localizedTitle = localizedResource(example.titleResourceKey),
+            localizedDescription = localizedResource(example.descriptionResourceKey),
+            localizedCategory = localizedCategories.getValue(example.category),
+        )
+    }
+    val visibleExamples = filterWorkflowExamples(localizedExamples, query, selectedCategory)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.workflow_example_catalog_title)) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 620.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = onCreateBlank, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.blank_workflow), fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.blank_workflow_description), fontSize = 12.sp)
+                    }
+                }
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text(stringResource(R.string.workflow_example_search)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    CategoryFilterButton(
+                        label = stringResource(R.string.workflow_example_category_all),
+                        selected = selectedCategory == null,
+                        onClick = { selectedCategory = null },
+                    )
+                    WorkflowExampleCategory.entries.forEach { category ->
+                        CategoryFilterButton(
+                            label = localizedCategories.getValue(category),
+                            selected = selectedCategory == category,
+                            onClick = { selectedCategory = category },
+                        )
+                    }
+                }
+                Text(
+                    stringResource(R.string.workflow_example_result_count, visibleExamples.size),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                if (visibleExamples.isEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(stringResource(R.string.workflow_example_no_results))
+                        TextButton(onClick = {
+                            query = ""
+                            selectedCategory = null
+                        }) { Text(stringResource(R.string.workflow_example_clear_filters)) }
+                    }
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                        items(visibleExamples, key = { it.example.id }) { localized ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(role = Role.Button) { onSelectExample(localized.example) }
+                                    .padding(vertical = 10.dp),
+                            ) {
+                                Text(localized.localizedTitle, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    localized.localizedCategory,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 12.sp,
+                                )
+                                Text(
+                                    localized.localizedDescription,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.sp,
+                                )
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+    )
+}
+
+@Composable
+private fun CategoryFilterButton(label: String, selected: Boolean, onClick: () -> Unit) {
+    if (selected) {
+        Button(onClick = onClick) { Text(label) }
+    } else {
+        OutlinedButton(onClick = onClick) { Text(label) }
+    }
+}
+
+@Composable
+private fun WorkflowExampleDetailsDialog(
+    example: WorkflowExample,
+    onDismiss: () -> Unit,
+    onUse: (String) -> Unit,
+) {
+    val title = localizedResource(example.titleResourceKey)
+    val description = localizedResource(example.descriptionResourceKey)
+    val capabilities = example.compatibility.requiredCapabilities
+        .sortedBy(WorkflowExampleCapability::ordinal)
+        .map { capability -> capability.localizedName() }
+        .joinToString(stringResource(R.string.workflow_example_capability_separator))
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.workflow_example_details_title)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(example.category.localizedName(), color = MaterialTheme.colorScheme.primary)
+                Text(description)
+                Text(
+                    stringResource(
+                        if (example.compatibility.requiresConfiguration) {
+                            R.string.workflow_example_requires_configuration
+                        } else {
+                            R.string.workflow_example_ready_to_edit
+                        },
+                    ),
+                    color = if (example.compatibility.requiresConfiguration) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                Text(stringResource(R.string.workflow_example_capabilities, capabilities))
+                Text(
+                    stringResource(
+                        R.string.workflow_example_compatibility,
+                        example.compatibility.minimumSchemaVersion,
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onUse(title) }) { Text(stringResource(R.string.workflow_example_use)) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+    )
+}
+
+@Composable
+private fun localizedResource(resourceKey: String): String {
+    val context = LocalContext.current
+    val resourceId = remember(resourceKey) {
+        context.resources.getIdentifier(resourceKey, "string", context.packageName)
+    }
+    check(resourceId != 0) { "Missing string resource: $resourceKey" }
+    return stringResource(resourceId)
+}
+
+@Composable
+private fun WorkflowExampleCategory.localizedName(): String = stringResource(
     when (this) {
-        WorkflowStarterTemplate.PauseThenHome -> R.string.template_pause_then_home_title
-        WorkflowStarterTemplate.RepeatWithPause -> R.string.template_repeat_pause_title
-        WorkflowStarterTemplate.VariableDecision -> R.string.template_variable_decision_title
+        WorkflowExampleCategory.Fundamentals -> R.string.workflow_example_category_fundamentals
+        WorkflowExampleCategory.Navigation -> R.string.workflow_example_category_navigation
+        WorkflowExampleCategory.Repetition -> R.string.workflow_example_category_repetition
+        WorkflowExampleCategory.Variables -> R.string.workflow_example_category_variables
+        WorkflowExampleCategory.Decisions -> R.string.workflow_example_category_decisions
+        WorkflowExampleCategory.Timing -> R.string.workflow_example_category_timing
+        WorkflowExampleCategory.Resilience -> R.string.workflow_example_category_resilience
+        WorkflowExampleCategory.Gestures -> R.string.workflow_example_category_gestures
+        WorkflowExampleCategory.AppObservation -> R.string.workflow_example_category_app_observation
+        WorkflowExampleCategory.TextReading -> R.string.workflow_example_category_text_reading
     },
 )
 
 @Composable
-private fun WorkflowStarterTemplate.localizedDescription(): String = stringResource(
+private fun WorkflowExampleCapability.localizedName(): String = stringResource(
     when (this) {
-        WorkflowStarterTemplate.PauseThenHome -> R.string.template_pause_then_home_description
-        WorkflowStarterTemplate.RepeatWithPause -> R.string.template_repeat_pause_description
-        WorkflowStarterTemplate.VariableDecision -> R.string.template_variable_decision_description
+        WorkflowExampleCapability.Delay -> R.string.workflow_example_capability_delay
+        WorkflowExampleCapability.GlobalNavigation -> R.string.workflow_example_capability_global_navigation
+        WorkflowExampleCapability.Variables -> R.string.workflow_example_capability_variables
+        WorkflowExampleCapability.Conditions -> R.string.workflow_example_capability_conditions
+        WorkflowExampleCapability.Loops -> R.string.workflow_example_capability_loops
+        WorkflowExampleCapability.Gestures -> R.string.workflow_example_capability_gestures
+        WorkflowExampleCapability.AppSelectors -> R.string.workflow_example_capability_app_selectors
+        WorkflowExampleCapability.NodeReading -> R.string.workflow_example_capability_node_reading
     },
 )
 

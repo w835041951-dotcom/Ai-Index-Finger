@@ -42,6 +42,28 @@ class LocalizedResourcesTest {
         )
     }
 
+    @Test
+    fun recurrenceLabelsAreAvailableInBothProductLanguages() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        assertEquals(
+            listOf("Once", "Daily", "Weekly"),
+            listOf(
+                R.string.schedule_recurrence_once,
+                R.string.schedule_recurrence_daily,
+                R.string.schedule_recurrence_weekly,
+            ).map(context.forLocale(Locale.US)::getString),
+        )
+        assertEquals(
+            listOf("仅一次", "每天", "每周"),
+            listOf(
+                R.string.schedule_recurrence_once,
+                R.string.schedule_recurrence_daily,
+                R.string.schedule_recurrence_weekly,
+            ).map(context.forLocale(Locale.SIMPLIFIED_CHINESE)::getString),
+        )
+    }
+
     private fun Context.forLocale(locale: Locale): Context {
         val configuration = Configuration(resources.configuration).apply { setLocales(LocaleList(locale)) }
         return createConfigurationContext(configuration)

@@ -18,7 +18,7 @@ private fun Step.addSearchTerms(terms: MutableList<String>) {
         is Step.GlobalAction -> "global ${action.name}"
         is Step.IfElse -> "if condition"
         is Step.InputText -> variableName?.let { "input text variable $it" } ?: "input text"
-        is Step.LaunchApp -> "launch app $packageName"
+        is Step.LaunchApp -> "launch app $packageName ${intentAction.orEmpty()}"
         is Step.LongClick -> "long click element"
         is Step.ReadNodeText -> "read node attribute ${attribute.name} variable $variableName"
         is Step.Repeat -> "repeat loop"

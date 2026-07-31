@@ -1,6 +1,8 @@
 package com.aiindexfinger.data
 
 import com.aiindexfinger.executor.RunResult
+import com.aiindexfinger.executor.StepExecutionDiagnostic
+import com.aiindexfinger.executor.StepExecutionOutcome
 import com.aiindexfinger.model.Workflow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -33,5 +35,22 @@ class RunResultMappingTest {
         assertEquals(0, record.durationMillis)
         assertNull(record.failedStepId)
         assertNull(record.failureMessage)
+    }
+
+    @Test
+    fun executorDiagnosticsMapWithoutSensitiveStepData() {
+        val record = RunResult.Completed.toRunRecord(
+            workflow,
+            startedAtMillis = 100,
+            finishedAtMillis = 120,
+            diagnostics = listOf(
+                StepExecutionDiagnostic(0, "input", 20, 1, StepExecutionOutcome.Completed),
+            ),
+        )
+
+        assertEquals(
+            listOf(RunStepDiagnostic(0, "input", 20, 1, RunStepOutcome.Completed)),
+            record.diagnostics,
+        )
     }
 }

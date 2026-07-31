@@ -14,9 +14,11 @@ import java.io.ByteArrayOutputStream
 private data class WorkflowBundle(
     val formatVersion: Int = CURRENT_BUNDLE_FORMAT_VERSION,
     val workflows: List<Workflow>,
+    val folders: List<WorkflowFolder> = emptyList(),
+    val workflowFolderIds: Map<String, String> = emptyMap(),
 )
 
-private const val CURRENT_BUNDLE_FORMAT_VERSION = 1
+private const val CURRENT_BUNDLE_FORMAT_VERSION = 2
 private const val MAX_BUNDLE_WORKFLOWS = 1_000
 
 object WorkflowTransferCodec {
@@ -27,13 +29,26 @@ object WorkflowTransferCodec {
 
     fun encode(workflow: Workflow): String = json.encodeToString(Workflow.serializer(), workflow)
 
-    fun encodeBundle(workflows: List<Workflow>): String {
-        require(workflows.size <= MAX_BUNDLE_WORKFLOWS) { "工作流包包含的工作流过多" }
-        require(workflows.map { it.id }.distinct().size == workflows.size) {
+    fun encodeBundle(workflows: List<Workflow>): String = encodeLibrary(WorkflowLibrary(workflows = workflows))
+
+    fun encodeLibrary(library: WorkflowLibrary): String {
+        val normalized = library.normalized()
+        require(normalized.workflows.size <= MAX_BUNDLE_WORKFLOWS) { "工作流包包含的工作流过多" }
+        require(normalized.workflows.map { it.id }.distinct().size == normalized.workflows.size) {
             "工作流包包含重复的工作流 ID"
         }
-        workflows.forEach(::validate)
-        return json.encodeToString(WorkflowBundle.serializer(), WorkflowBundle(workflows = workflows))
+        require(normalized.folders.map { it.id }.distinct().size == normalized.folders.size) {
+            "工作流包包含重复的文件夹 ID"
+        }
+        normalized.workflows.forEach(::validate)
+        return json.encodeToString(
+            WorkflowBundle.serializer(),
+            WorkflowBundle(
+                workflows = normalized.workflows,
+                folders = normalized.folders,
+                workflowFolderIds = normalized.workflowFolderIds,
+            ),
+        )
     }
 
     fun decode(content: String): Workflow {
@@ -42,10 +57,12 @@ object WorkflowTransferCodec {
         return workflow
     }
 
-    fun decodeMany(content: String): List<Workflow> {
+    fun decodeMany(content: String): List<Workflow> = decodeLibrary(content).workflows
+
+    fun decodeLibrary(content: String): WorkflowLibrary {
         val root = json.parseToJsonElement(content)
         val objectRoot = root as? JsonObject ?: error("工作流文件必须包含 JSON 对象")
-        if ("workflows" !in objectRoot) return listOf(decode(content))
+        if ("workflows" !in objectRoot) return WorkflowLibrary(workflows = listOf(decode(content)))
         val bundle = json.decodeFromJsonElement(WorkflowBundle.serializer(), objectRoot)
         require(bundle.formatVersion <= CURRENT_BUNDLE_FORMAT_VERSION) {
             "工作流包格式 ${bundle.formatVersion} 高于此应用支持的版本"
@@ -54,8 +71,19 @@ object WorkflowTransferCodec {
         require(bundle.workflows.map { it.id }.distinct().size == bundle.workflows.size) {
             "工作流包包含重复的工作流 ID"
         }
+        require(bundle.folders.map { it.id }.distinct().size == bundle.folders.size) {
+            "工作流包包含重复的文件夹 ID"
+        }
+        require(bundle.folders.all { it.name.trim().isNotEmpty() }) { "工作流包包含空白文件夹名称" }
+        require(bundle.folders.map { it.name.trim().lowercase() }.distinct().size == bundle.folders.size) {
+            "工作流包包含重复的文件夹名称"
+        }
         bundle.workflows.forEach(::validate)
-        return bundle.workflows
+        return WorkflowLibrary(
+            workflows = bundle.workflows,
+            folders = bundle.folders,
+            workflowFolderIds = bundle.workflowFolderIds,
+        ).normalized()
     }
 
     private fun validate(workflow: Workflow) {
@@ -80,6 +108,10 @@ class WorkflowTransfer(
         writeContent(uri, WorkflowTransferCodec.encodeBundle(workflows))
     }
 
+    fun writeLibrary(uri: Uri, library: WorkflowLibrary) {
+        writeContent(uri, WorkflowTransferCodec.encodeLibrary(library))
+    }
+
     private fun writeContent(uri: Uri, content: String) {
         val output = contentResolver.openOutputStream(uri, "wt")
             ?: error("无法打开所选文件进行写入")
@@ -91,6 +123,10 @@ class WorkflowTransfer(
     fun read(uri: Uri): Workflow = readMany(uri).single()
 
     fun readMany(uri: Uri): List<Workflow> {
+        return readLibrary(uri).workflows
+    }
+
+    fun readLibrary(uri: Uri): WorkflowLibrary {
         val input = contentResolver.openInputStream(uri)
             ?: error("无法打开所选文件")
         val bytes = input.use { stream ->
@@ -104,7 +140,7 @@ class WorkflowTransfer(
             }
             output.toByteArray()
         }
-        return WorkflowTransferCodec.decodeMany(bytes.toString(Charsets.UTF_8))
+        return WorkflowTransferCodec.decodeLibrary(bytes.toString(Charsets.UTF_8))
     }
 
     private companion object {

@@ -83,6 +83,30 @@ class WorkflowSerializationTest {
     }
 
     @Test
+    fun `round trips intent action and decodes legacy launch app`() {
+        val actionWorkflow = Workflow(
+            id = "direct-settings",
+            name = "Direct Settings",
+            steps = listOf(
+                Step.LaunchApp(
+                    "launch",
+                    "com.android.settings",
+                    intentAction = "android.settings.LOCATION_SOURCE_SETTINGS",
+                ),
+            ),
+        )
+        val legacyJson = """{"schemaVersion":14,"id":"legacy","name":"Legacy","steps":[{"type":"launch_app","id":"launch","packageName":"com.example","timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
+
+        assertEquals(
+            actionWorkflow,
+            json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), actionWorkflow)),
+        )
+        val legacyLaunch = json.decodeFromString(Workflow.serializer(), legacyJson)
+            .steps.single() as Step.LaunchApp
+        assertEquals(null, legacyLaunch.intentAction)
+    }
+
+    @Test
     fun `round trips image click and decodes schema 13 workflows`() {
         val imageClick = Step.ImageClick(
             id = "image",

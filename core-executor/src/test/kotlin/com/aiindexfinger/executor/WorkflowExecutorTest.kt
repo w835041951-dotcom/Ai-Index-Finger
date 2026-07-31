@@ -19,8 +19,29 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class WorkflowExecutorTest {
+    @Test
+    fun `forwards a package scoped intent action`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "direct-settings",
+            name = "Direct Settings",
+            steps = listOf(
+                Step.LaunchApp(
+                    "launch",
+                    "com.android.settings",
+                    intentAction = "android.settings.LOCATION_SOURCE_SETTINGS",
+                ),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals("com.android.settings", driver.lastLaunchPackage)
+        assertEquals("android.settings.LOCATION_SOURCE_SETTINGS", driver.lastIntentAction)
+    }
+
     @Test
     fun `draft workflow is rejected before driver actions`() = runTest {
         val driver = FakeDriver()
@@ -82,6 +103,30 @@ class WorkflowExecutorTest {
 
         assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
         assertEquals(2, driver.clickCount)
+    }
+
+    @Test
+    fun `diagnostics record nested steps in start order without user values`() = runTest {
+        var nanos = 0L
+        val workflow = Workflow(
+            id = "diagnostics",
+            name = "Diagnostics",
+            steps = listOf(
+                Step.SetVariable("set-secret", "secret", Value.Literal("private-value")),
+                Step.Repeat("repeat", times = 2, steps = listOf(Step.Click("click", selector))),
+            ),
+        )
+
+        val execution = WorkflowExecutor(FakeDriver(), nanoTime = { nanos.also { nanos += 2_000_000 } })
+            .runWithDiagnostics(workflow)
+
+        assertEquals(RunResult.Completed, execution.result)
+        assertEquals(listOf("set-secret", "repeat", "click", "click"), execution.diagnostics
+            .sortedBy { it.sequence }
+            .map { it.stepId })
+        assertTrue(execution.diagnostics.all { it.durationMillis >= 0 })
+        assertTrue(execution.diagnostics.all { it.attemptCount == 1 })
+        assertTrue(execution.diagnostics.none { it.toString().contains("private-value") })
     }
 
     @Test
@@ -361,6 +406,27 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `continues after an ignored scroll failure`() = runTest {
+        val driver = FakeDriver(scrollResult = false)
+        val workflow = Workflow(
+            id = "continue-scroll",
+            name = "Continue scroll",
+            steps = listOf(
+                Step.Scroll(
+                    "scroll",
+                    selector,
+                    ScrollDirection.Forward,
+                    failurePolicy = FailurePolicy.Continue,
+                ),
+                Step.GlobalAction("back", SystemAction.Back),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.systemActionCount)
+    }
+
+    @Test
     fun `wait for disappearance completes when node is absent`() = runTest {
         val workflow = Workflow(
             id = "disappear",
@@ -441,6 +507,7 @@ class WorkflowExecutorTest {
         private val nodeExistsResult: Boolean = true,
         private val nodeTextResult: String? = "node text",
         private val imageClickResult: ImageClickResult = ImageClickResult.Clicked(1_000),
+        private val scrollResult: Boolean = true,
     ) : AutomationDriver {
         var clickCount = 0
         var longClickCount = 0
@@ -450,8 +517,14 @@ class WorkflowExecutorTest {
         var lastInputMethod: TextInputMethod? = null
         var lastReadAttribute: NodeAttribute? = null
         var systemActionCount = 0
+        var lastLaunchPackage: String? = null
+        var lastIntentAction: String? = null
 
-        override suspend fun launchApp(packageName: String) = true
+        override suspend fun launchApp(packageName: String, intentAction: String?): Boolean {
+            lastLaunchPackage = packageName
+            lastIntentAction = intentAction
+            return true
+        }
 
         override suspend fun inputText(
             selector: NodeSelector,
@@ -483,7 +556,7 @@ class WorkflowExecutorTest {
 
         override suspend fun scroll(selector: NodeSelector, direction: ScrollDirection): Boolean {
             lastScrollDirection = direction
-            return true
+            return scrollResult
         }
 
         override suspend fun swipe(

@@ -16,6 +16,11 @@ data class SelectorUse(
     val selector: NodeSelector,
 )
 
+data class LaunchTarget(
+    val packageName: String,
+    val intentAction: String? = null,
+)
+
 fun Workflow.selectorUses(): List<SelectorUse> = buildList {
     collectSelectorUses(steps)
 }
@@ -25,8 +30,10 @@ fun Workflow.targetPackages(): Set<String> = buildSet {
     addAll(launchPackages())
 }
 
-fun Workflow.launchPackages(): Set<String> = buildSet {
-    collectLaunchPackages(steps)
+fun Workflow.launchPackages(): Set<String> = launchTargets().mapTo(linkedSetOf(), LaunchTarget::packageName)
+
+fun Workflow.launchTargets(): Set<LaunchTarget> = buildSet {
+    collectLaunchTargets(steps)
 }
 
 private fun MutableList<SelectorUse>.collectSelectorUses(steps: List<Step>) {
@@ -52,16 +59,16 @@ private fun MutableList<SelectorUse>.collectSelectorUses(steps: List<Step>) {
     }
 }
 
-private fun MutableSet<String>.collectLaunchPackages(steps: List<Step>) {
+private fun MutableSet<LaunchTarget>.collectLaunchTargets(steps: List<Step>) {
     steps.forEach { step ->
         when (step) {
-            is Step.LaunchApp -> add(step.packageName)
-            is Step.ImageClick -> add(step.packageName)
+            is Step.LaunchApp -> add(LaunchTarget(step.packageName, step.intentAction))
+            is Step.ImageClick -> add(LaunchTarget(step.packageName))
             is Step.IfElse -> {
-                collectLaunchPackages(step.whenTrue)
-                collectLaunchPackages(step.whenFalse)
+                collectLaunchTargets(step.whenTrue)
+                collectLaunchTargets(step.whenFalse)
             }
-            is Step.Repeat -> collectLaunchPackages(step.steps)
+            is Step.Repeat -> collectLaunchTargets(step.steps)
             else -> Unit
         }
     }

@@ -19,6 +19,27 @@ class WorkflowImportMergerTest {
         assertEquals(unique, normalized[1])
     }
 
+    @Test
+    fun libraryMergePreservesEmptyFoldersAndRemapsAssignments() {
+        val existing = WorkflowLibrary(
+            workflows = listOf(workflow("same", "Existing")),
+            folders = listOf(WorkflowFolder("existing-folder", "Personal")),
+        )
+        val imported = WorkflowLibrary(
+            workflows = listOf(workflow("same", "Imported")),
+            folders = listOf(
+                WorkflowFolder("imported-personal", "personal"),
+                WorkflowFolder("empty", "Empty"),
+            ),
+            workflowFolderIds = mapOf("same" to "imported-personal"),
+        )
+
+        val merged = mergeImportedLibrary(existing, imported) { "new-workflow" }
+
+        assertEquals(listOf("existing-folder", "empty"), merged.folders.map(WorkflowFolder::id))
+        assertEquals("existing-folder", merged.folderIdFor("new-workflow"))
+    }
+
     private fun workflow(id: String, name: String) = Workflow(
         id = id,
         name = name,

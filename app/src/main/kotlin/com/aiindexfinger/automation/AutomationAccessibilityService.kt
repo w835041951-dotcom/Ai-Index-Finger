@@ -124,8 +124,14 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             runningWorkflowName = workflow.name
             showRunningNotification(workflow.name)
             try {
-                val result = workflowExecutor.run(workflow)
-                val record = result.toRunRecord(workflow, startedAtMillis, System.currentTimeMillis())
+                val execution = workflowExecutor.runWithDiagnostics(workflow)
+                val result = execution.result
+                val record = result.toRunRecord(
+                    workflow,
+                    startedAtMillis,
+                    System.currentTimeMillis(),
+                    execution.diagnostics,
+                )
                 runHistoryStore.append(runHistoryStore.load(), record)
                 latestRun.value = RunOutcome(result, record)
             } finally {
@@ -326,11 +332,15 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private val notificationManager: NotificationManager
         get() = getSystemService(NotificationManager::class.java)
 
-    override suspend fun launchApp(packageName: String): Boolean {
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(launchIntent)
-        return true
+    override suspend fun launchApp(packageName: String, intentAction: String?): Boolean {
+        val launchIntent = intentAction?.let { Intent(it).setPackage(packageName) }
+            ?: packageManager.getLaunchIntentForPackage(packageName)
+            ?: return false
+        if (launchIntent.resolveActivity(packageManager) == null) return false
+        return runCatching {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(launchIntent)
+        }.isSuccess
     }
 
     override suspend fun click(selector: NodeSelector): Boolean {

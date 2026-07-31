@@ -11,10 +11,17 @@ class ScheduledWorkflowEventTest {
         val schedules = listOf(
             WorkflowSchedule("past", "Past", 99, ScheduleStatus.Missed),
             WorkflowSchedule("now", "Now", 100),
+            WorkflowSchedule(
+                "recurring",
+                "Recurring",
+                200,
+                recurrence = ScheduleRecurrence.Daily,
+                missedOccurrencePending = true,
+            ),
             WorkflowSchedule("future", "Future", 101),
         )
 
-        assertEquals(listOf(schedules[0]), missedSchedules(schedules))
+        assertEquals(listOf(schedules[0], schedules[2]), missedSchedules(schedules))
     }
 
     @Test

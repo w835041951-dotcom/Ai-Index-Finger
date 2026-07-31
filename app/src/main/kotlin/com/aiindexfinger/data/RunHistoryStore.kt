@@ -2,6 +2,8 @@ package com.aiindexfinger.data
 
 import android.content.Context
 import com.aiindexfinger.executor.RunResult
+import com.aiindexfinger.executor.StepExecutionDiagnostic
+import com.aiindexfinger.executor.StepExecutionOutcome
 import com.aiindexfinger.model.Workflow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
@@ -20,7 +22,25 @@ data class RunRecord(
     val status: RunStatus,
     val failedStepId: String? = null,
     val failureMessage: String? = null,
+    val diagnostics: List<RunStepDiagnostic> = emptyList(),
 )
+
+@Serializable
+data class RunStepDiagnostic(
+    val sequence: Long,
+    val stepId: String,
+    val durationMillis: Long,
+    val attemptCount: Int,
+    val outcome: RunStepOutcome,
+)
+
+@Serializable
+enum class RunStepOutcome {
+    Completed,
+    ContinuedAfterFailure,
+    Failed,
+    Cancelled,
+}
 
 @Serializable
 enum class RunStatus {
@@ -74,6 +94,7 @@ fun RunResult.toRunRecord(
     workflow: Workflow,
     startedAtMillis: Long,
     finishedAtMillis: Long,
+    diagnostics: List<StepExecutionDiagnostic> = emptyList(),
 ): RunRecord {
     val failed = this as? RunResult.Failed
     val notReady = this as? RunResult.NotReady
@@ -92,5 +113,21 @@ fun RunResult.toRunRecord(
         },
         failedStepId = failed?.stepId,
         failureMessage = failed?.message ?: notReady?.message,
+        diagnostics = diagnostics.map { diagnostic ->
+            RunStepDiagnostic(
+                sequence = diagnostic.sequence,
+                stepId = diagnostic.stepId,
+                durationMillis = diagnostic.durationMillis,
+                attemptCount = diagnostic.attemptCount,
+                outcome = diagnostic.outcome.toRunStepOutcome(),
+            )
+        },
     )
+}
+
+private fun StepExecutionOutcome.toRunStepOutcome(): RunStepOutcome = when (this) {
+    StepExecutionOutcome.Completed -> RunStepOutcome.Completed
+    StepExecutionOutcome.ContinuedAfterFailure -> RunStepOutcome.ContinuedAfterFailure
+    StepExecutionOutcome.Failed -> RunStepOutcome.Failed
+    StepExecutionOutcome.Cancelled -> RunStepOutcome.Cancelled
 }

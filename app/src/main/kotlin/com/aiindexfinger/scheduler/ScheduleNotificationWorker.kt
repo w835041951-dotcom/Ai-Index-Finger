@@ -22,16 +22,10 @@ class ScheduleNotificationWorker(
 ) : Worker(appContext, workerParameters) {
     override fun doWork(): Result {
         val workflowId = inputData.getString(KEY_WORKFLOW_ID) ?: return Result.failure()
+        val scheduledAtMillis = inputData.getLong(KEY_SCHEDULED_AT_MILLIS, Long.MIN_VALUE)
+        if (scheduledAtMillis == Long.MIN_VALUE) return Result.failure()
         val workflowName = inputData.getString(KEY_WORKFLOW_NAME)
             ?: applicationContext.getString(R.string.scheduled_workflow_fallback_name)
-
-        if (Build.VERSION.SDK_INT >= 33 &&
-            applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            ScheduleStore(applicationContext).markMissed(workflowId)
-            return Result.success()
-        }
 
         val notificationManager = applicationContext.getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(
@@ -41,6 +35,25 @@ class ScheduleNotificationWorker(
                 NotificationManager.IMPORTANCE_HIGH,
             ),
         )
+        val runtimePermissionGranted = Build.VERSION.SDK_INT < 33 ||
+            applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        val channelImportance = notificationManager.getNotificationChannel(CHANNEL_ID)?.importance
+            ?: NotificationManager.IMPORTANCE_NONE
+        if (!canPostScheduleNotification(
+                runtimePermissionGranted,
+                notificationManager.areNotificationsEnabled(),
+                channelImportance,
+            )
+        ) {
+            WorkflowScheduler(applicationContext).missOccurrence(workflowId, scheduledAtMillis)
+            return Result.success()
+        }
+
+        val completion = WorkflowScheduler(applicationContext)
+            .completeOccurrence(workflowId, scheduledAtMillis)
+        if (!completion.accepted) return Result.success()
+
         val openAppIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             data = Uri.parse(scheduleIntentData(workflowId))
@@ -60,13 +73,13 @@ class ScheduleNotificationWorker(
             .setAutoCancel(true)
             .build()
         notificationManager.notify(workflowId, SCHEDULE_NOTIFICATION_ID, notification)
-        ScheduleStore(applicationContext).remove(workflowId)
         return Result.success()
     }
 
     companion object {
         const val KEY_WORKFLOW_ID = "workflow_id"
         const val KEY_WORKFLOW_NAME = "workflow_name"
+        const val KEY_SCHEDULED_AT_MILLIS = "scheduled_at_millis"
         const val EXTRA_WORKFLOW_ID = "scheduled_workflow_id"
         private const val CHANNEL_ID = "workflow_schedules"
         private const val SCHEDULE_NOTIFICATION_ID = 1
@@ -77,6 +90,16 @@ internal fun scheduleIntentData(workflowId: String): String =
     "aiindexfinger://schedule/" + Base64.getUrlEncoder().withoutPadding()
         .encodeToString(workflowId.toByteArray(StandardCharsets.UTF_8))
 
+internal fun canPostScheduleNotification(
+    runtimePermissionGranted: Boolean,
+    appNotificationsEnabled: Boolean,
+    channelImportance: Int,
+): Boolean = runtimePermissionGranted &&
+    appNotificationsEnabled &&
+    channelImportance != NotificationManager.IMPORTANCE_NONE
+
 internal fun missedSchedules(
     schedules: List<WorkflowSchedule>,
-): List<WorkflowSchedule> = schedules.filter { it.status == ScheduleStatus.Missed }
+): List<WorkflowSchedule> = schedules.filter { schedule ->
+    schedule.status == ScheduleStatus.Missed || schedule.missedOccurrencePending
+}

@@ -8,7 +8,7 @@ import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.WorkflowValidationSummary
 import com.aiindexfinger.model.WorkflowValidator
 import com.aiindexfinger.model.effectiveState
-import com.aiindexfinger.model.launchPackages
+import com.aiindexfinger.model.launchTargets
 import com.aiindexfinger.model.selectorUses
 
 enum class NotificationPreflightStatus {
@@ -27,6 +27,7 @@ fun WorkflowPreflightReport.recoveryActions(): List<PreflightRecoveryAction> = b
 
 data class LaunchTargetCheck(
     val packageName: String,
+    val intentAction: String?,
     val isLaunchable: Boolean,
 )
 
@@ -56,7 +57,7 @@ fun buildWorkflowPreflightReport(
     workflow: Workflow,
     accessibilityConnected: Boolean,
     notificationStatus: NotificationPreflightStatus,
-    isLaunchable: (String) -> Boolean,
+    isLaunchable: (String, String?) -> Boolean,
     countMatches: (com.aiindexfinger.model.NodeSelector) -> Int,
     imageCaptureSupported: Boolean = true,
 ): WorkflowPreflightReport = WorkflowPreflightReport(
@@ -64,8 +65,12 @@ fun buildWorkflowPreflightReport(
     validation = WorkflowValidator.inspect(workflow),
     accessibilityConnected = accessibilityConnected,
     notificationStatus = notificationStatus,
-    launchTargets = workflow.launchPackages().map { packageName ->
-        LaunchTargetCheck(packageName, isLaunchable(packageName))
+    launchTargets = workflow.launchTargets().map { target ->
+        LaunchTargetCheck(
+            target.packageName,
+            target.intentAction,
+            isLaunchable(target.packageName, target.intentAction),
+        )
     },
     selectors = workflow.selectorUses().map { use ->
         SelectorPreflightCheck(

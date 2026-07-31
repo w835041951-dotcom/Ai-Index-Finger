@@ -40,7 +40,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 - Guided first-run experience and safe example workflows.
 - Richer execution failure context and exportable run diagnostics.
-- Recurring schedules after battery and background-behavior testing.
+- Recurring daily and weekly reminders are implemented; battery, timezone, DST, reboot, and notification-recovery behavior still require device testing.
 - Broader UI and accessibility instrumentation coverage.
 - Localization based on launch-market demand.
 
@@ -61,9 +61,11 @@ Publish AI Index Finger through Google Play internal testing and then production
 | Complete | 2 | Fully edit nested Repeat and If branches | Stable path-based editing supports add, edit, duplicate, reorder, and delete in Repeat contents and both If branches without changing unrelated IDs. |
 | Complete | 3 | Draft and ready workflow states | Incomplete workflows remain saveable as drafts but cannot run or be scheduled; ready workflows pass `WorkflowValidator`. |
 | Complete | 4 | Run-history details and export | Users can inspect all retained runs, filter them, reopen workflows, and export local diagnostics. |
-| Complete | 5 | Safe starter templates | Three reviewed, package-free templates create fresh explicit drafts and never execute automatically. |
-| Complete | 6 | Preflight checks | User-triggered snapshots report validation, Draft/Ready state, variable dataflow, structural and retry-expanded execution limits, launchability, selector match indexes, service state, and notification permission without dispatching actions or writing history. |
-| Device check pending | 7 | Date/time scheduling | Users choose an absolute local date and time. Past, DST-gap, and over-one-year targets are rejected; overlap behavior is deterministic; WorkManager remains a best-effort one-time reminder and never executes automation. Verify delivery and timezone-change behavior on devices. |
+| Complete | 5 | Safe starter examples | A searchable bilingual catalog contains 100 reviewed examples across ten categories. Every selection creates a fresh explicit draft and never runs automatically; app-observation and text-reading examples use visible placeholders and require user configuration before use. |
+| Complete | 6 | User workflow folders | Users can create, rename, delete, filter, and move workflows among single-level folders or Unfiled. Folder deletion preserves workflows, and versioned backups round-trip empty folders and assignments while legacy data remains importable. The complete Compose interaction flow passes on the API 36 emulator. |
+| Complete | 7 | Tested system-app workflow packs | An explicit bilingual action idempotently installs nine real Draft workflows across Settings, Clock, and Files folders without overwriting user edits. All nine verify real package-scoped UI through the production accessibility service on the API 36 emulator and persist Completed run records. Calculator is not installed on the test image, and the remaining catalog entries are not claimed as device-tested workflows. |
+| Complete | 8 | Preflight checks | User-triggered snapshots report validation, Draft/Ready state, variable dataflow, structural and retry-expanded execution limits, launchability, selector match indexes, service state, and notification permission without dispatching actions or writing history. |
+| Device check pending | 9 | Date/time scheduling | Users choose an absolute local date and time. Past, DST-gap, and over-one-year targets are rejected; overlap behavior is deterministic; WorkManager remains a best-effort one-time reminder and never executes automation. Verify delivery and timezone-change behavior on devices. |
 
 ## Release Validation
 
@@ -76,7 +78,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 ## Next Iteration
 
-Verify preflight and absolute schedule flows on API 26 and a target-SDK 36 device, including notification denial/recovery, DST-adjacent inputs, timezone changes, process restart, replacement, and cancellation. Then decide whether the next product priority is recurring reminders or richer execution failure diagnostics.
+Verify preflight and one-time/daily/weekly reminder flows on API 26 and a target-SDK 36 device, including notification denial/recovery, missed occurrences, DST-adjacent inputs, timezone changes, process restart, replacement, and cancellation. Then prioritize completing workflow-editor localization and broader accessibility instrumentation.
 
 ## Owner Decisions
 

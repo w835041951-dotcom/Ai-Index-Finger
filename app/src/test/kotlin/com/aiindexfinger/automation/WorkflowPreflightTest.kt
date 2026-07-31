@@ -29,7 +29,7 @@ class WorkflowPreflightTest {
             workflow = workflow,
             accessibilityConnected = true,
             notificationStatus = NotificationPreflightStatus.Denied,
-            isLaunchable = { it == "com.example" },
+            isLaunchable = { packageName, _ -> packageName == "com.example" },
             countMatches = { 2 },
         )
 
@@ -57,7 +57,7 @@ class WorkflowPreflightTest {
             workflow = workflow,
             accessibilityConnected = false,
             notificationStatus = NotificationPreflightStatus.NotRequired,
-            isLaunchable = { false },
+            isLaunchable = { _, _ -> false },
             countMatches = {
                 probeCount += 1
                 0
@@ -85,7 +85,7 @@ class WorkflowPreflightTest {
             workflow = workflow,
             accessibilityConnected = true,
             notificationStatus = NotificationPreflightStatus.Granted,
-            isLaunchable = { false },
+            isLaunchable = { _, _ -> false },
             countMatches = { 1 },
         )
 
@@ -106,14 +106,14 @@ class WorkflowPreflightTest {
             workflow = workflow,
             accessibilityConnected = false,
             notificationStatus = NotificationPreflightStatus.Denied,
-            isLaunchable = { true },
+            isLaunchable = { _, _ -> true },
             countMatches = { 0 },
         )
         val available = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
             notificationStatus = NotificationPreflightStatus.NotRequired,
-            isLaunchable = { true },
+            isLaunchable = { _, _ -> true },
             countMatches = { 1 },
         )
 
@@ -137,12 +137,36 @@ class WorkflowPreflightTest {
             workflow = workflow,
             accessibilityConnected = true,
             notificationStatus = NotificationPreflightStatus.NotRequired,
-            isLaunchable = { true },
+            isLaunchable = { _, _ -> true },
             countMatches = { 0 },
             imageCaptureSupported = false,
         )
 
         assertTrue(report.requiresImageCapture)
         assertFalse(report.imageCaptureSupported)
+    }
+
+    @Test
+    fun directIntentActionIsIncludedInLaunchabilityProbe() {
+        val workflow = Workflow(
+            id = "direct",
+            name = "Direct",
+            steps = listOf(
+                Step.LaunchApp("launch", "com.example", intentAction = "example.UNAVAILABLE"),
+            ),
+        )
+
+        val report = buildWorkflowPreflightReport(
+            workflow = workflow,
+            accessibilityConnected = true,
+            notificationStatus = NotificationPreflightStatus.NotRequired,
+            isLaunchable = { packageName, intentAction ->
+                packageName == "com.example" && intentAction == null
+            },
+            countMatches = { 0 },
+        )
+
+        assertEquals("example.UNAVAILABLE", report.launchTargets.single().intentAction)
+        assertFalse(report.launchTargets.single().isLaunchable)
     }
 }
