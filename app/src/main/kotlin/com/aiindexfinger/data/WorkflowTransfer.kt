@@ -5,6 +5,7 @@ import android.net.Uri
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.WorkflowValidator
+import com.aiindexfinger.model.ValidationIssue
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.Json
@@ -20,6 +21,8 @@ private data class WorkflowBundle(
 
 private const val CURRENT_BUNDLE_FORMAT_VERSION = 2
 private const val MAX_BUNDLE_WORKFLOWS = 1_000
+
+class InvalidWorkflowException(val issue: ValidationIssue) : IllegalArgumentException(issue.code.name)
 
 object WorkflowTransferCodec {
     private val json = Json {
@@ -92,7 +95,7 @@ object WorkflowTransferCodec {
         }
         if (workflow.state == WorkflowState.Ready) {
             val issue = WorkflowValidator.validate(workflow).firstOrNull()
-            require(issue == null) { issue?.message ?: "就绪工作流无效" }
+            if (issue != null) throw InvalidWorkflowException(issue)
         }
     }
 }

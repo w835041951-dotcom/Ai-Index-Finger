@@ -11,6 +11,7 @@ import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowLimits
+import com.aiindexfinger.model.ValidationIssue
 import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.model.evaluate
 import com.aiindexfinger.model.renderTemplate
@@ -56,9 +57,37 @@ sealed interface RunState {
 sealed interface RunResult {
     data object Completed : RunResult
     data object AlreadyRunning : RunResult
-    data class NotReady(val message: String) : RunResult
+    data class NotReady(val issue: ValidationIssue) : RunResult
     data object Cancelled : RunResult
-    data class Failed(val stepId: String, val message: String) : RunResult
+    data class Failed(val stepId: String, val error: ExecutionError) : RunResult
+}
+
+data class ExecutionError(
+    val code: ExecutionErrorCode,
+    val arguments: Map<String, String> = emptyMap(),
+)
+
+enum class ExecutionErrorCode {
+    StepFailed,
+    StepTimedOut,
+    ExecutionLimitExceeded,
+    TargetNotClickable,
+    ImageClickUnsupported,
+    ImageClickWrongPackage,
+    ImageTemplateInvalid,
+    ImageTemplateNotFound,
+    ImageTemplateAmbiguous,
+    ScreenCaptureFailed,
+    ImageGestureFailed,
+    SystemActionFailed,
+    TargetNotScrollable,
+    AppLaunchFailed,
+    TargetNotLongClickable,
+    UndefinedVariable,
+    TextInputFailed,
+    MissingNodeAttribute,
+    SwipeFailed,
+    TapFailed,
 }
 
 data class RunExecution(
@@ -95,7 +124,7 @@ class WorkflowExecutor(
 
     suspend fun runWithDiagnostics(workflow: Workflow): RunExecution {
         workflow.readinessIssues().firstOrNull()?.let { issue ->
-            return RunExecution(RunResult.NotReady(issue.message), emptyList())
+            return RunExecution(RunResult.NotReady(issue), emptyList())
         }
         if (!runMutex.tryLock()) return RunExecution(RunResult.AlreadyRunning, emptyList())
 
@@ -107,7 +136,7 @@ class WorkflowExecutor(
             RunExecution(RunResult.Cancelled, context.diagnostics.toList())
         } catch (failure: StepFailure) {
             RunExecution(
-                RunResult.Failed(failure.stepId, failure.message ?: "Step failed"),
+                RunResult.Failed(failure.stepId, failure.error),
                 context.diagnostics.toList(),
             )
         } finally {
@@ -153,7 +182,13 @@ class WorkflowExecutor(
         repeat(attempts) { attempt ->
             context.executedSteps++
             if (context.executedSteps > maxExecutedSteps) {
-                throw StepFailure(step.id, "Workflow exceeded $maxExecutedSteps step executions")
+                throw StepFailure(
+                    step.id,
+                    ExecutionError(
+                        ExecutionErrorCode.ExecutionLimitExceeded,
+                        mapOf("limit" to maxExecutedSteps.toString()),
+                    ),
+                )
             }
             try {
                 val timeoutMillis = step.timeoutMillis ?: context.workflow.defaultStepTimeoutMillis
@@ -165,7 +200,12 @@ class WorkflowExecutor(
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
                     return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.ContinuedAfterFailure)
                 } else {
-                    throw StepFailure(step.id, "Step timed out", attempt + 1, error)
+                    throw StepFailure(
+                        step.id,
+                        ExecutionError(ExecutionErrorCode.StepTimedOut),
+                        attempt + 1,
+                        error,
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -175,7 +215,12 @@ class WorkflowExecutor(
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
                     return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.ContinuedAfterFailure)
                 } else {
-                    throw StepFailure(step.id, error.message ?: "Step failed", attempt + 1, error)
+                    val executionError = when (error) {
+                        is StepFailure -> error.error
+                        is ExecutionFailure -> error.error
+                        else -> ExecutionError(ExecutionErrorCode.StepFailed)
+                    }
+                    throw StepFailure(step.id, executionError, attempt + 1, error)
                 }
             }
         }
@@ -184,44 +229,57 @@ class WorkflowExecutor(
 
     private suspend fun executeStep(step: Step, context: ExecutionContext) {
         when (step) {
-            is Step.Click -> check(driver.click(step.selector)) { "Target node was not clickable" }
+            is Step.Click -> requireSuccess(driver.click(step.selector), ExecutionErrorCode.TargetNotClickable)
             is Step.ImageClick -> when (driver.clickImage(step)) {
                 is ImageClickResult.Clicked -> Unit
-                ImageClickResult.Unsupported -> error("Image click requires Android 11 or newer")
-                ImageClickResult.WrongPackage -> error("The target app is not currently visible")
-                ImageClickResult.MissingOrInvalidTemplate -> error("The image template is missing or invalid")
-                ImageClickResult.NoMatch -> error("The image template was not found")
-                ImageClickResult.Ambiguous -> error("Multiple similar image matches were found")
-                ImageClickResult.CaptureFailed -> error("The current screen could not be captured")
-                ImageClickResult.GestureFailed -> error("The matched image could not be clicked")
+                ImageClickResult.Unsupported -> fail(ExecutionErrorCode.ImageClickUnsupported)
+                ImageClickResult.WrongPackage -> fail(ExecutionErrorCode.ImageClickWrongPackage)
+                ImageClickResult.MissingOrInvalidTemplate -> fail(ExecutionErrorCode.ImageTemplateInvalid)
+                ImageClickResult.NoMatch -> fail(ExecutionErrorCode.ImageTemplateNotFound)
+                ImageClickResult.Ambiguous -> fail(ExecutionErrorCode.ImageTemplateAmbiguous)
+                ImageClickResult.CaptureFailed -> fail(ExecutionErrorCode.ScreenCaptureFailed)
+                ImageClickResult.GestureFailed -> fail(ExecutionErrorCode.ImageGestureFailed)
             }
             is Step.Delay -> delay(step.durationMillis)
-            is Step.GlobalAction -> check(driver.performSystemAction(step.action)) { "System action failed" }
+            is Step.GlobalAction ->
+                requireSuccess(driver.performSystemAction(step.action), ExecutionErrorCode.SystemActionFailed)
             is Step.IfElse -> {
                 val branch = if (evaluate(step.condition, context)) step.whenTrue else step.whenFalse
                 executeSteps(branch, context)
             }
             is Step.Repeat -> repeat(step.times) { executeSteps(step.steps, context) }
-            is Step.Scroll -> check(driver.scroll(step.selector, step.direction)) { "Target node was not scrollable" }
-            is Step.LaunchApp -> check(driver.launchApp(step.packageName, step.intentAction)) {
-                "App could not be launched"
-            }
-            is Step.LongClick -> check(driver.longClick(step.selector)) { "Target node was not long-clickable" }
+            is Step.Scroll ->
+                requireSuccess(driver.scroll(step.selector, step.direction), ExecutionErrorCode.TargetNotScrollable)
+            is Step.LaunchApp ->
+                requireSuccess(driver.launchApp(step.packageName, step.intentAction), ExecutionErrorCode.AppLaunchFailed)
+            is Step.LongClick ->
+                requireSuccess(driver.longClick(step.selector), ExecutionErrorCode.TargetNotLongClickable)
             is Step.InputText -> {
                 val text = step.variableName?.let { variableName ->
-                    context.variables[variableName] ?: error("Variable '$variableName' is not defined")
+                    context.variables[variableName]
+                        ?: fail(
+                            ExecutionErrorCode.UndefinedVariable,
+                            mapOf("variableName" to variableName),
+                        )
                 } ?: step.text
-                check(driver.inputText(step.selector, text, step.inputMethod)) { "Text input failed" }
+                requireSuccess(
+                    driver.inputText(step.selector, text, step.inputMethod),
+                    ExecutionErrorCode.TextInputFailed,
+                )
             }
             is Step.ReadNodeText -> {
                 context.variables[step.variableName] = driver.readNodeAttribute(step.selector, step.attribute)
-                    ?: error("Target node does not provide ${step.attribute.label()}")
+                    ?: fail(
+                        ExecutionErrorCode.MissingNodeAttribute,
+                        mapOf("attribute" to step.attribute.name),
+                    )
             }
             is Step.SetVariable -> context.variables[step.name] = resolve(step.value, context)
-            is Step.Swipe -> check(
+            is Step.Swipe -> requireSuccess(
                 driver.swipe(step.startX, step.startY, step.endX, step.endY, step.durationMillis),
-            ) { "Swipe failed" }
-            is Step.Tap -> check(driver.tap(step.x, step.y)) { "Tap failed" }
+                ExecutionErrorCode.SwipeFailed,
+            )
+            is Step.Tap -> requireSuccess(driver.tap(step.x, step.y), ExecutionErrorCode.TapFailed)
             is Step.WaitForNode -> waitForNode(step, context)
         }
     }
@@ -244,19 +302,19 @@ class WorkflowExecutor(
     private fun resolve(value: Value, context: ExecutionContext): String = when (value) {
         is Value.Literal -> value.value
         is Value.Variable -> context.variables[value.name]
-            ?: error("Variable '${value.name}' is not defined")
+            ?: fail(ExecutionErrorCode.UndefinedVariable, mapOf("variableName" to value.name))
         is Value.Template -> value.template.renderTemplate { variableName ->
-            context.variables[variableName] ?: error("Variable '$variableName' is not defined")
+            context.variables[variableName]
+                ?: fail(ExecutionErrorCode.UndefinedVariable, mapOf("variableName" to variableName))
         }
     }
 
-    private fun NodeAttribute.label(): String = when (this) {
-        NodeAttribute.TextOrDescription -> "text or description"
-        NodeAttribute.Text -> "text"
-        NodeAttribute.ContentDescription -> "content description"
-        NodeAttribute.ViewId -> "resource ID"
-        NodeAttribute.ClassName -> "class name"
+    private fun requireSuccess(success: Boolean, code: ExecutionErrorCode) {
+        if (!success) fail(code)
     }
+
+    private fun fail(code: ExecutionErrorCode, arguments: Map<String, String> = emptyMap()): Nothing =
+        throw ExecutionFailure(ExecutionError(code, arguments))
 
     private data class ExecutionContext(
         val workflow: Workflow,
@@ -291,13 +349,15 @@ class WorkflowExecutor(
 
     private class StepFailure(
         stepId: String,
-        message: String,
+        val error: ExecutionError,
         val attemptCount: Int = 1,
         cause: Throwable? = null,
     ) :
-        IllegalStateException(message, cause) {
+        IllegalStateException(error.code.name, cause) {
         val stepId: String = stepId
     }
+
+    private class ExecutionFailure(val error: ExecutionError) : IllegalStateException(error.code.name)
 
     private companion object {
         const val NODE_POLL_INTERVAL_MILLIS = 100L

@@ -32,7 +32,7 @@ class WorkflowValidatorTest {
         )
 
         assertEquals(WorkflowState.Draft, workflow.effectiveState())
-        assertEquals("Workflow is saved as a draft", workflow.readinessIssues().single().message)
+        assertEquals(ValidationIssueCode.DraftWorkflow, workflow.readinessIssues().single().code)
     }
 
     @Test
@@ -45,13 +45,13 @@ class WorkflowValidatorTest {
         )
 
         assertEquals(WorkflowState.Ready, workflow.effectiveState())
-        assertEquals("Workflow has no steps", workflow.readinessIssues().single().message)
+        assertEquals(ValidationIssueCode.EmptyWorkflow, workflow.readinessIssues().single().code)
     }
     @Test
     fun `rejects an empty workflow`() {
         val workflow = Workflow(id = "empty", name = "Empty", steps = emptyList())
 
-        assertEquals("Workflow has no steps", WorkflowValidator.validate(workflow).single().message)
+        assertEquals(ValidationIssueCode.EmptyWorkflow, WorkflowValidator.validate(workflow).single().code)
     }
 
     @Test
@@ -67,7 +67,7 @@ class WorkflowValidatorTest {
             steps = listOf(Step.Delay("delay", 0)),
         )
 
-        assertEquals("Delay duration must not be negative", WorkflowValidator.validate(negative).single().message)
+        assertEquals(ValidationIssueCode.NegativeDelay, WorkflowValidator.validate(negative).single().code)
         assertTrue(WorkflowValidator.validate(zero).isEmpty())
     }
 
@@ -79,7 +79,7 @@ class WorkflowValidatorTest {
             steps = listOf(Step.SetVariable("set", " ", Value.Literal("value"))),
         )
 
-        assertEquals("Variable name must not be blank", WorkflowValidator.validate(workflow).single().message)
+        assertEquals(ValidationIssueCode.BlankVariableName, WorkflowValidator.validate(workflow).single().code)
     }
 
     @Test
@@ -97,10 +97,14 @@ class WorkflowValidatorTest {
             ),
         )
 
-        val messages = WorkflowValidator.validate(workflow).map { it.message }
+        val issues = WorkflowValidator.validate(workflow)
 
-        assertTrue("Step ID is duplicated" in messages)
-        assertTrue("Variable 'missing' is not defined" in messages)
+        assertTrue(issues.any { it.code == ValidationIssueCode.DuplicateStepId })
+        assertTrue(
+            issues.any {
+                it.code == ValidationIssueCode.UndefinedVariable && it.arguments["variableName"] == "missing"
+            },
+        )
     }
 
     @Test
@@ -130,8 +134,12 @@ class WorkflowValidatorTest {
 
         assertTrue(WorkflowValidator.validate(bothBranches).isEmpty())
         assertEquals(
-            "Variable 'result' is not defined",
-            WorkflowValidator.validate(oneBranch).single().message,
+            ValidationIssue(
+                "consume",
+                ValidationIssueCode.UndefinedVariable,
+                mapOf("variableName" to "result"),
+            ),
+            WorkflowValidator.validate(oneBranch).single(),
         )
     }
 
@@ -163,8 +171,8 @@ class WorkflowValidatorTest {
         )
 
         assertEquals(
-            "Variable 'missing' is not defined",
-            WorkflowValidator.validate(workflow).single().message,
+            "missing",
+            WorkflowValidator.validate(workflow).single().arguments["variableName"],
         )
     }
 
@@ -179,8 +187,8 @@ class WorkflowValidatorTest {
         )
 
         assertEquals(
-            "Variable 'missing' is not defined",
-            WorkflowValidator.validate(workflow).single().message,
+            ValidationIssueCode.UndefinedVariable,
+            WorkflowValidator.validate(workflow).single().code,
         )
     }
 
@@ -206,7 +214,10 @@ class WorkflowValidatorTest {
 
         assertTrue(
             WorkflowValidator.validate(workflow)
-                .any { it.message.contains("more than ${WorkflowLimits.MAX_EXECUTED_STEPS}") },
+                .any {
+                    it.code == ValidationIssueCode.ExecutionLimitExceeded &&
+                        it.arguments["limit"] == WorkflowLimits.MAX_EXECUTED_STEPS.toString()
+                },
         )
     }
 
@@ -232,7 +243,7 @@ class WorkflowValidatorTest {
 
         assertTrue(
             WorkflowValidator.validate(workflow)
-                .any { it.message.contains("more than ${WorkflowLimits.MAX_EXECUTED_STEPS}") },
+                .any { it.code == ValidationIssueCode.ExecutionLimitExceeded },
         )
     }
 
@@ -273,7 +284,7 @@ class WorkflowValidatorTest {
 
         assertTrue(
             WorkflowValidator.validate(workflow)
-                .any { it.message.contains("nesting exceeds") },
+                .any { it.code == ValidationIssueCode.NestingLimitExceeded },
         )
     }
 
@@ -289,7 +300,7 @@ class WorkflowValidatorTest {
 
         assertTrue(
             WorkflowValidator.validate(workflow)
-                .any { it.message.contains("more than ${WorkflowLimits.MAX_DEFINED_STEPS} steps") },
+                .any { it.code == ValidationIssueCode.DefinedStepLimitExceeded },
         )
     }
 

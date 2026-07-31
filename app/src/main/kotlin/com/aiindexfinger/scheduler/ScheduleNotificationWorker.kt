@@ -46,12 +46,19 @@ class ScheduleNotificationWorker(
                 channelImportance,
             )
         ) {
-            WorkflowScheduler(applicationContext).missOccurrence(workflowId, scheduledAtMillis)
+            try {
+                WorkflowScheduler(applicationContext).missOccurrence(workflowId, scheduledAtMillis)
+            } catch (_: ScheduleStorageException) {
+                return Result.failure()
+            }
             return Result.success()
         }
 
-        val completion = WorkflowScheduler(applicationContext)
-            .completeOccurrence(workflowId, scheduledAtMillis)
+        val completion = try {
+            WorkflowScheduler(applicationContext).completeOccurrence(workflowId, scheduledAtMillis)
+        } catch (_: ScheduleStorageException) {
+            return Result.failure()
+        }
         if (!completion.accepted) return Result.success()
 
         val openAppIntent = Intent(applicationContext, MainActivity::class.java).apply {

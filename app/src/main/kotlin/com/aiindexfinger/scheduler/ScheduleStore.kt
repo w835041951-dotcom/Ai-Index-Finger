@@ -32,15 +32,16 @@ enum class ScheduleStatus {
     Missed,
 }
 
-class ScheduleStore(context: Context) {
-    private val file = File(context.filesDir, FILE_NAME)
+class ScheduleStorageException(cause: Throwable) :
+    IllegalStateException("Stored schedules are corrupt and cannot be modified", cause)
+
+class ScheduleStore private constructor(private val file: File) {
+    constructor(context: Context) : this(File(context.filesDir, FILE_NAME))
+
     private val json = Json { ignoreUnknownKeys = true }
 
     fun load(): List<WorkflowSchedule> = synchronized(FILE_LOCK) {
-        if (!file.exists()) return emptyList()
-        runCatching {
-            json.decodeFromString(ListSerializer(WorkflowSchedule.serializer()), file.readText())
-        }.getOrDefault(emptyList())
+        loadForMutation()
     }
 
     fun put(schedule: WorkflowSchedule): List<WorkflowSchedule> = synchronized(FILE_LOCK) {
@@ -120,9 +121,20 @@ class ScheduleStore(context: Context) {
         )
     }
 
-    private companion object {
-        const val FILE_NAME = "workflow-schedules.json"
-        val FILE_LOCK = Any()
+    private fun loadForMutation(): List<WorkflowSchedule> {
+        if (!file.exists()) return emptyList()
+        return try {
+            json.decodeFromString(ListSerializer(WorkflowSchedule.serializer()), file.readText())
+        } catch (exception: Exception) {
+            throw ScheduleStorageException(exception)
+        }
+    }
+
+    internal companion object {
+        private const val FILE_NAME = "workflow-schedules.json"
+        private val FILE_LOCK = Any()
+
+        fun forFile(file: File) = ScheduleStore(file)
     }
 }
 

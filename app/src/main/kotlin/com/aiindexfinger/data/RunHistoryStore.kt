@@ -22,6 +22,8 @@ data class RunRecord(
     val status: RunStatus,
     val failedStepId: String? = null,
     val failureMessage: String? = null,
+    val failureCode: String? = null,
+    val failureArguments: Map<String, String> = emptyMap(),
     val diagnostics: List<RunStepDiagnostic> = emptyList(),
 )
 
@@ -117,7 +119,12 @@ fun RunResult.toRunRecord(
             is RunResult.Failed -> RunStatus.Failed
         },
         failedStepId = failed?.stepId,
-        failureMessage = failed?.message ?: notReady?.message,
+        failureCode = when {
+            failed != null -> "execution.${failed.error.code.name}"
+            notReady != null -> "validation.${notReady.issue.code.name}"
+            else -> null
+        },
+        failureArguments = failed?.error?.arguments ?: notReady?.issue?.arguments.orEmpty(),
         diagnostics = diagnostics.map { diagnostic ->
             RunStepDiagnostic(
                 sequence = diagnostic.sequence,

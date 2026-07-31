@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -100,6 +101,7 @@ import com.aiindexfinger.automation.buildWorkflowPreflightReport
 import com.aiindexfinger.automation.recoveryActions
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
+import com.aiindexfinger.data.InvalidWorkflowException
 import com.aiindexfinger.data.RunStepOutcome
 import com.aiindexfinger.data.RunStatus
 import com.aiindexfinger.data.filterRunRecords
@@ -148,6 +150,7 @@ import com.aiindexfinger.model.WorkflowMetadataField
 import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.WorkflowStarterTemplates
 import com.aiindexfinger.model.WorkflowValidator
+import com.aiindexfinger.model.ValidationIssueCode
 import com.aiindexfinger.model.duplicateStep
 import com.aiindexfinger.model.compareWorkflows
 import com.aiindexfinger.model.insertStep
@@ -165,6 +168,7 @@ import com.aiindexfinger.model.isReadyToRun
 import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.scheduler.ScheduleNotificationWorker
 import com.aiindexfinger.scheduler.ScheduleRecurrence
+import com.aiindexfinger.scheduler.ScheduleStorageException
 import com.aiindexfinger.scheduler.ScheduledWorkflowEvent
 import com.aiindexfinger.scheduler.ScheduledWorkflowEventController
 import com.aiindexfinger.scheduler.WorkflowSchedule
@@ -173,6 +177,8 @@ import com.aiindexfinger.scheduler.localScheduleEpochMillis
 import com.aiindexfinger.scheduler.missedSchedules
 import com.aiindexfinger.scheduler.scheduleDelayMillis
 import com.aiindexfinger.scheduler.removeTriggeredSchedule
+import com.aiindexfinger.executor.ExecutionError
+import com.aiindexfinger.executor.ExecutionErrorCode
 import java.text.DateFormat
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -271,9 +277,15 @@ class MainActivity : ComponentActivity() {
     private fun loadInitialState(): InitialAppState {
         val workflowResult = workflowStore.loadDetailed()
         val library = workflowResult.library
-        val loadedSchedules = workflowScheduler.load(
-            library.workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
-        )
+        val scheduleResult = runCatching {
+            workflowScheduler.load(
+                library.workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
+            )
+        }
+        scheduleResult.exceptionOrNull()?.let { error ->
+            if (error !is ScheduleStorageException) throw error
+        }
+        val loadedSchedules = scheduleResult.getOrDefault(emptyList())
         val missed = missedSchedules(loadedSchedules)
         var schedules = loadedSchedules
         missed.forEach { schedule ->
@@ -288,7 +300,13 @@ class MainActivity : ComponentActivity() {
                 is WorkflowLoadResult.RecoveredFromBackup -> R.string.workflows_recovered_from_backup
                 is WorkflowLoadResult.Corrupt -> R.string.workflows_corrupt
                 is WorkflowLoadResult.UnsupportedVersion -> R.string.workflows_unsupported_version
-                else -> if (hasMissedSchedule) R.string.schedule_notification_missed else null
+                else -> if (scheduleResult.exceptionOrNull() is ScheduleStorageException) {
+                    R.string.schedule_storage_corrupt
+                } else if (hasMissedSchedule) {
+                    R.string.schedule_notification_missed
+                } else {
+                    null
+                }
             },
         )
     }
@@ -384,12 +402,17 @@ private fun WorkflowApp(
     LaunchedEffect(scheduledWorkflowEvent?.sequence) {
         scheduledWorkflowEvent?.let { event ->
             val id = event.workflowId
-            schedules = onReloadSchedules(
-                workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
-            )
-            val workflowName = workflows.firstOrNull { it.id == id }?.name
-                ?: context.getString(R.string.scheduled_workflow_fallback_name)
-            runMessage = context.getString(R.string.workflow_ready_to_run, workflowName)
+            runCatching {
+                onReloadSchedules(workflows.filter { it.isReadyToRun() }.map { it.id }.toSet())
+            }.onSuccess {
+                schedules = it
+                val workflowName = workflows.firstOrNull { it.id == id }?.name
+                    ?: context.getString(R.string.scheduled_workflow_fallback_name)
+                runMessage = context.getString(R.string.workflow_ready_to_run, workflowName)
+            }.onFailure { error ->
+                if (error !is ScheduleStorageException) throw error
+                runMessage = context.getString(R.string.schedule_storage_corrupt)
+            }
             onScheduledWorkflowEventConsumed(event.sequence)
         }
     }
@@ -398,7 +421,7 @@ private fun WorkflowApp(
             runRecords = (listOf(outcome.record) + runRecords)
                 .distinctBy { it.id }
                 .take(100)
-            runMessage = outcome.result.message()
+            runMessage = outcome.result.localizedMessage(context)
         }
     }
     var pendingSchedule by remember { mutableStateOf<Triple<Workflow, Long, ScheduleRecurrence>?>(null) }
@@ -413,11 +436,19 @@ private fun WorkflowApp(
                     schedules = it
                     runMessage = context.getString(R.string.workflow_scheduled, request.first.name)
                 }
-                .onFailure { runMessage = it.message ?: context.getString(R.string.schedule_failed) }
+                .onFailure { error ->
+                    runMessage = context.getString(
+                        if (error is ScheduleStorageException) {
+                            R.string.schedule_storage_corrupt
+                        } else {
+                            R.string.schedule_failed
+                        },
+                    )
+                }
         } else if (granted && request != null) {
             runMessage = context.getString(
                 R.string.cannot_schedule,
-                request.first.readinessIssues().first().localizedMessage(),
+                request.first.readinessIssues().first().localizedMessage(context),
             )
         } else if (!granted) {
             runMessage = context.getString(R.string.schedule_requires_notifications)
@@ -476,7 +507,13 @@ private fun WorkflowApp(
                         updated.workflows.size - workflows.size,
                     )
                 }
-                        .onFailure { runMessage = context.getString(R.string.import_failed, it.message.orEmpty()) }
+                        .onFailure { error ->
+                            val details = (error as? InvalidWorkflowException)
+                                ?.issue
+                                ?.localizedMessage(context)
+                                ?: error.message.orEmpty()
+                            runMessage = context.getString(R.string.import_failed, details)
+                        }
                     }
         }
     }
@@ -498,12 +535,24 @@ private fun WorkflowApp(
             },
             onSave = { workflow ->
                 if (!workflow.isReadyToRun()) {
-                    schedules = onCancelSchedule(workflow.id)
+                    runCatching { onCancelSchedule(workflow.id) }
+                        .onSuccess {
+                            schedules = it
+                            val updated = workflows.filterNot { current -> current.id == workflow.id } + workflow
+                            persist(library.copy(workflows = updated))
+                            editingWorkflow = null
+                            initialEditingStepPath = null
+                        }
+                        .onFailure { error ->
+                            if (error !is ScheduleStorageException) throw error
+                            runMessage = context.getString(R.string.schedule_storage_corrupt)
+                        }
+                } else {
+                    val updated = workflows.filterNot { it.id == workflow.id } + workflow
+                    persist(library.copy(workflows = updated))
+                    editingWorkflow = null
+                    initialEditingStepPath = null
                 }
-                val updated = workflows.filterNot { it.id == workflow.id } + workflow
-                persist(library.copy(workflows = updated))
-                editingWorkflow = null
-                initialEditingStepPath = null
             },
         )
     } else if (showRunHistory) {
@@ -644,14 +693,26 @@ private fun WorkflowApp(
                             }
                         },
             onDelete = { workflow ->
-                schedules = onCancelSchedule(workflow.id)
-                persist(library.copy(workflows = workflows.filterNot { it.id == workflow.id }))
+                            runCatching { onCancelSchedule(workflow.id) }
+                                .onSuccess {
+                                    schedules = it
+                                    persist(library.copy(workflows = workflows.filterNot { it.id == workflow.id }))
+                                }
+                                .onFailure { error ->
+                                    runMessage = context.getString(
+                                        if (error is ScheduleStorageException) {
+                                            R.string.schedule_storage_corrupt
+                                        } else {
+                                            R.string.schedule_failed
+                                        },
+                                    )
+                                }
             },
             onSchedule = { workflow, targetEpochMillis, recurrence ->
                 if (!workflow.isReadyToRun()) {
                     runMessage = context.getString(
                         R.string.cannot_schedule,
-                        workflow.readinessIssues().first().localizedMessage(),
+                        workflow.readinessIssues().first().localizedMessage(context),
                     )
                 } else if (Build.VERSION.SDK_INT >= 33 &&
                     context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -665,12 +726,32 @@ private fun WorkflowApp(
                             schedules = it
                             runMessage = context.getString(R.string.workflow_scheduled, workflow.name)
                         }
-                        .onFailure { runMessage = it.message ?: context.getString(R.string.schedule_failed) }
+                        .onFailure { error ->
+                            runMessage = context.getString(
+                                if (error is ScheduleStorageException) {
+                                    R.string.schedule_storage_corrupt
+                                } else {
+                                    R.string.schedule_failed
+                                },
+                            )
+                        }
                 }
             },
             onCancelSchedule = { workflow ->
-                schedules = onCancelSchedule(workflow.id)
-                runMessage = context.getString(R.string.workflow_schedule_cancelled, workflow.name)
+                runCatching { onCancelSchedule(workflow.id) }
+                    .onSuccess {
+                        schedules = it
+                        runMessage = context.getString(R.string.workflow_schedule_cancelled, workflow.name)
+                    }
+                    .onFailure { error ->
+                        runMessage = context.getString(
+                            if (error is ScheduleStorageException) {
+                                R.string.schedule_storage_corrupt
+                            } else {
+                                R.string.schedule_failed
+                            },
+                        )
+                    }
             },
             onClearRunHistory = {
                 onClearRunHistory()
@@ -683,7 +764,7 @@ private fun WorkflowApp(
                 val service = AutomationAccessibilityService.instance
                 val issue = workflow.readinessIssues().firstOrNull()
                 if (issue != null) {
-                    runMessage = context.getString(R.string.cannot_run, issue.localizedMessage())
+                    runMessage = context.getString(R.string.cannot_run, issue.localizedMessage(context))
                 } else if (service == null) {
                     runMessage = context.getString(R.string.enable_automation_before_run)
                     requestAccessibilitySetup()
@@ -1607,6 +1688,7 @@ private fun WorkflowEditor(
     onBack: () -> Unit,
     onSave: (Workflow) -> Unit,
 ) {
+    val context = LocalContext.current
     var name by remember(workflow.id) { mutableStateOf(workflow.name) }
     var defaultTimeoutText by remember(workflow.id) {
         mutableStateOf(workflow.defaultStepTimeoutMillis.toString())
@@ -1746,7 +1828,7 @@ private fun WorkflowEditor(
                 visibleIssues.forEach { issue ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            issue.localizedMessage(),
+                            issue.localizedMessage(context),
                             modifier = Modifier.weight(1f),
                             color = MaterialTheme.colorScheme.error,
                             fontSize = 13.sp,
@@ -3140,12 +3222,15 @@ private fun com.aiindexfinger.model.SelectorRole.displayName(): String = when (t
     com.aiindexfinger.model.SelectorRole.NodeCondition -> "元素条件"
 }
 
-private fun RunStatus.displayName(): String = when (this) {
-    RunStatus.Completed -> "已完成"
-    RunStatus.Cancelled -> "已取消"
-    RunStatus.Failed -> "失败"
-    RunStatus.Rejected -> "已拒绝"
-}
+@Composable
+private fun RunStatus.localizedName(): String = stringResource(
+    when (this) {
+        RunStatus.Completed -> R.string.run_status_completed
+        RunStatus.Cancelled -> R.string.run_status_cancelled
+        RunStatus.Failed -> R.string.run_status_failed
+        RunStatus.Rejected -> R.string.run_status_rejected
+    },
+)
 
 @Composable
 private fun NodeConditionDialog(
@@ -4564,6 +4649,7 @@ private fun PreflightReportDialog(
     onEditStep: (StepPath) -> Unit,
     onRecoveryAction: (PreflightRecoveryAction) -> Unit,
 ) {
+    val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("检查 ${workflow.name}") },
@@ -4604,7 +4690,11 @@ private fun PreflightReportDialog(
                     Text("工作流结构：${report.validationIssues.size} 个问题", color = Color(0xFFD04F3D))
                     report.validationIssues.take(5).forEach { issue ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("• ${issue.localizedMessage()}", modifier = Modifier.weight(1f), fontSize = 12.sp)
+                            Text(
+                                "• ${issue.localizedMessage(context)}",
+                                modifier = Modifier.weight(1f),
+                                fontSize = 12.sp,
+                            )
                             issue.stepId?.let(workflow.steps::uniquePathTo)?.let { path ->
                                 TextButton(onClick = { onEditStep(path) }) { Text("编辑步骤") }
                             }
@@ -4693,20 +4783,25 @@ private fun RunHistoryScreen(
                 .padding(horizontal = 20.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("返回") }
-                Text("运行历史", modifier = Modifier.weight(1f), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onBack) { Text(stringResource(R.string.back)) }
+                Text(
+                    stringResource(R.string.run_history),
+                    modifier = Modifier.weight(1f),
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                )
                 if (records.isNotEmpty()) {
-                    TextButton(onClick = { confirmClear = true }) { Text("清除") }
+                    TextButton(onClick = { confirmClear = true }) { Text(stringResource(R.string.clear)) }
                 }
             }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                label = { Text("按工作流名称筛选") },
+                label = { Text(stringResource(R.string.run_history_filter_workflow)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Text("状态", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.run_history_status), fontSize = 12.sp, fontWeight = FontWeight.Bold)
             listOf<RunStatus?>(null, RunStatus.Completed, RunStatus.Failed)
                 .chunked(3)
                 .plus(listOf(listOf(RunStatus.Cancelled, RunStatus.Rejected)))
@@ -4715,7 +4810,7 @@ private fun RunHistoryScreen(
                         options.forEach { option ->
                             RadioButton(selected = status == option, onClick = { status = option })
                             Text(
-                                option?.displayName() ?: "全部",
+                                option?.localizedName() ?: stringResource(R.string.run_history_status_all),
                                 modifier = Modifier.clickable { status = option },
                                 fontSize = 12.sp,
                             )
@@ -4723,19 +4818,19 @@ private fun RunHistoryScreen(
                     }
                 }
             Text(
-                "共 ${records.size} 次运行，当前显示 ${visibleRecords.size} 次",
+                stringResource(R.string.run_history_count, records.size, visibleRecords.size),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             HorizontalDivider()
             when {
                 records.isEmpty() -> Text(
-                    "暂无运行记录",
+                    stringResource(R.string.no_run_records),
                     modifier = Modifier.padding(vertical = 24.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 visibleRecords.isEmpty() -> Text(
-                    "没有符合筛选条件的运行记录",
+                    stringResource(R.string.run_history_no_matches),
                     modifier = Modifier.padding(vertical = 24.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -4766,8 +4861,8 @@ private fun RunHistoryScreen(
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
-            title = { Text("清除运行历史？") },
-            text = { Text("所有本地执行记录都将被永久删除。") },
+            title = { Text(stringResource(R.string.run_history_clear_title)) },
+            text = { Text(stringResource(R.string.run_history_clear_message)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -4775,10 +4870,10 @@ private fun RunHistoryScreen(
                         confirmClear = false
                         onClear()
                     },
-                ) { Text("清除") }
+                ) { Text(stringResource(R.string.clear)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClear = false }) { Text("取消") }
+                TextButton(onClick = { confirmClear = false }) { Text(stringResource(R.string.cancel)) }
             },
         )
     }
@@ -4791,17 +4886,27 @@ private fun RunRecordDetailsDialog(
     onDismiss: () -> Unit,
     onOpenWorkflow: (Workflow, StepPath?) -> Unit,
 ) {
+    val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(record.workflowName) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("状态：${record.status.displayName()}")
-                Text("工作流 ID：${record.workflowId}")
-                Text("开始时间：${DateFormat.getDateTimeInstance().format(Date(record.startedAtMillis))}")
-                Text("持续时间：${record.durationMillis} 毫秒")
-                record.failedStepId?.let { Text("失败步骤：$it") }
-                record.failureMessage?.let { Text("详情：$it") }
+                Text(stringResource(R.string.run_history_detail_status, record.status.localizedName()))
+                Text(stringResource(R.string.run_history_detail_workflow_id, record.workflowId))
+                Text(
+                    stringResource(
+                        R.string.run_history_detail_started,
+                        DateFormat.getDateTimeInstance().format(Date(record.startedAtMillis)),
+                    ),
+                )
+                Text(stringResource(R.string.run_history_detail_duration, record.durationMillis))
+                record.failedStepId?.let {
+                    Text(stringResource(R.string.run_history_detail_failed_step, it))
+                }
+                record.localizedFailureMessage(context)?.let {
+                    Text(stringResource(R.string.run_failure_details, it))
+                }
                 if (record.diagnostics.isNotEmpty()) {
                     Text(
                         stringResource(R.string.execution_diagnostics),
@@ -4822,12 +4927,12 @@ private fun RunRecordDetailsDialog(
                 }
                 if (destination == null) {
                     Text(
-                        "原始工作流已不存在。",
+                        stringResource(R.string.run_history_workflow_missing),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else if (record.failedStepId != null && destination.stepPath == null) {
                     Text(
-                        "失败步骤已更改或不存在，将打开工作流的第一级。",
+                        stringResource(R.string.run_history_step_missing),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -4836,11 +4941,16 @@ private fun RunRecordDetailsDialog(
         confirmButton = {
             destination?.let {
                 TextButton(onClick = { onOpenWorkflow(it.workflow, it.stepPath) }) {
-                    Text(if (it.stepPath == null) "打开工作流" else "编辑失败步骤")
+                    Text(
+                        stringResource(
+                            if (it.stepPath == null) R.string.run_history_open_workflow
+                            else R.string.run_history_edit_failed_step,
+                        ),
+                    )
                 }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) } },
     )
 }
 
@@ -4856,6 +4966,8 @@ private fun RunStepOutcome.localizedName(): String = stringResource(
 
 @Composable
 private fun RunRecordRow(record: RunRecord) {
+    val context = LocalContext.current
+    val failureMessage = record.localizedFailureMessage(context)
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -4863,84 +4975,130 @@ private fun RunRecordRow(record: RunRecord) {
         Column(Modifier.weight(1f)) {
             Text(record.workflowName, fontWeight = FontWeight.SemiBold)
             Text(
-                "${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(record.startedAtMillis))} · ${record.durationMillis} 毫秒",
+                stringResource(
+                    R.string.run_history_row_metadata,
+                    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                        .format(Date(record.startedAtMillis)),
+                    record.durationMillis,
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
-            if (record.failureMessage != null) {
+            if (failureMessage != null) {
                 Text(
-                    record.failedStepId?.let { "步骤 $it：${record.failureMessage}" }
-                        ?: requireNotNull(record.failureMessage),
+                    record.failedStepId?.let {
+                        context.getString(R.string.run_failure_with_step, it, failureMessage)
+                    } ?: failureMessage,
                     color = Color(0xFFD04F3D),
                     fontSize = 12.sp,
                 )
             }
         }
         Text(
-            record.status.displayName(),
+            record.status.localizedName(),
             color = if (record.status == RunStatus.Completed) Color(0xFF16815F) else Color(0xFFD04F3D),
             fontWeight = FontWeight.Medium,
         )
     }
 }
 
-private fun RunResult.message(): String = when (this) {
-    RunResult.Completed -> "工作流已完成"
-    RunResult.AlreadyRunning -> "已有其他工作流正在运行"
-    is RunResult.NotReady -> "无法运行：${message.localizedExecutionMessage()}"
-    RunResult.Cancelled -> "工作流已停止"
-    is RunResult.Failed -> "步骤 $stepId 失败：${message.localizedExecutionMessage()}"
+private fun RunRecord.localizedFailureMessage(context: Context): String? {
+    val storedCode = failureCode ?: return failureMessage
+    val separator = storedCode.indexOf('.')
+    if (separator <= 0 || separator == storedCode.lastIndex) {
+        return context.getString(R.string.run_failure_unknown)
+    }
+    val namespace = storedCode.substring(0, separator)
+    val codeName = storedCode.substring(separator + 1)
+    return runCatching {
+        when (namespace) {
+            "execution" -> ExecutionErrorCode.entries.firstOrNull { it.name == codeName }
+                ?.let { ExecutionError(it, failureArguments).localizedMessage(context) }
+            "validation" -> ValidationIssueCode.entries.firstOrNull { it.name == codeName }
+                ?.let { ValidationIssue(null, it, failureArguments).localizedMessage(context) }
+            else -> null
+        }
+    }.getOrNull() ?: context.getString(R.string.run_failure_unknown)
 }
 
-private fun String.localizedExecutionMessage(): String = when {
-    this == "Step failed" -> "步骤执行失败"
-    this == "Step timed out" -> "步骤执行超时"
-    this == "Target node was not clickable" -> "目标元素不可点击"
-    this == "Image click requires Android 11 or newer" -> "图片点击需要 Android 11 或更高版本"
-    this == "The target app is not currently visible" -> "目标应用当前不可见"
-    this == "The image template is missing or invalid" -> "图片模板缺失或无效"
-    this == "The image template was not found" -> "未找到图片模板"
-    this == "Multiple similar image matches were found" -> "找到多个相似的图片匹配项"
-    this == "The current screen could not be captured" -> "无法截取当前屏幕"
-    this == "The matched image could not be clicked" -> "无法点击匹配的图片"
-    this == "System action failed" -> "系统操作失败"
-    this == "Target node was not scrollable" -> "目标元素不可滚动"
-    this == "App could not be launched" -> "无法启动应用"
-    this == "Target node was not long-clickable" -> "目标元素不可长按"
-    this == "Text input failed" -> "文本输入失败"
-    this == "Swipe failed" -> "滑动失败"
-    this == "Tap failed" -> "点击失败"
-    startsWith("Workflow exceeded ") && endsWith(" step executions") ->
-        replace("Workflow exceeded ", "工作流执行步骤数超过 ").removeSuffix(" step executions")
-    startsWith("Variable '") && endsWith("' is not defined") ->
-        "变量“${removePrefix("Variable '").removeSuffix("' is not defined")}”未定义"
-    startsWith("Target node does not provide ") ->
-        replace("Target node does not provide ", "目标元素不提供")
-            .replace("text or description", "文本或描述")
-            .replace("content description", "内容描述")
-            .replace("resource ID", "资源 ID")
-            .replace("class name", "类名")
-            .replace("text", "文本")
-    else -> this
+private fun RunResult.localizedMessage(context: Context): String = when (this) {
+    RunResult.Completed -> context.getString(R.string.run_completed)
+    RunResult.AlreadyRunning -> context.getString(R.string.run_already_running)
+    is RunResult.NotReady -> context.getString(R.string.cannot_run, issue.localizedMessage(context))
+    RunResult.Cancelled -> context.getString(R.string.run_cancelled)
+    is RunResult.Failed -> context.getString(
+        R.string.run_step_failed,
+        stepId,
+        error.localizedMessage(context),
+    )
 }
 
-private fun ValidationIssue.localizedMessage(): String = when {
-    message == "Workflow has no steps" -> "工作流没有步骤"
-    message == "Step ID is blank" -> "步骤 ID 为空"
-    message == "Step ID is duplicated" -> "步骤 ID 重复"
-    message == "Step timeout must be positive" -> "步骤超时时间必须为正数"
-    message == "Variable name must not be blank" -> "变量名不能为空"
-    message == "Delay duration must not be negative" -> "延迟时间不能为负数"
-    message == "Workflow is saved as a draft" -> "工作流保存为草稿状态"
-    message.startsWith("Workflow can execute more than ") ->
-        message.replace("Workflow can execute more than ", "工作流可能执行超过 ").replace(" steps", " 个步骤")
-    message.startsWith("Workflow nesting exceeds ") ->
-        message.replace("Workflow nesting exceeds ", "工作流嵌套超过 ").replace(" levels", " 层")
-    message.startsWith("Workflow defines more than ") ->
-        message.replace("Workflow defines more than ", "工作流定义了超过 ").replace(" steps", " 个步骤")
-    message.startsWith("Variable '") && message.endsWith("' is not defined") ->
-        "变量“${message.removePrefix("Variable '").removeSuffix("' is not defined")}”未定义"
-    else -> message
+private fun ExecutionError.localizedMessage(context: Context): String = when (code) {
+    ExecutionErrorCode.StepFailed -> context.getString(R.string.execution_error_step_failed)
+    ExecutionErrorCode.StepTimedOut -> context.getString(R.string.execution_error_step_timed_out)
+    ExecutionErrorCode.ExecutionLimitExceeded -> context.getString(
+        R.string.execution_error_limit_exceeded,
+        arguments.getValue("limit").toLong(),
+    )
+    ExecutionErrorCode.TargetNotClickable -> context.getString(R.string.execution_error_target_not_clickable)
+    ExecutionErrorCode.ImageClickUnsupported -> context.getString(R.string.execution_error_image_unsupported)
+    ExecutionErrorCode.ImageClickWrongPackage -> context.getString(R.string.execution_error_image_wrong_package)
+    ExecutionErrorCode.ImageTemplateInvalid -> context.getString(R.string.execution_error_image_template_invalid)
+    ExecutionErrorCode.ImageTemplateNotFound -> context.getString(R.string.execution_error_image_not_found)
+    ExecutionErrorCode.ImageTemplateAmbiguous -> context.getString(R.string.execution_error_image_ambiguous)
+    ExecutionErrorCode.ScreenCaptureFailed -> context.getString(R.string.execution_error_capture_failed)
+    ExecutionErrorCode.ImageGestureFailed -> context.getString(R.string.execution_error_image_gesture_failed)
+    ExecutionErrorCode.SystemActionFailed -> context.getString(R.string.execution_error_system_action_failed)
+    ExecutionErrorCode.TargetNotScrollable -> context.getString(R.string.execution_error_target_not_scrollable)
+    ExecutionErrorCode.AppLaunchFailed -> context.getString(R.string.execution_error_app_launch_failed)
+    ExecutionErrorCode.TargetNotLongClickable -> context.getString(R.string.execution_error_target_not_long_clickable)
+    ExecutionErrorCode.UndefinedVariable -> context.getString(
+        R.string.execution_error_undefined_variable,
+        arguments.getValue("variableName"),
+    )
+    ExecutionErrorCode.TextInputFailed -> context.getString(R.string.execution_error_text_input_failed)
+    ExecutionErrorCode.MissingNodeAttribute -> context.getString(
+        R.string.execution_error_missing_node_attribute,
+        nodeAttributeName(context, arguments.getValue("attribute")),
+    )
+    ExecutionErrorCode.SwipeFailed -> context.getString(R.string.execution_error_swipe_failed)
+    ExecutionErrorCode.TapFailed -> context.getString(R.string.execution_error_tap_failed)
+}
+
+private fun nodeAttributeName(context: Context, attribute: String): String = context.getString(
+    when (NodeAttribute.valueOf(attribute)) {
+        NodeAttribute.TextOrDescription -> R.string.node_attribute_text_or_description
+        NodeAttribute.Text -> R.string.node_attribute_text
+        NodeAttribute.ContentDescription -> R.string.node_attribute_content_description
+        NodeAttribute.ViewId -> R.string.node_attribute_view_id
+        NodeAttribute.ClassName -> R.string.node_attribute_class_name
+    },
+)
+
+private fun ValidationIssue.localizedMessage(context: Context): String = when (code) {
+    ValidationIssueCode.EmptyWorkflow -> context.getString(R.string.validation_empty_workflow)
+    ValidationIssueCode.ExecutionLimitExceeded -> context.getString(
+        R.string.validation_execution_limit_exceeded,
+        arguments.getValue("limit").toLong(),
+    )
+    ValidationIssueCode.NestingLimitExceeded -> context.getString(
+        R.string.validation_nesting_limit_exceeded,
+        arguments.getValue("limit").toInt(),
+    )
+    ValidationIssueCode.DefinedStepLimitExceeded -> context.getString(
+        R.string.validation_defined_step_limit_exceeded,
+        arguments.getValue("limit").toInt(),
+    )
+    ValidationIssueCode.BlankStepId -> context.getString(R.string.validation_blank_step_id)
+    ValidationIssueCode.DuplicateStepId -> context.getString(R.string.validation_duplicate_step_id)
+    ValidationIssueCode.NonPositiveTimeout -> context.getString(R.string.validation_non_positive_timeout)
+    ValidationIssueCode.BlankVariableName -> context.getString(R.string.validation_blank_variable_name)
+    ValidationIssueCode.UndefinedVariable -> context.getString(
+        R.string.validation_undefined_variable,
+        arguments.getValue("variableName"),
+    )
+    ValidationIssueCode.NegativeDelay -> context.getString(R.string.validation_negative_delay)
+    ValidationIssueCode.DraftWorkflow -> context.getString(R.string.validation_draft_workflow)
 }
 
 @Composable

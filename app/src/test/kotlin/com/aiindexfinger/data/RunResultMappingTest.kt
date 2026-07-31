@@ -1,5 +1,7 @@
 package com.aiindexfinger.data
 
+import com.aiindexfinger.executor.ExecutionError
+import com.aiindexfinger.executor.ExecutionErrorCode
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.StepExecutionDiagnostic
 import com.aiindexfinger.executor.StepExecutionOutcome
@@ -17,13 +19,15 @@ class RunResultMappingTest {
 
     @Test
     fun failedResultKeepsOnlyDiagnosticFields() {
-        val record = RunResult.Failed("step-2", "Target not found")
+        val record = RunResult.Failed("step-2", ExecutionError(ExecutionErrorCode.TargetNotClickable))
             .toRunRecord(workflow, startedAtMillis = 100, finishedAtMillis = 175)
 
         assertEquals(RunStatus.Failed, record.status)
         assertEquals(75, record.durationMillis)
         assertEquals("step-2", record.failedStepId)
-        assertEquals("Target not found", record.failureMessage)
+        assertNull(record.failureMessage)
+        assertEquals("execution.TargetNotClickable", record.failureCode)
+        assertEquals(emptyMap<String, String>(), record.failureArguments)
     }
 
     @Test
@@ -35,6 +39,7 @@ class RunResultMappingTest {
         assertEquals(0, record.durationMillis)
         assertNull(record.failedStepId)
         assertNull(record.failureMessage)
+        assertNull(record.failureCode)
     }
 
     @Test

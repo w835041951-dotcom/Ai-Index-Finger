@@ -6,13 +6,30 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 ## Current Baseline
 
-- Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
+- Version `0.33.0` (`versionCode 33`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
 - Core workflow editing, execution, persistence, import/export, scheduling, node inspection, and run history are implemented.
-- Existing JVM and Android unit tests pass.
+- Core and app JVM tests pass. Structured validator and executor errors are localized through English and Simplified Chinese resources, and new run-history records persist stable error codes while legacy text records remain readable.
 - The application has no network permission.
-- The unsigned release AAB builds successfully at `app/build/outputs/bundle/release/app-release.aab`.
-- Release lint passes with eight non-blocking recommendations: four dependency updates plus `ObsoleteSdkInt`, `AutoboxingStateCreation`, `UnusedResources`, and `UseKtx`. Backup and launcher-icon warnings are resolved.
-- Release signing, store assets, privacy-policy hosting, Play Console declarations, and physical-device checks require external owner input.
+- Unsigned release APK and AAB builds succeed. These artifacts are build evidence only and cannot be uploaded as release candidates.
+- Release lint passes with 0 errors and 245 warnings: 211 `UnusedResources`, 20 `PluralsCandidate`, 7 dependency notices, 4 `UseKtx`, and one each of `AutoboxingStateCreation`, `DiscouragedApi`, `ObsoleteSdkInt`, and `UnusedAttribute`.
+- The repository has no GitHub Actions workflow and no release-signing configuration. Release signing, store assets, privacy-policy hosting, Play Console declarations, and physical-device checks require external owner input.
+
+## Production Release Gates
+
+| Gate | Owner | Current state | Required evidence | Production blocker |
+| --- | --- | --- | --- | --- |
+| Release identity | Product owner | `com.aiindexfinger`, `0.33.0`, code 33 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
+| Upload signing | Release owner | Not configured | Upload keystore and alias stored outside Git; signed AAB verified with `jarsigner` or `apksigner`; Play App Signing enabled | Yes |
+| Automated build gate | Engineering | Local commands pass; no CI | Protected GitHub workflow runs tests, release lint, and unsigned bundle build for the release commit | Yes |
+| Bilingual product UI | Engineering/QA | Resource keys match; remaining hardcoded Compose text exists outside the newly localized run-history flow | English and Simplified Chinese smoke-test checklist passes with no mixed-language critical workflow | Yes |
+| Accessibility disclosure | Product/QA | Code and focused tests complete | Clean-install device recording proves disclosure, decline, acceptance, Settings handoff, and reviewability | Yes |
+| Accessibility automation lifecycle | QA | Unit coverage present | Device matrix proves observation leases, service disable/re-enable, process restart, stop, and protected-screen behavior | Yes |
+| Scheduling and notifications | QA | Unit coverage present | API 26 and API 36 evidence for denial/recovery, recurrence, missed reminders, reboot, timezone/DST, replacement, and cancellation | Yes |
+| Privacy policy and Data Safety | Product/legal | Not supplied | Public URL and approved declarations covering accessibility data, screenshots, package names, clipboard, local storage, exports, and retention | Yes |
+| Accessibility API declaration | Product/legal | Not supplied | Play Console declaration and demonstration video match actual behavior and user-controlled core purpose | Yes |
+| Store listing | Product/design | Not supplied | Approved icon, screenshots, feature graphic, descriptions, support email, target audience, content rating, regions, and app-access answers | Yes |
+| Pre-launch report | Release owner/QA | Not run | No unresolved crash, ANR, policy, accessibility, or compatibility blocker on uploaded signed candidate | Yes |
+| Lint debt | Engineering | 0 errors, 245 warnings | Triage all warnings; remove accidental unused resources and document accepted warnings. No new release-critical warning | No, unless triage finds a defect |
 
 ## P0 - Required Before Internal Testing
 
@@ -21,7 +38,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 | Device check pending | Prominent Accessibility API disclosure and affirmative consent | Code and focused unit tests are complete. On a clean install, verify every in-app path shows disclosure before first acknowledgement, decline stays in-app, acceptance opens Settings, and disclosure remains reviewable. |
 | Device check pending | Minimize accessibility observation lifetime | Snapshot collection now requires an editor or inspector lease, the final release clears retained nodes, and service destruction clears data. Verify target-app round trips and service disable/re-enable on a device. |
 | Device check pending | Visual element capture | On Android 11+, Click editing can capture the previous app once and select an accessibility element by tapping the in-memory image. Verify repeated controls, rotation, protected-window failure, timeout, service disablement, and bitmap disposal; update the Accessibility API declaration and privacy policy before upload. |
-| Planned | Upload-key release signing | `bundleRelease` produces an upload-key-signed AAB using credentials outside Git; Play App Signing is enabled. |
+| Planned | Upload-key release signing | `bundleRelease` produces an upload-key-signed AAB using credentials outside Git; Play App Signing is enabled. Never commit the keystore or passwords. |
 | External | Privacy policy and Data Safety form | Public policy URL and Play declarations accurately describe screen data, package names, clipboard use, local files, exports, and retention. |
 | External | Accessibility API declaration | Core purpose, user benefit, activation, collected data, and actions match actual behavior; demonstration video is prepared if requested. |
 
@@ -33,16 +50,16 @@ Publish AI Index Finger through Google Play internal testing and then production
 | Complete | Explicit backup and transfer exclusions | Android 12+ cloud backup and device transfer plus legacy full backup exclude all internal files, preferences, databases, and external app data; the merged release manifest references both rule sets. |
 | Complete | Save-time workflow validity | Incomplete workflows remain explicit drafts; only validator-clean ready workflows can run or be scheduled. Legacy workflows derive their effective state without a format break. |
 | Planned | Accessibility and lifecycle device tests | Core flow passes with TalkBack, permission denial/recovery, process restart, and service disablement. |
-| In progress | Release lint and bundle gate | `test`, `lintRelease`, and `bundleRelease` pass. Resolve or explicitly document the eight remaining lint warnings before production. |
+| In progress | Release lint and bundle gate | Local `test`, `lintRelease`, and unsigned `bundleRelease` pass. Add CI and triage the current 245 warnings before production. |
 | External | Store listing package | Phone screenshots, feature graphic, descriptions, support email, content rating, target audience, and app-access answers are complete. |
 
 ## P2 - Post-Launch Quality Backlog
 
 - Guided first-run experience and safe example workflows.
-- Richer execution failure context and exportable run diagnostics.
+- Exportable structured execution failure codes and arguments. Live and run-history presentation is structured and bilingual; diagnostics export remains to be designed.
 - Recurring daily and weekly reminders are implemented; battery, timezone, DST, reboot, and notification-recovery behavior still require device testing.
 - Broader UI and accessibility instrumentation coverage.
-- Localization based on launch-market demand.
+- Complete English and Simplified Chinese coverage for remaining hardcoded Compose surfaces and add locale smoke tests for critical workflows.
 
 ## Completed UX Recovery Improvements
 
@@ -71,14 +88,40 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 1. Run `gradlew.bat test`.
 2. Run `gradlew.bat lintRelease`.
-3. Run `gradlew.bat bundleRelease` with external upload-key configuration.
-4. Install on at least one API 26 device and one device near target SDK 36.
-5. Exercise create, configure, save, reopen, validate, disclose, enable, run, stop, review history, export, import, schedule, deny permissions, and recover permissions.
-6. Upload to Play internal testing and resolve pre-launch report crashes, policy warnings, and accessibility findings before production rollout.
+3. Increment `versionCode`, confirm `versionName`, and build an upload-key-signed AAB using credentials outside Git.
+4. Verify the candidate signature and archive its SHA-256, commit SHA, version, mapping file if minification is enabled, and test report references.
+5. Install on at least one API 26 device and one device near target SDK 36.
+6. Exercise create, configure, save, reopen, validate, disclose, enable, run, stop, review history, export, import, schedule, deny permissions, and recover permissions.
+7. Repeat the critical flow in English and Simplified Chinese, including validation, execution failures, run history, notifications, dialogs, and accessibility descriptions.
+8. Upload the exact signed candidate to Play internal testing and resolve pre-launch report crashes, policy warnings, and accessibility findings.
+
+## Rollout Stages
+
+### Internal Testing
+
+Enter only when signing, versioning, policy drafts, CI, and the API 26/API 36 smoke suite are complete. Testers must receive release notes and a known-issues list. Stop promotion for any crash, ANR, data loss, unexpected automation, inaccessible disclosure, broken import/export compatibility, notification regression, or mixed-language critical flow.
+
+### Closed Testing
+
+Use a closed track after internal testing is stable. Include representative Android vendors and accessibility configurations. Require at least seven consecutive days without a release-blocking defect, successful upgrade from the previous candidate, clean-install and process-restart evidence, and resolved Play pre-launch findings. An open-testing phase is optional and should be used only if broader policy or device evidence is needed.
+
+### Production
+
+Start with a staged rollout rather than 100 percent. Suggested progression is 5 percent, 20 percent, 50 percent, then 100 percent, with at least 24 hours and explicit review between stages. Halt rollout for elevated crash/ANR rates, accessibility-policy feedback, data loss, unsafe automation, signature/update failure, broken scheduling, or a material privacy-disclosure mismatch. Resume only with a new incremented `versionCode` candidate and documented verification.
+
+## Release Candidate Record
+
+For each candidate, record:
+
+- Git commit SHA and clean source status.
+- `versionName`, `versionCode`, application ID, build time, and Gradle/Java versions.
+- Signed AAB SHA-256 and certificate fingerprint; never record signing secrets.
+- Test, lint, device-matrix, localization, policy, and pre-launch report outcomes.
+- Approved release notes, known issues, rollout owner, start time, and stop decision.
 
 ## Next Iteration
 
-Verify preflight and one-time/daily/weekly reminder flows on API 26 and a target-SDK 36 device, including notification denial/recovery, missed occurrences, DST-adjacent inputs, timezone changes, process restart, replacement, and cancellation. Then prioritize completing workflow-editor localization and broader accessibility instrumentation.
+Add a protected CI gate, complete remaining English/Simplified Chinese UI coverage, and configure external upload signing. Then verify preflight and one-time/daily/weekly reminder flows on API 26 and a target-SDK 36 device, including notification denial/recovery, missed occurrences, DST-adjacent inputs, timezone changes, process restart, replacement, and cancellation.
 
 ## Owner Decisions
 

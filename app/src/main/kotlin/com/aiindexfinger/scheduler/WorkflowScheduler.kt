@@ -26,8 +26,10 @@ class WorkflowScheduler(
     ): List<WorkflowSchedule> = synchronized(SCHEDULER_LOCK) {
         require(workflow.isReadyToRun()) { "只能计划就绪状态的工作流" }
         val schedule = WorkflowSchedule(workflow.id, workflow.name, targetEpochMillis, recurrence = recurrence)
-        enqueue(schedule)
-        store.put(schedule)
+        val delayMillis = scheduleDelayMillis(targetEpochMillis, currentTimeMillis())
+        val schedules = store.put(schedule)
+        enqueue(schedule, delayMillis)
+        schedules
     }
 
     internal fun completeOccurrence(workflowId: String, expectedAtMillis: Long) =
@@ -63,8 +65,10 @@ class WorkflowScheduler(
         store.consumeMissedOccurrence(workflowId)
     }
 
-    private fun enqueue(schedule: WorkflowSchedule) {
-        val delayMillis = scheduleDelayMillis(schedule.scheduledAtMillis, currentTimeMillis())
+    private fun enqueue(
+        schedule: WorkflowSchedule,
+        delayMillis: Long = scheduleDelayMillis(schedule.scheduledAtMillis, currentTimeMillis()),
+    ) {
         val input = Data.Builder()
             .putString(ScheduleNotificationWorker.KEY_WORKFLOW_ID, schedule.workflowId)
             .putString(ScheduleNotificationWorker.KEY_WORKFLOW_NAME, schedule.workflowName)
@@ -79,8 +83,9 @@ class WorkflowScheduler(
     }
 
     fun cancel(workflowId: String): List<WorkflowSchedule> = synchronized(SCHEDULER_LOCK) {
+        val schedules = store.remove(workflowId)
         workManager.cancelUniqueWork(workName(workflowId))
-        store.remove(workflowId)
+        schedules
     }
 
     fun load(workflowIds: Set<String>): List<WorkflowSchedule> = synchronized(SCHEDULER_LOCK) {

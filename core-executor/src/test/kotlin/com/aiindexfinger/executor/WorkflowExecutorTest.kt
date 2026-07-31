@@ -11,6 +11,7 @@ import com.aiindexfinger.model.SystemAction
 import com.aiindexfinger.model.TextInputMethod
 import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.ValidationIssueCode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -53,8 +54,8 @@ class WorkflowExecutorTest {
         )
 
         assertEquals(
-            RunResult.NotReady("Workflow is saved as a draft"),
-            WorkflowExecutor(driver).run(workflow),
+            ValidationIssueCode.DraftWorkflow,
+            assertIs<RunResult.NotReady>(WorkflowExecutor(driver).run(workflow)).issue.code,
         )
         assertEquals(0, driver.clickCount)
     }
@@ -73,8 +74,8 @@ class WorkflowExecutorTest {
         )
 
         assertEquals(
-            RunResult.NotReady("Step ID is duplicated"),
-            WorkflowExecutor(driver).run(workflow),
+            ValidationIssueCode.DuplicateStepId,
+            assertIs<RunResult.NotReady>(WorkflowExecutor(driver).run(workflow)).issue.code,
         )
         assertEquals(0, driver.clickCount)
     }
@@ -299,7 +300,7 @@ class WorkflowExecutorTest {
 
         assertIs<RunResult.Failed>(result)
         assertEquals("delay", result.stepId)
-        assertEquals("Step timed out", result.message)
+        assertEquals(ExecutionErrorCode.StepTimedOut, result.error.code)
     }
 
     @Test
@@ -358,6 +359,47 @@ class WorkflowExecutorTest {
             name = "Continue",
             steps = listOf(
                 Step.Click("click", selector, failurePolicy = FailurePolicy.Continue),
+                Step.GlobalAction("back", SystemAction.Back),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.systemActionCount)
+    }
+
+    @Test
+    fun `container retry handles a nested step failure`() = runTest {
+        val driver = FakeDriver(failClicksBeforeSuccess = 1)
+        val workflow = Workflow(
+            id = "nested-retry",
+            name = "Nested retry",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1,
+                    steps = listOf(Step.Click("click", selector)),
+                    failurePolicy = FailurePolicy.Retry(attempts = 1, delayMillis = 0),
+                ),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(2, driver.clickCount)
+    }
+
+    @Test
+    fun `container continue handles a nested step failure`() = runTest {
+        val driver = FakeDriver(clickResult = false)
+        val workflow = Workflow(
+            id = "nested-continue",
+            name = "Nested continue",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1,
+                    steps = listOf(Step.Click("click", selector)),
+                    failurePolicy = FailurePolicy.Continue,
+                ),
                 Step.GlobalAction("back", SystemAction.Back),
             ),
         )
@@ -457,7 +499,8 @@ class WorkflowExecutorTest {
         val result = WorkflowExecutor(FakeDriver(), maxExecutedSteps = 3).run(workflow)
 
         assertIs<RunResult.Failed>(result)
-        assertEquals("Workflow exceeded 3 step executions", result.message)
+        assertEquals(ExecutionErrorCode.ExecutionLimitExceeded, result.error.code)
+        assertEquals("3", result.error.arguments["limit"])
     }
 
     @Test
@@ -473,15 +516,15 @@ class WorkflowExecutorTest {
     @Test
     fun `image click no match and ambiguity fail without coordinate fallback`() = runTest {
         listOf(
-            ImageClickResult.NoMatch to "The image template was not found",
-            ImageClickResult.Ambiguous to "Multiple similar image matches were found",
-        ).forEach { (driverResult, expectedMessage) ->
+            ImageClickResult.NoMatch to ExecutionErrorCode.ImageTemplateNotFound,
+            ImageClickResult.Ambiguous to ExecutionErrorCode.ImageTemplateAmbiguous,
+        ).forEach { (driverResult, expectedCode) ->
             val driver = FakeDriver(imageClickResult = driverResult)
 
             val result = WorkflowExecutor(driver).run(imageClickWorkflow())
 
             assertIs<RunResult.Failed>(result)
-            assertEquals(expectedMessage, result.message)
+            assertEquals(expectedCode, result.error.code)
             assertEquals(null, driver.lastTap)
         }
     }

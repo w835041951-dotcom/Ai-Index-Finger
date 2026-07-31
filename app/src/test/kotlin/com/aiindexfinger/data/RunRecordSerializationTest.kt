@@ -18,7 +18,7 @@ class RunRecordSerializationTest {
             durationMillis = 250,
             status = RunStatus.Failed,
             failedStepId = "click-submit",
-            failureMessage = "Target node was not clickable",
+            failureCode = "execution.TargetNotClickable",
             diagnostics = listOf(
                 RunStepDiagnostic(0, "click-submit", 25, 2, RunStepOutcome.Failed),
             ),
@@ -40,5 +40,26 @@ class RunRecordSerializationTest {
         val decoded = Json.decodeFromString(RunRecord.serializer(), encoded)
 
         assertEquals(emptyList<RunStepDiagnostic>(), decoded.diagnostics)
+    }
+
+    @Test
+    fun legacyFailureMessageRemainsReadable() {
+        val encoded = """{"id":"old","workflowId":"workflow","workflowName":"Old","startedAtMillis":1,"durationMillis":2,"status":"Failed","failureMessage":"Legacy failure"}"""
+
+        val decoded = Json.decodeFromString(RunRecord.serializer(), encoded)
+
+        assertEquals("Legacy failure", decoded.failureMessage)
+        assertEquals(null, decoded.failureCode)
+        assertEquals(emptyMap<String, String>(), decoded.failureArguments)
+    }
+
+    @Test
+    fun malformedStructuredFailureRemainsReadableForUiFallback() {
+        val encoded = """{"id":"bad","workflowId":"workflow","workflowName":"Bad","startedAtMillis":1,"durationMillis":2,"status":"Failed","failureCode":"execution.ExecutionLimitExceeded","failureArguments":{"limit":"not-a-number"}}"""
+
+        val decoded = Json.decodeFromString(RunRecord.serializer(), encoded)
+
+        assertEquals("execution.ExecutionLimitExceeded", decoded.failureCode)
+        assertEquals(mapOf("limit" to "not-a-number"), decoded.failureArguments)
     }
 }

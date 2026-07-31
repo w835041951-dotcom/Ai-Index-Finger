@@ -2,8 +2,23 @@ package com.aiindexfinger.model
 
 data class ValidationIssue(
     val stepId: String?,
-    val message: String,
+    val code: ValidationIssueCode,
+    val arguments: Map<String, String> = emptyMap(),
 )
+
+enum class ValidationIssueCode {
+    EmptyWorkflow,
+    ExecutionLimitExceeded,
+    NestingLimitExceeded,
+    DefinedStepLimitExceeded,
+    BlankStepId,
+    DuplicateStepId,
+    NonPositiveTimeout,
+    BlankVariableName,
+    UndefinedVariable,
+    NegativeDelay,
+    DraftWorkflow,
+}
 
 data class WorkflowValidationSummary(
     val issues: List<ValidationIssue>,
@@ -20,7 +35,7 @@ object WorkflowValidator {
     fun inspect(workflow: Workflow): WorkflowValidationSummary {
         val issues = mutableListOf<ValidationIssue>()
         if (workflow.steps.isEmpty()) {
-            issues += ValidationIssue(null, "Workflow has no steps")
+            issues += ValidationIssue(null, ValidationIssueCode.EmptyWorkflow)
             return WorkflowValidationSummary(issues, emptySet(), emptySet(), 0, 0, 0)
         }
 
@@ -37,7 +52,8 @@ object WorkflowValidator {
         if (estimatedExecutions > WorkflowLimits.MAX_EXECUTED_STEPS) {
             issues += ValidationIssue(
                 null,
-                "Workflow can execute more than ${WorkflowLimits.MAX_EXECUTED_STEPS} steps",
+                ValidationIssueCode.ExecutionLimitExceeded,
+                mapOf("limit" to WorkflowLimits.MAX_EXECUTED_STEPS.toString()),
             )
         }
         return WorkflowValidationSummary(
@@ -61,7 +77,11 @@ object WorkflowValidator {
         state.maximumNestingDepth = maxOf(state.maximumNestingDepth, depth)
         if (depth > WorkflowLimits.MAX_NESTING_DEPTH) {
             if (!state.reportedDepthLimit) {
-                issues += ValidationIssue(null, "Workflow nesting exceeds ${WorkflowLimits.MAX_NESTING_DEPTH} levels")
+                issues += ValidationIssue(
+                    null,
+                    ValidationIssueCode.NestingLimitExceeded,
+                    mapOf("limit" to WorkflowLimits.MAX_NESTING_DEPTH.toString()),
+                )
                 state.reportedDepthLimit = true
             }
             return 0
@@ -70,26 +90,34 @@ object WorkflowValidator {
         steps.forEach { step ->
             state.definedSteps++
             if (state.definedSteps > WorkflowLimits.MAX_DEFINED_STEPS && !state.reportedStepLimit) {
-                issues += ValidationIssue(null, "Workflow defines more than ${WorkflowLimits.MAX_DEFINED_STEPS} steps")
+                issues += ValidationIssue(
+                    null,
+                    ValidationIssueCode.DefinedStepLimitExceeded,
+                    mapOf("limit" to WorkflowLimits.MAX_DEFINED_STEPS.toString()),
+                )
                 state.reportedStepLimit = true
             }
-            if (step.id.isBlank()) issues += ValidationIssue(step.id, "Step ID is blank")
-            if (!seenStepIds.add(step.id)) issues += ValidationIssue(step.id, "Step ID is duplicated")
+            if (step.id.isBlank()) issues += ValidationIssue(step.id, ValidationIssueCode.BlankStepId)
+            if (!seenStepIds.add(step.id)) issues += ValidationIssue(step.id, ValidationIssueCode.DuplicateStepId)
             if (step.timeoutMillis != null && step.timeoutMillis!! <= 0) {
-                issues += ValidationIssue(step.id, "Step timeout must be positive")
+                issues += ValidationIssue(step.id, ValidationIssueCode.NonPositiveTimeout)
             }
 
             val nestedExecutions = when (step) {
                 is Step.SetVariable -> {
                     if (step.name.isBlank()) {
-                        issues += ValidationIssue(step.id, "Variable name must not be blank")
+                        issues += ValidationIssue(step.id, ValidationIssueCode.BlankVariableName)
                     }
                     val references = step.value.referencedVariables()
                     state.variableReferences += references
                     references
                         .filterNot { it in definedVariables }
                         .forEach { variableName ->
-                            issues += ValidationIssue(step.id, "Variable '$variableName' is not defined")
+                            issues += ValidationIssue(
+                                step.id,
+                                ValidationIssueCode.UndefinedVariable,
+                                mapOf("variableName" to variableName),
+                            )
                         }
                     definedVariables += step.name
                     state.variableDefinitions += step.name
@@ -102,7 +130,7 @@ object WorkflowValidator {
                 }
                 is Step.Delay -> {
                     if (step.durationMillis < 0) {
-                        issues += ValidationIssue(step.id, "Delay duration must not be negative")
+                        issues += ValidationIssue(step.id, ValidationIssueCode.NegativeDelay)
                     }
                     0L
                 }
@@ -110,7 +138,11 @@ object WorkflowValidator {
                     val variableName = step.variableName
                     if (variableName != null) state.variableReferences += variableName
                     if (variableName != null && variableName !in definedVariables) {
-                        issues += ValidationIssue(step.id, "Variable '$variableName' is not defined")
+                        issues += ValidationIssue(
+                            step.id,
+                            ValidationIssueCode.UndefinedVariable,
+                            mapOf("variableName" to variableName),
+                        )
                     }
                     0L
                 }
@@ -176,7 +208,13 @@ object WorkflowValidator {
             state.variableReferences += references
             references
                 .filterNot { it in definedVariables }
-                .forEach { issues += ValidationIssue(stepId, "Variable '$it' is not defined") }
+                .forEach { variableName ->
+                    issues += ValidationIssue(
+                        stepId,
+                        ValidationIssueCode.UndefinedVariable,
+                        mapOf("variableName" to variableName),
+                    )
+                }
         }
     }
 
@@ -211,7 +249,7 @@ fun Workflow.effectiveState(): WorkflowState =
     state ?: if (WorkflowValidator.validate(this).isEmpty()) WorkflowState.Ready else WorkflowState.Draft
 
 fun Workflow.readinessIssues(): List<ValidationIssue> = when (effectiveState()) {
-    WorkflowState.Draft -> listOf(ValidationIssue(null, "Workflow is saved as a draft"))
+    WorkflowState.Draft -> listOf(ValidationIssue(null, ValidationIssueCode.DraftWorkflow))
     WorkflowState.Ready -> WorkflowValidator.validate(this)
 }
 

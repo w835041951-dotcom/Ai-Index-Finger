@@ -124,7 +124,7 @@ internal class WorkflowFileStore(
         val normalizedLibrary = library.normalized()
         normalizedLibrary.workflows.filter { it.state == WorkflowState.Ready }.forEach { workflow ->
             val issue = WorkflowValidator.validate(workflow).firstOrNull()
-            require(issue == null) { issue?.message ?: "就绪工作流无效" }
+            require(issue == null) { issue?.code?.name ?: "Invalid ready workflow" }
         }
         val previousById = loadResult.workflows.associateBy(Workflow::id)
         val incomingById = normalizedLibrary.workflows.associateBy(Workflow::id)
