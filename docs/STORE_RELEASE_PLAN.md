@@ -63,7 +63,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 ## Completed UX Recovery Improvements
 
-- Click, Long Click, and Input Text share the one-shot visual element capture flow.
+- Click, Long Click, Input Text, Tap Coordinates, Swipe, and Image Click share a reusable in-memory capture. The capture remains available until it is replaced, explicitly cleared, the accessibility service stops, or the process ends.
 - Preflight findings offer direct accessibility and notification recovery actions.
 - Validation and selector findings can open the exact top-level or nested step editor.
 - Failed run details can reopen the current workflow at the failed step, with safe stale-step fallback.

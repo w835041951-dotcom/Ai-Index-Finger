@@ -52,6 +52,23 @@ enum class RunStatus {
     Rejected,
 }
 
+class RunHistoryStorageException(cause: Throwable) :
+    IllegalStateException("Stored run history is corrupt and cannot be modified", cause)
+
+sealed interface RunHistoryLoadResult {
+    val records: List<RunRecord>
+
+    data object Missing : RunHistoryLoadResult {
+        override val records: List<RunRecord> = emptyList()
+    }
+
+    data class Loaded(override val records: List<RunRecord>) : RunHistoryLoadResult
+
+    data class Corrupt(val error: Throwable) : RunHistoryLoadResult {
+        override val records: List<RunRecord> = emptyList()
+    }
+}
+
 class RunHistoryStore private constructor(
     private val file: File,
 ) {
@@ -65,16 +82,23 @@ class RunHistoryStore private constructor(
     }
 
     @Synchronized
-    fun load(): List<RunRecord> {
-        if (!file.exists()) return emptyList()
-        return runCatching {
-            json.decodeFromString(ListSerializer(RunRecord.serializer()), file.readText())
-        }.getOrDefault(emptyList())
+    fun load(): List<RunRecord> = loadDetailed().records
+
+    @Synchronized
+    fun loadDetailed(): RunHistoryLoadResult {
+        if (!file.exists()) return RunHistoryLoadResult.Missing
+        return try {
+            RunHistoryLoadResult.Loaded(
+                json.decodeFromString(ListSerializer(RunRecord.serializer()), file.readText()),
+            )
+        } catch (exception: Exception) {
+            RunHistoryLoadResult.Corrupt(exception)
+        }
     }
 
     @Synchronized
     fun append(record: RunRecord): List<RunRecord> {
-        val updated = (listOf(record) + load()).distinctBy { it.id }.take(MAX_RECORDS)
+        val updated = (listOf(record) + loadForMutation()).distinctBy { it.id }.take(MAX_RECORDS)
         save(updated)
         return updated
     }
@@ -89,6 +113,15 @@ class RunHistoryStore private constructor(
             file,
             json.encodeToString(ListSerializer(RunRecord.serializer()), records),
         )
+    }
+
+    private fun loadForMutation(): List<RunRecord> {
+        if (!file.exists()) return emptyList()
+        return try {
+            json.decodeFromString(ListSerializer(RunRecord.serializer()), file.readText())
+        } catch (exception: Exception) {
+            throw RunHistoryStorageException(exception)
+        }
     }
 
     private companion object {

@@ -180,6 +180,10 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         screenCaptureState.value = ScreenCaptureState.Idle
     }
 
+    fun cancelPendingScreenCapture() {
+        if (screenCaptureState.value is ScreenCaptureState.Armed) clearScreenCapture()
+    }
+
     private fun handleArmedScreenCapture(event: AccessibilityEvent?) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         if (screenCaptureState.value !is ScreenCaptureState.Armed) return
@@ -643,6 +647,14 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             instance?.clearScreenCapture() ?: run {
                 (screenCaptureState.value as? ScreenCaptureState.Ready)?.bitmap?.recycle()
                 screenCaptureState.value = ScreenCaptureState.Idle
+            }
+        }
+
+        fun cancelPendingScreenCapture() {
+            instance?.cancelPendingScreenCapture() ?: run {
+                if (screenCaptureState.value is ScreenCaptureState.Armed) {
+                    screenCaptureState.value = ScreenCaptureState.Idle
+                }
             }
         }
     }

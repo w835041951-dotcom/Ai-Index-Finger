@@ -2,6 +2,7 @@ package com.aiindexfinger.data
 
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class RunHistoryStoreTest {
@@ -28,6 +29,32 @@ class RunHistoryStoreTest {
         assertEquals(100, records.size)
         assertEquals("record-100", records.first().id)
         assertEquals("record-1", records.last().id)
+    }
+
+    @Test
+    fun corruptHistoryCannotBeOverwrittenByAppend() = withTemporaryDirectory { directory ->
+        val file = directory.resolve("run-history.json")
+        val corruptBytes = "{truncated".toByteArray()
+        file.writeBytes(corruptBytes)
+        val store = RunHistoryStore(directory)
+
+        assertThrows(RunHistoryStorageException::class.java) {
+            store.append(record("replacement", 1))
+        }
+        assertEquals(corruptBytes.toList(), file.readBytes().toList())
+    }
+
+    @Test
+    fun detailedLoadReportsCorruptHistoryAndPreservesFile() = withTemporaryDirectory { directory ->
+        val file = directory.resolve("run-history.json")
+        val corruptBytes = "{truncated".toByteArray()
+        file.writeBytes(corruptBytes)
+
+        val result = RunHistoryStore(directory).loadDetailed()
+
+        assertEquals(emptyList<RunRecord>(), result.records)
+        assertEquals(RunHistoryLoadResult.Corrupt::class, result::class)
+        assertEquals(corruptBytes.toList(), file.readBytes().toList())
     }
 
     private fun record(id: String, startedAtMillis: Long) = RunRecord(

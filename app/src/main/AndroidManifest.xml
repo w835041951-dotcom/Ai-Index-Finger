@@ -21,6 +21,7 @@
         android:theme="@style/Theme.AiIndexFinger">
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize"
             android:exported="true"
             android:launchMode="singleTop">
             <intent-filter>

@@ -15,6 +15,42 @@ class ScreenCaptureTargetingTest {
     }
 
     @Test
+    fun `maps a landscape screenshot inside a portrait editor`() {
+        assertEquals(
+            ScreenPoint(0, 0),
+            mapFitCenterTapToScreen(0f, 957f, 1080, 2400, 2400, 1080),
+        )
+        assertEquals(
+            ScreenPoint(1200, 540),
+            mapFitCenterTapToScreen(540f, 1200f, 1080, 2400, 2400, 1080),
+        )
+        assertEquals(
+            ScreenPoint(2399, 1079),
+            mapFitCenterTapToScreen(1079.9f, 1442.9f, 1080, 2400, 2400, 1080),
+        )
+        assertNull(mapFitCenterTapToScreen(540f, 956f, 1080, 2400, 2400, 1080))
+        assertNull(mapFitCenterTapToScreen(540f, 1443f, 1080, 2400, 2400, 1080))
+    }
+
+    @Test
+    fun `maps a portrait screenshot inside a landscape editor`() {
+        assertEquals(
+            ScreenPoint(0, 0),
+            mapFitCenterTapToScreen(957f, 0f, 2400, 1080, 1080, 2400),
+        )
+        assertEquals(
+            ScreenPoint(540, 1200),
+            mapFitCenterTapToScreen(1200f, 540f, 2400, 1080, 1080, 2400),
+        )
+        assertEquals(
+            ScreenPoint(1079, 2399),
+            mapFitCenterTapToScreen(1442.9f, 1079.9f, 2400, 1080, 1080, 2400),
+        )
+        assertNull(mapFitCenterTapToScreen(956f, 540f, 2400, 1080, 1080, 2400))
+        assertNull(mapFitCenterTapToScreen(1443f, 540f, 2400, 1080, 1080, 2400))
+    }
+
+    @Test
     fun `selects clickable deepest target under repeated controls`() {
         val first = node("first", 0, 0, 100, 50, depth = 2, order = 1, clickable = true)
         val second = node("second", 0, 50, 100, 100, depth = 2, order = 2, clickable = true)

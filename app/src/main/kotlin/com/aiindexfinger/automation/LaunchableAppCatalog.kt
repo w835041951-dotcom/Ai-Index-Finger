@@ -16,6 +16,15 @@ internal fun sortLaunchableApps(apps: List<LaunchableApp>): List<LaunchableApp> 
         .thenBy(LaunchableApp::packageName),
 )
 
+internal fun filterLaunchableApps(apps: List<LaunchableApp>, query: String): List<LaunchableApp> {
+    val normalizedQuery = query.trim()
+    if (normalizedQuery.isEmpty()) return apps
+    return apps.filter { app ->
+        app.label.contains(normalizedQuery, ignoreCase = true) ||
+            app.packageName.contains(normalizedQuery, ignoreCase = true)
+    }
+}
+
 class LaunchableAppCatalog(private val context: Context) {
     fun load(): List<LaunchableApp> {
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)

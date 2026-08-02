@@ -74,6 +74,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -88,9 +89,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.aiindexfinger.automation.AutomationAccessibilityService
 import com.aiindexfinger.automation.LaunchableAppCatalog
+import com.aiindexfinger.automation.filterLaunchableApps
 import com.aiindexfinger.automation.ObservedNode
 import com.aiindexfinger.automation.SelectorRecommendations
 import com.aiindexfinger.automation.ScreenCaptureState
+import com.aiindexfinger.automation.ScreenPoint
 import com.aiindexfinger.automation.mapFitCenterTapToScreen
 import com.aiindexfinger.automation.recommendedSelector
 import com.aiindexfinger.automation.selectCaptureNode
@@ -101,6 +104,7 @@ import com.aiindexfinger.automation.buildWorkflowPreflightReport
 import com.aiindexfinger.automation.recoveryActions
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
+import com.aiindexfinger.data.RunHistoryLoadResult
 import com.aiindexfinger.data.InvalidWorkflowException
 import com.aiindexfinger.data.RunStepOutcome
 import com.aiindexfinger.data.RunStatus
@@ -232,6 +236,7 @@ class MainActivity : ComponentActivity() {
                     WorkflowApp(
                         initialLibrary = state.library,
                         initialRunRecords = state.runRecords,
+                        initialRunHistoryCorrupt = state.runHistoryCorrupt,
                         initialSchedules = state.schedules,
                         initialRunMessage = state.loadMessageRes?.let { stringResource(it) },
                         persistenceFailure = persistenceFailure,
@@ -276,6 +281,7 @@ class MainActivity : ComponentActivity() {
 
     private fun loadInitialState(): InitialAppState {
         val workflowResult = workflowStore.loadDetailed()
+        val runHistoryResult = runHistoryStore.loadDetailed()
         val library = workflowResult.library
         val scheduleResult = runCatching {
             workflowScheduler.load(
@@ -294,7 +300,8 @@ class MainActivity : ComponentActivity() {
         val hasMissedSchedule = missed.isNotEmpty()
         return InitialAppState(
             library = library,
-            runRecords = runHistoryStore.load(),
+            runRecords = runHistoryResult.records,
+            runHistoryCorrupt = runHistoryResult is RunHistoryLoadResult.Corrupt,
             schedules = schedules,
             loadMessageRes = when (workflowResult) {
                 is WorkflowLoadResult.RecoveredFromBackup -> R.string.workflows_recovered_from_backup
@@ -302,6 +309,8 @@ class MainActivity : ComponentActivity() {
                 is WorkflowLoadResult.UnsupportedVersion -> R.string.workflows_unsupported_version
                 else -> if (scheduleResult.exceptionOrNull() is ScheduleStorageException) {
                     R.string.schedule_storage_corrupt
+                } else if (runHistoryResult is RunHistoryLoadResult.Corrupt) {
+                    R.string.run_history_storage_corrupt
                 } else if (hasMissedSchedule) {
                     R.string.schedule_notification_missed
                 } else {
@@ -330,6 +339,7 @@ class MainActivity : ComponentActivity() {
 private data class InitialAppState(
     val library: WorkflowLibrary,
     val runRecords: List<RunRecord>,
+    val runHistoryCorrupt: Boolean,
     val schedules: List<WorkflowSchedule>,
     val loadMessageRes: Int?,
 )
@@ -338,6 +348,7 @@ private data class InitialAppState(
 private fun WorkflowApp(
     initialLibrary: WorkflowLibrary,
     initialRunRecords: List<RunRecord>,
+    initialRunHistoryCorrupt: Boolean,
     initialSchedules: List<WorkflowSchedule>,
     initialRunMessage: String?,
     persistenceFailure: String?,
@@ -362,6 +373,7 @@ private fun WorkflowApp(
         library = normalized
     }
     var runRecords by remember { mutableStateOf(initialRunRecords) }
+    var runHistoryCorrupt by remember { mutableStateOf(initialRunHistoryCorrupt) }
     var schedules by remember { mutableStateOf(initialSchedules) }
     var editingWorkflow by remember { mutableStateOf<Workflow?>(null) }
     var initialEditingStepPath by remember { mutableStateOf<StepPath?>(null) }
@@ -558,6 +570,7 @@ private fun WorkflowApp(
     } else if (showRunHistory) {
         RunHistoryScreen(
             records = runRecords,
+            historyCorrupt = runHistoryCorrupt,
             workflows = workflows,
             onBack = { showRunHistory = false },
             onOpenWorkflow = { workflow, stepPath ->
@@ -567,6 +580,7 @@ private fun WorkflowApp(
             onClear = {
                 onClearRunHistory()
                 runRecords = emptyList()
+                runHistoryCorrupt = false
             },
         )
     } else {
@@ -650,6 +664,7 @@ private fun WorkflowApp(
                 }
             },
             runRecords = runRecords,
+            runHistoryCorrupt = runHistoryCorrupt,
             schedules = schedules,
             onCreate = { workflow ->
                 initialEditingStepPath = null
@@ -756,6 +771,7 @@ private fun WorkflowApp(
             onClearRunHistory = {
                 onClearRunHistory()
                 runRecords = emptyList()
+                runHistoryCorrupt = false
             },
             onViewRunHistory = { showRunHistory = true },
             runningWorkflowId = runningWorkflowId,
@@ -889,6 +905,7 @@ internal fun WorkflowHome(
     onMoveWorkflow: (String, String?) -> Unit,
     onInstallSettingsPack: () -> Unit,
     runRecords: List<RunRecord>,
+    runHistoryCorrupt: Boolean,
     schedules: List<WorkflowSchedule>,
     onCreate: (Workflow) -> Unit,
     onEdit: (Workflow) -> Unit,
@@ -1118,6 +1135,8 @@ internal fun WorkflowHome(
                 Text(stringResource(R.string.run_history), modifier = Modifier.weight(1f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 if (runRecords.isNotEmpty()) {
                     TextButton(onClick = onViewRunHistory) { Text(stringResource(R.string.view_all_count, runRecords.size)) }
+                }
+                if (runRecords.isNotEmpty() || runHistoryCorrupt) {
                     TextButton(onClick = { confirmClearHistory = true }) { Text(stringResource(R.string.clear)) }
                 }
             }
@@ -2190,7 +2209,7 @@ private fun WorkflowEditor(
         when (val step = runCatching { steps.stepAt(path) }.getOrNull()) {
             is Step.LaunchApp -> LaunchAppDialog(
                 initialPackageName = step.packageName,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { packageName ->
                     steps = steps.replaceStep(path, step.copy(packageName = packageName))
@@ -2321,7 +2340,7 @@ private fun WorkflowEditor(
             }
             is Step.Swipe -> SwipeDialog(
                 initialStep = step,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { startX, startY, endX, endY, duration ->
                     steps = steps.replaceStep(
@@ -2339,7 +2358,7 @@ private fun WorkflowEditor(
             )
             is Step.Tap -> TapDialog(
                 initialStep = step,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { x, y ->
                     steps = steps.replaceStep(path, step.copy(x = x, y = y))
@@ -2665,7 +2684,7 @@ private fun InputTextDialog(
     onAdd: (NodeSelector, String, String?, TextInputMethod) -> Unit,
 ) {
     DisposableEffect(Unit) {
-        onDispose { AutomationAccessibilityService.discardScreenCapture() }
+        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
     }
     var selectedSelector by remember(initialStep) { mutableStateOf(initialStep?.selector) }
     var inputText by remember(initialStep) { mutableStateOf(initialStep?.text.orEmpty()) }
@@ -2675,10 +2694,7 @@ private fun InputTextDialog(
         mutableStateOf(initialStep?.inputMethod ?: TextInputMethod.SetText)
     }
     AlertDialog(
-        onDismissRequest = {
-            AutomationAccessibilityService.discardScreenCapture()
-            onDismiss()
-        },
+        onDismissRequest = onDismiss,
         title = { Text("输入文本") },
         text = {
             Column(
@@ -2767,7 +2783,6 @@ private fun InputTextDialog(
             TextButton(
                 enabled = selectedSelector != null && (!useVariable || variableName.isNotBlank()),
                 onClick = {
-                    AutomationAccessibilityService.discardScreenCapture()
                     onAdd(
                         requireNotNull(selectedSelector),
                         if (useVariable) "" else inputText,
@@ -2778,12 +2793,7 @@ private fun InputTextDialog(
             ) { Text(confirmLabel) }
         },
         dismissButton = {
-            TextButton(
-                onClick = {
-                    AutomationAccessibilityService.discardScreenCapture()
-                    onDismiss()
-                },
-            ) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
 }
@@ -2791,7 +2801,7 @@ private fun InputTextDialog(
 @Composable
 private fun SwipeDialog(
     initialStep: Step.Swipe? = null,
-    confirmLabel: String = "添加",
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
     onAdd: (Int, Int, Int, Int, Long) -> Unit,
 ) {
@@ -2806,14 +2816,26 @@ private fun SwipeDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("滑动") },
+        title = { Text(stringResource(R.string.swipe)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                NodeField(startX, { startX = it }, "起点 X", true)
-                NodeField(startY, { startY = it }, "起点 Y", true)
-                NodeField(endX, { endX = it }, "终点 X", true)
-                NodeField(endY, { endY = it }, "终点 Y", true)
-                NodeField(duration, { duration = it }, "持续时间（毫秒）", true)
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ScreenshotCoordinatePicker(
+                    mode = ScreenshotCoordinateMode.Swipe,
+                    onSwipe = { start, end ->
+                        startX = start.x.toString()
+                        startY = start.y.toString()
+                        endX = end.x.toString()
+                        endY = end.y.toString()
+                    },
+                )
+                NodeField(startX, { startX = it }, stringResource(R.string.swipe_start_x), true)
+                NodeField(startY, { startY = it }, stringResource(R.string.swipe_start_y), true)
+                NodeField(endX, { endX = it }, stringResource(R.string.swipe_end_x), true)
+                NodeField(endY, { endY = it }, stringResource(R.string.swipe_end_y), true)
+                NodeField(duration, { duration = it }, stringResource(R.string.duration_millis), true)
             }
         },
         confirmButton = {
@@ -2828,16 +2850,16 @@ private fun SwipeDialog(
                         requireNotNull(durationValue),
                     )
                 },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
 @Composable
 private fun TapDialog(
     initialStep: Step.Tap? = null,
-    confirmLabel: String = "添加",
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
     onAdd: (Int, Int) -> Unit,
 ) {
@@ -2847,22 +2869,183 @@ private fun TapDialog(
     val y = yText.toIntOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("点击坐标") },
+        title = { Text(stringResource(R.string.tap_coordinates)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                NodeField(xText, { xText = it }, "X 坐标", true)
-                NodeField(yText, { yText = it }, "Y 坐标", true)
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ScreenshotCoordinatePicker(
+                    mode = ScreenshotCoordinateMode.Tap,
+                    onTap = { point ->
+                        xText = point.x.toString()
+                        yText = point.y.toString()
+                    },
+                )
+                NodeField(xText, { xText = it }, stringResource(R.string.coordinate_x), true)
+                NodeField(yText, { yText = it }, stringResource(R.string.coordinate_y), true)
             }
         },
         confirmButton = {
             TextButton(
                 enabled = x != null && x >= 0 && y != null && y >= 0,
                 onClick = { onAdd(requireNotNull(x), requireNotNull(y)) },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
+
+private enum class ScreenshotCoordinateMode { Tap, Swipe }
+
+@Composable
+private fun ScreenshotCoordinatePicker(
+    mode: ScreenshotCoordinateMode,
+    onTap: (ScreenPoint) -> Unit = {},
+    onSwipe: (ScreenPoint, ScreenPoint) -> Unit = { _, _ -> },
+) {
+    val context = LocalContext.current
+    val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
+    var captureSize by remember { mutableStateOf(IntSize.Zero) }
+    var gestureStart by remember(captureState) { mutableStateOf<Offset?>(null) }
+    var gestureEnd by remember(captureState) { mutableStateOf<Offset?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
+    }
+
+    Text(
+        stringResource(
+            if (mode == ScreenshotCoordinateMode.Tap) {
+                R.string.tap_screenshot_instructions
+            } else {
+                R.string.swipe_screenshot_instructions
+            },
+        ),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedButton(
+            onClick = {
+                if (AutomationAccessibilityService.instance?.capturePreviousApp() == true) {
+                    (context as? Activity)?.moveTaskToBack(true)
+                }
+            },
+            enabled = AutomationAccessibilityService.instance != null &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                captureState !is ScreenCaptureState.Armed,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(
+                stringResource(
+                    if (captureState is ScreenCaptureState.Ready) R.string.recapture
+                    else R.string.capture_previous_app,
+                ),
+            )
+        }
+        if (captureState is ScreenCaptureState.Ready) {
+            OutlinedButton(
+                onClick = AutomationAccessibilityService::discardScreenCapture,
+            ) { Text(stringResource(R.string.clear_screenshot)) }
+        }
+    }
+    when (val state = captureState) {
+        ScreenCaptureState.Armed -> Text(
+            stringResource(R.string.capture_waiting),
+            color = MaterialTheme.colorScheme.primary,
+        )
+        is ScreenCaptureState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
+        is ScreenCaptureState.Ready -> Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(360.dp)
+                .onSizeChanged { captureSize = it },
+        ) {
+            Image(
+                bitmap = state.bitmap.asImageBitmap(),
+                contentDescription = stringResource(
+                    if (mode == ScreenshotCoordinateMode.Tap) {
+                        R.string.tap_screenshot_description
+                    } else {
+                        R.string.swipe_screenshot_description
+                    },
+                ),
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(state, captureSize, mode) {
+                        if (mode == ScreenshotCoordinateMode.Tap) {
+                            detectTapGestures { offset ->
+                                mapCaptureOffset(state, captureSize, offset)?.let { point ->
+                                    gestureStart = offset
+                                    gestureEnd = null
+                                    onTap(point)
+                                }
+                            }
+                        } else {
+                            detectDragGestures(
+                                onDragStart = { offset ->
+                                    gestureStart = offset
+                                    gestureEnd = offset
+                                },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    gestureEnd = change.position
+                                    val start = gestureStart?.let {
+                                        mapCaptureOffset(state, captureSize, it)
+                                    }
+                                    val end = mapCaptureOffset(state, captureSize, change.position)
+                                    if (start != null && end != null) onSwipe(start, end)
+                                },
+                            )
+                        }
+                    },
+            ) {
+                val start = gestureStart
+                val end = gestureEnd
+                if (start != null) {
+                    drawCircle(Color(0xFFFFC857), radius = 7.dp.toPx(), center = start)
+                    if (end != null) {
+                        drawLine(
+                            color = Color(0xFFFFC857),
+                            start = start,
+                            end = end,
+                            strokeWidth = 3.dp.toPx(),
+                        )
+                        drawCircle(Color(0xFFD04F3D), radius = 7.dp.toPx(), center = end)
+                    }
+                }
+            }
+        }
+        ScreenCaptureState.Idle -> if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Text(
+                stringResource(R.string.capture_requires_android_11),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+private fun mapCaptureOffset(
+    state: ScreenCaptureState.Ready,
+    captureSize: IntSize,
+    offset: Offset,
+): ScreenPoint? = mapFitCenterTapToScreen(
+    tapX = offset.x,
+    tapY = offset.y,
+    containerWidth = captureSize.width,
+    containerHeight = captureSize.height,
+    imageWidth = state.bitmap.width,
+    imageHeight = state.bitmap.height,
+)
 
 @Composable
 private fun ScrollStepDialog(
@@ -3442,7 +3625,7 @@ private fun newId(): String = UUID.randomUUID().toString()
 @Composable
 private fun LaunchAppDialog(
     initialPackageName: String = "",
-    confirmLabel: String = "添加",
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
     onAdd: (String) -> Unit,
 ) {
@@ -3450,52 +3633,93 @@ private fun LaunchAppDialog(
     val launchableApps = remember { LaunchableAppCatalog(context).load() }
     var packageName by remember(initialPackageName) { mutableStateOf(initialPackageName) }
     var appQuery by remember { mutableStateOf("") }
-    val matchingApps = launchableApps.filter { app ->
-        appQuery.isBlank() || app.label.contains(appQuery, ignoreCase = true) ||
-            app.packageName.contains(appQuery, ignoreCase = true)
-    }
+    val matchingApps = filterLaunchableApps(launchableApps, appQuery)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("启动应用") },
+        title = { Text(stringResource(R.string.launch_app)) },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 OutlinedTextField(
                     value = appQuery,
                     onValueChange = { appQuery = it },
-                    label = { Text("搜索已安装应用") },
+                    label = { Text(stringResource(R.string.search_installed_apps)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    "${matchingApps.size} 个可启动应用",
+                    pluralStringResource(
+                        R.plurals.launchable_app_count,
+                        matchingApps.size,
+                        matchingApps.size,
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
-                matchingApps.take(MAX_VISIBLE_LAUNCHABLE_APPS).forEach { app ->
-                    OutlinedButton(
-                        onClick = { packageName = app.packageName },
-                        modifier = Modifier.fillMaxWidth(),
+                if (matchingApps.isEmpty()) {
+                    Text(
+                        stringResource(
+                            if (launchableApps.isEmpty()) {
+                                R.string.no_launchable_apps
+                            } else {
+                                R.string.no_matching_apps
+                            },
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp),
                     ) {
-                        Column(Modifier.fillMaxWidth()) {
-                            Text(app.label, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                app.packageName,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 12.sp,
-                            )
+                        items(matchingApps, key = { it.packageName }) { app ->
+                            val selected = packageName.trim() == app.packageName
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(
+                                        role = Role.RadioButton,
+                                        onClick = { packageName = app.packageName },
+                                    )
+                                    .semantics { this.selected = selected }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = selected,
+                                    onClick = null,
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(app.label, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        app.packageName,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-                Text("应用包", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                NodeField(packageName, { packageName = it }, "包名", true)
+                Text(
+                    stringResource(R.string.package_name),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                NodeField(
+                    packageName,
+                    { packageName = it },
+                    stringResource(R.string.package_name),
+                    true,
+                )
                 if (packageName.isNotBlank()) {
                     val selectedApp = launchableApps.firstOrNull { it.packageName == packageName.trim() }
                     Text(
-                        selectedApp?.let { "可启动：${it.label}" }
-                            ?: "此设备无法启动该应用包",
+                        selectedApp?.let {
+                            stringResource(R.string.selected_launchable_app, it.label)
+                        } ?: stringResource(R.string.app_package_not_launchable),
                         color = if (selectedApp != null) {
                             Color(0xFF16815F)
                         } else {
@@ -3510,9 +3734,11 @@ private fun LaunchAppDialog(
             TextButton(
                 enabled = packageName.isNotBlank(),
                 onClick = { onAdd(packageName.trim()) },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
     )
 }
 
@@ -3526,7 +3752,7 @@ private fun ClickStepDialog(
     onAdd: (NodeSelector) -> Unit,
 ) {
     DisposableEffect(Unit) {
-        onDispose { AutomationAccessibilityService.discardScreenCapture() }
+        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
     }
     var packageName by remember(initialSelector) { mutableStateOf(initialSelector?.packageName.orEmpty()) }
     var viewId by remember(initialSelector) { mutableStateOf(initialSelector?.viewId.orEmpty()) }
@@ -3546,10 +3772,7 @@ private fun ClickStepDialog(
     val hasAttribute = listOf(viewId, text, description, className).any { it.isNotBlank() }
 
     AlertDialog(
-        onDismissRequest = {
-            AutomationAccessibilityService.discardScreenCapture()
-            onDismiss()
-        },
+        onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
             Column(
@@ -3685,7 +3908,6 @@ private fun ClickStepDialog(
             TextButton(
                 enabled = packageName.isNotBlank() && hasAttribute,
                 onClick = {
-                    AutomationAccessibilityService.discardScreenCapture()
                     onAdd(
                         requireNotNull(
                             nodeSelectorOrNull(
@@ -3704,12 +3926,7 @@ private fun ClickStepDialog(
             ) { Text(confirmLabel) }
         },
         dismissButton = {
-            TextButton(
-                onClick = {
-                    AutomationAccessibilityService.discardScreenCapture()
-                    onDismiss()
-                },
-            ) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
 }
@@ -3722,7 +3939,7 @@ private fun ImageClickStepDialog(
     onAdd: (Step.ImageClick) -> Unit,
 ) {
     DisposableEffect(Unit) {
-        onDispose { AutomationAccessibilityService.discardScreenCapture() }
+        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
     }
     val context = LocalContext.current
     val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
@@ -3771,6 +3988,12 @@ private fun ImageClickStepDialog(
                             else R.string.capture_previous_app,
                         ),
                     )
+                }
+                if (captureState is ScreenCaptureState.Ready) {
+                    OutlinedButton(
+                        onClick = AutomationAccessibilityService::discardScreenCapture,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.clear_screenshot)) }
                 }
                 when (val state = captureState) {
                     ScreenCaptureState.Armed -> Text(stringResource(R.string.capture_waiting))
@@ -3930,9 +4153,13 @@ private fun VisualSelectorCapture(
     val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
     var captureSize by remember { mutableStateOf(IntSize.Zero) }
 
-    Text("从屏幕选取", fontSize = 12.sp, fontWeight = FontWeight.Bold)
     Text(
-        "截取上一个应用，然后点击截图中的对象。图像仅保存在内存中。",
+        stringResource(R.string.select_from_screenshot),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+    )
+    Text(
+        stringResource(R.string.visual_selector_instructions),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
     )
@@ -3947,11 +4174,22 @@ private fun VisualSelectorCapture(
             captureState !is ScreenCaptureState.Armed,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(if (captureState is ScreenCaptureState.Ready) "重新截取" else "截取上一个应用")
+        Text(
+            stringResource(
+                if (captureState is ScreenCaptureState.Ready) R.string.recapture
+                else R.string.capture_previous_app,
+            ),
+        )
+    }
+    if (captureState is ScreenCaptureState.Ready) {
+        OutlinedButton(
+            onClick = AutomationAccessibilityService::discardScreenCapture,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(stringResource(R.string.clear_screenshot)) }
     }
     when (val state = captureState) {
         ScreenCaptureState.Armed -> Text(
-            "正在等待目标应用稳定……",
+            stringResource(R.string.capture_waiting),
             color = MaterialTheme.colorScheme.primary,
         )
         is ScreenCaptureState.Error -> Text(
@@ -3960,10 +4198,10 @@ private fun VisualSelectorCapture(
             fontSize = 12.sp,
         )
         is ScreenCaptureState.Ready -> {
-            Text("点击对象以选择", fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.tap_object_to_select), fontWeight = FontWeight.SemiBold)
             Image(
                 bitmap = state.bitmap.asImageBitmap(),
-                contentDescription = "目标应用截图，点击对象即可选择。",
+                contentDescription = stringResource(R.string.visual_selector_capture_description),
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -3981,9 +4219,7 @@ private fun VisualSelectorCapture(
                             )
                             val node = point?.let { selectCaptureNode(state.nodes, it) }
                             if (node == null) {
-                                onSelectionError(
-                                    "该位置没有可访问元素，请尝试其他对象或使用“点击坐标”步骤。",
-                                )
+                                onSelectionError(context.getString(R.string.no_accessible_element_at_position))
                             } else {
                                 onSelectorSelected(
                                     recommendedSelector(node) {
@@ -3997,7 +4233,7 @@ private fun VisualSelectorCapture(
         }
         ScreenCaptureState.Idle -> if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             Text(
-                "可视化截取需要 Android 11 或更高版本，仍可使用下方的最近元素。",
+                stringResource(R.string.visual_capture_requires_android_11),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
@@ -4243,8 +4479,7 @@ private fun AccessibilityDisclosureDialog(
                         "以便你检查元素并运行自己创建的工作流。",
                 )
                 Text(
-                    "选择“截取上一个应用”时，应用会截取一次屏幕，供你直观选择元素。" +
-                        "截图仅保存在内存中，选择或取消后即被丢弃，不会保存或上传。",
+                    stringResource(R.string.accessibility_disclosure_screenshot),
                 )
                 Text(
                     "运行工作流时，应用可以点击、滑动、输入文本、使用系统导航，" +
@@ -4763,6 +4998,7 @@ private fun PreflightReportDialog(
 @Composable
 private fun RunHistoryScreen(
     records: List<RunRecord>,
+    historyCorrupt: Boolean,
     workflows: List<Workflow>,
     onBack: () -> Unit,
     onOpenWorkflow: (Workflow, StepPath?) -> Unit,
@@ -4790,7 +5026,7 @@ private fun RunHistoryScreen(
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,
                 )
-                if (records.isNotEmpty()) {
+                if (records.isNotEmpty() || historyCorrupt) {
                     TextButton(onClick = { confirmClear = true }) { Text(stringResource(R.string.clear)) }
                 }
             }
@@ -5329,4 +5565,3 @@ private fun AiIndexFingerTheme(content: @Composable () -> Unit) {
 }
 
 private const val MAX_VISIBLE_OBSERVED_NODES = 8
-private const val MAX_VISIBLE_LAUNCHABLE_APPS = 30
