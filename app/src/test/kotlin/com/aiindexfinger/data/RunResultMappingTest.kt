@@ -6,15 +6,22 @@ import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.StepExecutionDiagnostic
 import com.aiindexfinger.executor.StepExecutionOutcome
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.Step
+import com.aiindexfinger.model.Condition
+import com.aiindexfinger.model.Value
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RunResultMappingTest {
     private val workflow = Workflow(
         id = "workflow-1",
         name = "Test workflow",
-        steps = emptyList(),
+        steps = listOf(
+            Step.Delay("top", 1),
+            Step.Repeat("repeat", 1, listOf(Step.Delay("step-2", 1))),
+        ),
     )
 
     @Test
@@ -25,6 +32,15 @@ class RunResultMappingTest {
         assertEquals(RunStatus.Failed, record.status)
         assertEquals(75, record.durationMillis)
         assertEquals("step-2", record.failedStepId)
+        assertEquals(
+            RunStepLocation(
+                listOf(
+                    RunStepLocationSegment(1, RunStepBranch.RepeatBody),
+                    RunStepLocationSegment(0),
+                ),
+            ),
+            record.failedStepLocation,
+        )
         assertNull(record.failureMessage)
         assertEquals("execution.TargetNotClickable", record.failureCode)
         assertEquals(emptyMap<String, String>(), record.failureArguments)
@@ -57,5 +73,40 @@ class RunResultMappingTest {
             listOf(RunStepDiagnostic(0, "input", 20, 1, RunStepOutcome.Completed)),
             record.diagnostics,
         )
+    }
+
+    @Test
+    fun diagnosticsKeepNestedLogicalLocation() {
+        val record = RunResult.Completed.toRunRecord(
+            workflow,
+            startedAtMillis = 100,
+            finishedAtMillis = 120,
+            diagnostics = listOf(
+                StepExecutionDiagnostic(0, "step-2", 20, 1, StepExecutionOutcome.Completed),
+            ),
+        )
+
+        assertEquals(record.failedStepLocation, null)
+        assertEquals(1, record.diagnostics.single().location?.segments?.first()?.index)
+        assertEquals(RunStepBranch.RepeatBody, record.diagnostics.single().location?.segments?.first()?.branch)
+    }
+
+    @Test
+    fun allDuplicateLocationsRemainAvailableForValidationDisplay() {
+        val duplicateSteps = listOf(
+            Step.Delay("same", 1),
+            Step.IfElse(
+                id = "condition",
+                condition = Condition.Equals(Value.Literal("value"), Value.Literal("yes")),
+                whenTrue = listOf(Step.Delay("same", 1)),
+            ),
+        )
+
+        val locations = duplicateSteps.runLocationsTo("same")
+
+        assertEquals(2, locations.size)
+        assertEquals(0, locations[0].segments.single().index)
+        assertTrue(locations[1].segments.first().branch == RunStepBranch.IfTrue)
+        assertNull(duplicateSteps.uniqueRunLocationTo("same"))
     }
 }

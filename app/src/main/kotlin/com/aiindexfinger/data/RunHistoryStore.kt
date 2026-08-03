@@ -5,6 +5,7 @@ import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.StepExecutionDiagnostic
 import com.aiindexfinger.executor.StepExecutionOutcome
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.Step
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -21,6 +22,7 @@ data class RunRecord(
     val durationMillis: Long,
     val status: RunStatus,
     val failedStepId: String? = null,
+    val failedStepLocation: RunStepLocation? = null,
     val failureMessage: String? = null,
     val failureCode: String? = null,
     val failureArguments: Map<String, String> = emptyMap(),
@@ -34,7 +36,26 @@ data class RunStepDiagnostic(
     val durationMillis: Long,
     val attemptCount: Int,
     val outcome: RunStepOutcome,
+    val location: RunStepLocation? = null,
 )
+
+@Serializable
+data class RunStepLocation(
+    val segments: List<RunStepLocationSegment>,
+)
+
+@Serializable
+data class RunStepLocationSegment(
+    val index: Int,
+    val branch: RunStepBranch? = null,
+)
+
+@Serializable
+enum class RunStepBranch {
+    RepeatBody,
+    IfTrue,
+    IfFalse,
+}
 
 @Serializable
 enum class RunStepOutcome {
@@ -152,6 +173,7 @@ fun RunResult.toRunRecord(
             is RunResult.Failed -> RunStatus.Failed
         },
         failedStepId = failed?.stepId,
+        failedStepLocation = failed?.stepId?.let(workflow.steps::uniqueRunLocationTo),
         failureCode = when {
             failed != null -> "execution.${failed.error.code.name}"
             notReady != null -> "validation.${notReady.issue.code.name}"
@@ -165,6 +187,7 @@ fun RunResult.toRunRecord(
                 durationMillis = diagnostic.durationMillis,
                 attemptCount = diagnostic.attemptCount,
                 outcome = diagnostic.outcome.toRunStepOutcome(),
+                location = workflow.steps.uniqueRunLocationTo(diagnostic.stepId),
             )
         },
     )
@@ -175,4 +198,44 @@ private fun StepExecutionOutcome.toRunStepOutcome(): RunStepOutcome = when (this
     StepExecutionOutcome.ContinuedAfterFailure -> RunStepOutcome.ContinuedAfterFailure
     StepExecutionOutcome.Failed -> RunStepOutcome.Failed
     StepExecutionOutcome.Cancelled -> RunStepOutcome.Cancelled
+}
+
+internal fun List<Step>.uniqueRunLocationTo(stepId: String): RunStepLocation? {
+    return runLocationsTo(stepId).singleOrNull()
+}
+
+internal fun List<Step>.runLocationsTo(stepId: String): List<RunStepLocation> =
+    mutableListOf<RunStepLocation>().also { matches ->
+        collectRunLocations(stepId, emptyList(), matches)
+    }
+
+private fun List<Step>.collectRunLocations(
+    stepId: String,
+    ancestors: List<RunStepLocationSegment>,
+    matches: MutableList<RunStepLocation>,
+) {
+    forEachIndexed { index, step ->
+        val current = ancestors + RunStepLocationSegment(index)
+        if (step.id == stepId) matches += RunStepLocation(current)
+        when (step) {
+            is Step.Repeat -> step.steps.collectRunLocations(
+                stepId,
+                ancestors + RunStepLocationSegment(index, RunStepBranch.RepeatBody),
+                matches,
+            )
+            is Step.IfElse -> {
+                step.whenTrue.collectRunLocations(
+                    stepId,
+                    ancestors + RunStepLocationSegment(index, RunStepBranch.IfTrue),
+                    matches,
+                )
+                step.whenFalse.collectRunLocations(
+                    stepId,
+                    ancestors + RunStepLocationSegment(index, RunStepBranch.IfFalse),
+                    matches,
+                )
+            }
+            else -> Unit
+        }
+    }
 }

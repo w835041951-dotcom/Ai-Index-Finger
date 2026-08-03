@@ -18,6 +18,9 @@ class RunRecordSerializationTest {
             durationMillis = 250,
             status = RunStatus.Failed,
             failedStepId = "click-submit",
+            failedStepLocation = RunStepLocation(
+                listOf(RunStepLocationSegment(1, RunStepBranch.IfTrue), RunStepLocationSegment(2)),
+            ),
             failureCode = "execution.TargetNotClickable",
             diagnostics = listOf(
                 RunStepDiagnostic(0, "click-submit", 25, 2, RunStepOutcome.Failed),
@@ -40,6 +43,7 @@ class RunRecordSerializationTest {
         val decoded = Json.decodeFromString(RunRecord.serializer(), encoded)
 
         assertEquals(emptyList<RunStepDiagnostic>(), decoded.diagnostics)
+        assertEquals(null, decoded.failedStepLocation)
     }
 
     @Test

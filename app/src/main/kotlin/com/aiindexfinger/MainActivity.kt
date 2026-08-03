@@ -98,12 +98,17 @@ import com.aiindexfinger.automation.mapFitCenterTapToScreen
 import com.aiindexfinger.automation.recommendedSelector
 import com.aiindexfinger.automation.selectCaptureNode
 import com.aiindexfinger.automation.NotificationPreflightStatus
+import com.aiindexfinger.automation.PendingOverlayAction
 import com.aiindexfinger.automation.PreflightRecoveryAction
 import com.aiindexfinger.automation.WorkflowPreflightReport
 import com.aiindexfinger.automation.buildWorkflowPreflightReport
 import com.aiindexfinger.automation.recoveryActions
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
+import com.aiindexfinger.data.RunStepBranch
+import com.aiindexfinger.data.RunStepLocation
+import com.aiindexfinger.data.uniqueRunLocationTo
+import com.aiindexfinger.data.runLocationsTo
 import com.aiindexfinger.data.RunHistoryLoadResult
 import com.aiindexfinger.data.InvalidWorkflowException
 import com.aiindexfinger.data.RunStepOutcome
@@ -433,7 +438,7 @@ private fun WorkflowApp(
             runRecords = (listOf(outcome.record) + runRecords)
                 .distinctBy { it.id }
                 .take(100)
-            runMessage = outcome.result.localizedMessage(context)
+            runMessage = outcome.result.localizedMessage(context, outcome.record.failedStepLocation)
         }
     }
     var pendingSchedule by remember { mutableStateOf<Triple<Workflow, Long, ScheduleRecurrence>?>(null) }
@@ -541,6 +546,31 @@ private fun WorkflowApp(
         WorkflowEditor(
             workflow = requireNotNull(editingWorkflow),
             initialEditingStepPath = initialEditingStepPath,
+            onTest = { workflow ->
+                val service = AutomationAccessibilityService.instance
+                val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
+                    NotificationPreflightStatus.NotRequired
+                } else if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    NotificationPreflightStatus.Granted
+                } else {
+                    NotificationPreflightStatus.Denied
+                }
+                preflightReport = workflow to buildWorkflowPreflightReport(
+                    workflow = workflow,
+                    accessibilityConnected = service != null,
+                    notificationStatus = notificationStatus,
+                    isLaunchable = { packageName, intentAction ->
+                        intentAction?.let { Intent(it).setPackage(packageName) }
+                            ?.resolveActivity(context.packageManager) != null ||
+                            intentAction == null &&
+                            context.packageManager.getLaunchIntentForPackage(packageName) != null
+                    },
+                    countMatches = { selector -> service?.countMatches(selector) ?: 0 },
+                    imageCaptureSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
+                )
+            },
             onBack = {
                 editingWorkflow = null
                 initialEditingStepPath = null
@@ -1704,6 +1734,7 @@ private fun NodeProperty(label: String, value: String?) {
 private fun WorkflowEditor(
     workflow: Workflow,
     initialEditingStepPath: StepPath? = null,
+    onTest: (Workflow) -> Unit,
     onBack: () -> Unit,
     onSave: (Workflow) -> Unit,
 ) {
@@ -1737,6 +1768,8 @@ private fun WorkflowEditor(
     var confirmDiscardChanges by remember { mutableStateOf(false) }
     var showAllValidationIssues by remember(workflow.id) { mutableStateOf(false) }
     val observedNodes by AutomationAccessibilityService.observedNodes.collectAsStateWithLifecycle()
+    val pendingOverlayAction by AutomationAccessibilityService.pendingOverlayAction.collectAsStateWithLifecycle()
+    val overlayStatus by AutomationAccessibilityService.overlayStatus.collectAsStateWithLifecycle()
     val defaultTimeoutMillis = defaultTimeoutText.toLongOrNull()
     val currentSteps = steps.stepsAt(currentListPath)
     val validationIssues = if (name.isNotBlank() && defaultTimeoutMillis != null && defaultTimeoutMillis > 0) {
@@ -1763,21 +1796,40 @@ private fun WorkflowEditor(
         }
     }
 
+    LaunchedEffect(pendingOverlayAction) {
+        val action = pendingOverlayAction ?: return@LaunchedEffect
+        when (action) {
+            is PendingOverlayAction.Click -> {
+                val latestSteps = steps.stepsAt(currentListPath)
+                steps = steps.insertStep(
+                    currentListPath,
+                    latestSteps.size,
+                    Step.Click(newId(), action.selector),
+                )
+            }
+        }
+        AutomationAccessibilityService.consumePendingOverlayAction(action)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { AutomationAccessibilityService.instance?.stopElementMonitor() }
+    }
+
     BackHandler(onBack = requestBack)
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             Surface(shadowElevation = 8.dp) {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     val canSave = name.isNotBlank() &&
                         defaultTimeoutMillis != null && defaultTimeoutMillis > 0
-                    OutlinedButton(
+                    Button(
                         enabled = canSave,
                         onClick = {
-                            onSave(
+                            onTest(
                                 workflow.copy(
                                     schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
                                     name = name.trim(),
@@ -1787,23 +1839,40 @@ private fun WorkflowEditor(
                                 ),
                             )
                         },
-                        modifier = Modifier.weight(1f),
-                    ) { Text(stringResource(R.string.save_draft)) }
-                    Button(
-                        enabled = canSave && validationIssues.isEmpty(),
-                        onClick = {
-                            onSave(
-                                workflow.copy(
-                                    schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
-                                    name = name.trim(),
-                                    steps = steps,
-                                    defaultStepTimeoutMillis = requireNotNull(defaultTimeoutMillis),
-                                    state = WorkflowState.Ready,
-                                ),
-                            )
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) { Text(stringResource(R.string.save_ready)) }
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.test_entire_workflow)) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(
+                            enabled = canSave,
+                            onClick = {
+                                onSave(
+                                    workflow.copy(
+                                        schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
+                                        name = name.trim(),
+                                        steps = steps,
+                                        defaultStepTimeoutMillis = requireNotNull(defaultTimeoutMillis),
+                                        state = WorkflowState.Draft,
+                                    ),
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { Text(stringResource(R.string.save_draft)) }
+                        Button(
+                            enabled = canSave && validationIssues.isEmpty(),
+                            onClick = {
+                                onSave(
+                                    workflow.copy(
+                                        schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
+                                        name = name.trim(),
+                                        steps = steps,
+                                        defaultStepTimeoutMillis = requireNotNull(defaultTimeoutMillis),
+                                        state = WorkflowState.Ready,
+                                    ),
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { Text(stringResource(R.string.save_ready)) }
+                    }
                 }
             }
         },
@@ -1941,6 +2010,14 @@ private fun WorkflowEditor(
                 onClick = { showImageClickDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.image_click)) }
+            OutlinedButton(
+                enabled = AutomationAccessibilityService.instance != null,
+                onClick = { AutomationAccessibilityService.instance?.startElementMonitor() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.monitor_elements_overlay)) }
+            overlayStatus?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+            }
             OutlinedButton(
                 onClick = { showLongClickDialog = true },
                 modifier = Modifier.fillMaxWidth(),
@@ -2931,9 +3008,7 @@ private fun ScreenshotCoordinatePicker(
     ) {
         OutlinedButton(
             onClick = {
-                if (AutomationAccessibilityService.instance?.capturePreviousApp() == true) {
-                    (context as? Activity)?.moveTaskToBack(true)
-                }
+                AutomationAccessibilityService.instance?.capturePreviousApp()
             },
             enabled = AutomationAccessibilityService.instance != null &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
@@ -3973,9 +4048,7 @@ private fun ImageClickStepDialog(
                 NodeField(packageName, { packageName = it }, stringResource(R.string.image_click_package), true)
                 OutlinedButton(
                     onClick = {
-                        if (AutomationAccessibilityService.instance?.capturePreviousApp() == true) {
-                            (context as? Activity)?.moveTaskToBack(true)
-                        }
+                        AutomationAccessibilityService.instance?.capturePreviousApp()
                     },
                     enabled = AutomationAccessibilityService.instance != null &&
                         Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
@@ -4165,9 +4238,7 @@ private fun VisualSelectorCapture(
     )
     OutlinedButton(
         onClick = {
-            if (AutomationAccessibilityService.instance?.capturePreviousApp() == true) {
-                (context as? Activity)?.moveTaskToBack(true)
-            }
+            AutomationAccessibilityService.instance?.capturePreviousApp()
         },
         enabled = AutomationAccessibilityService.instance != null &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
@@ -4887,17 +4958,31 @@ private fun PreflightReportDialog(
     val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("检查 ${workflow.name}") },
+        title = { Text(stringResource(R.string.workflow_test_title, workflow.name)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("状态：${report.state.displayName()}", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "自动化服务：${if (report.accessibilityConnected) "已连接" else "未连接"}",
+                    stringResource(R.string.workflow_test_state, report.state.displayName()),
+                    fontWeight = FontWeight.SemiBold,
                 )
-                Text("通知权限：${report.notificationStatus.displayName()}")
+                Text(
+                    stringResource(
+                        R.string.workflow_test_automation,
+                        stringResource(
+                            if (report.accessibilityConnected) R.string.status_connected
+                            else R.string.status_not_connected,
+                        ),
+                    ),
+                )
+                Text(
+                    stringResource(
+                        R.string.workflow_test_notifications,
+                        report.notificationStatus.displayName(),
+                    ),
+                )
                 if (report.requiresImageCapture) {
                     Text(
                         stringResource(
@@ -4914,84 +4999,125 @@ private fun PreflightReportDialog(
                     ) {
                         Text(
                             when (action) {
-                                PreflightRecoveryAction.SetUpAutomation -> "设置自动化服务"
+                                PreflightRecoveryAction.SetUpAutomation -> stringResource(
+                                    R.string.set_up_automation,
+                                )
                             },
                         )
                     }
                 }
                 if (report.validationIssues.isEmpty()) {
-                    Text("工作流结构：有效", color = Color(0xFF16815F))
+                    Text(stringResource(R.string.workflow_test_structure_valid), color = Color(0xFF16815F))
                 } else {
-                    Text("工作流结构：${report.validationIssues.size} 个问题", color = Color(0xFFD04F3D))
-                    report.validationIssues.take(5).forEach { issue ->
+                    Text(
+                        stringResource(R.string.workflow_test_structure_issues, report.validationIssues.size),
+                        color = Color(0xFFD04F3D),
+                    )
+                    report.validationIssues.forEach { issue ->
+                        val location = issue.stepId
+                            ?.let(workflow.steps::runLocationsTo)
+                            ?.takeIf(List<RunStepLocation>::isNotEmpty)
+                            ?.map { it.localizedName() }
+                            ?.joinToString()
+                            ?: stringResource(R.string.workflow_test_whole_workflow)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                "• ${issue.localizedMessage(context)}",
+                                stringResource(
+                                    R.string.workflow_test_issue_row,
+                                    location,
+                                    issue.localizedMessage(context),
+                                ),
                                 modifier = Modifier.weight(1f),
                                 fontSize = 12.sp,
                             )
                             issue.stepId?.let(workflow.steps::uniquePathTo)?.let { path ->
-                                TextButton(onClick = { onEditStep(path) }) { Text("编辑步骤") }
+                                TextButton(onClick = { onEditStep(path) }) {
+                                    Text(stringResource(R.string.edit_step))
+                                }
                             }
                         }
                     }
                 }
                 val validation = report.validation
-                val variables = buildString {
-                    append("变量：已定义 ${validation.definedVariables.size} 个")
-                    if (validation.referencedVariables.isNotEmpty()) {
-                        append("，引用 ${validation.referencedVariables.size} 个")
-                    }
-                }
-                Text(variables, fontSize = 12.sp)
+                Text(
+                    stringResource(
+                        R.string.workflow_test_variables,
+                        validation.definedVariables.size,
+                        validation.referencedVariables.size,
+                    ),
+                    fontSize = 12.sp,
+                )
                 if (validation.definedVariables.isNotEmpty()) {
                     Text(validation.definedVariables.joinToString(), fontSize = 12.sp)
                 }
                 Text(
-                    "限制：${validation.definedStepCount}/${WorkflowLimits.MAX_DEFINED_STEPS} 个步骤 · " +
-                        "${validation.maximumNestingDepth}/${WorkflowLimits.MAX_NESTING_DEPTH} 层 · " +
-                        "最多执行 ${validation.maximumStepExecutions}/${WorkflowLimits.MAX_EXECUTED_STEPS} 次",
+                    stringResource(
+                        R.string.workflow_test_limits,
+                        validation.definedStepCount,
+                        WorkflowLimits.MAX_DEFINED_STEPS,
+                        validation.maximumNestingDepth,
+                        WorkflowLimits.MAX_NESTING_DEPTH,
+                        validation.maximumStepExecutions,
+                        WorkflowLimits.MAX_EXECUTED_STEPS,
+                    ),
                     fontSize = 12.sp,
                 )
                 if (report.launchTargets.isNotEmpty()) {
                     HorizontalDivider()
-                    Text("启动目标", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.workflow_test_launch_targets), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     report.launchTargets.forEach { target ->
                         Text(
-                            "${if (target.isLaunchable) "可用" else "无法启动"}：${target.packageName}",
+                            stringResource(
+                                if (target.isLaunchable) R.string.workflow_test_target_available
+                                else R.string.workflow_test_target_unavailable,
+                                target.packageName,
+                            ),
                             fontSize = 12.sp,
                         )
                     }
                 }
                 if (report.selectors.isNotEmpty()) {
                     HorizontalDivider()
-                    Text("选择器快照", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.workflow_test_selector_snapshot), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     report.selectors.forEach { check ->
                         val result = when (check.requiredMatchAvailable) {
-                            true -> "可用（${check.matchCount} 个匹配项）"
-                            false -> "当前有 ${check.matchCount} 个匹配项，需要索引 ${check.use.selector.matchIndex}"
-                            null -> "连接服务后才能检查"
+                            true -> stringResource(R.string.workflow_test_selector_available, check.matchCount ?: 0)
+                            false -> stringResource(
+                                R.string.workflow_test_selector_index_missing,
+                                check.matchCount ?: 0,
+                                check.use.selector.matchIndex,
+                            )
+                            null -> stringResource(R.string.workflow_test_selector_not_checked)
                         }
+                        val location = workflow.steps.uniqueRunLocationTo(check.use.stepId)?.localizedName()
+                            ?: check.use.stepId
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                "${check.use.role.displayName()} · ${check.use.stepId}：$result",
+                                stringResource(
+                                    R.string.workflow_test_selector_row,
+                                    location,
+                                    check.use.role.displayName(),
+                                    result,
+                                ),
                                 modifier = Modifier.weight(1f),
                                 fontSize = 12.sp,
                             )
                             workflow.steps.uniquePathTo(check.use.stepId)?.let { path ->
-                                TextButton(onClick = { onEditStep(path) }) { Text("编辑步骤") }
+                                TextButton(onClick = { onEditStep(path) }) {
+                                    Text(stringResource(R.string.edit_step))
+                                }
                             }
                         }
                     }
                     Text(
-                        "选择器匹配数量仅反映服务当前可见的界面。",
+                        stringResource(R.string.workflow_test_selector_scope_note),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                     )
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) } },
     )
 }
 
@@ -5138,7 +5264,12 @@ private fun RunRecordDetailsDialog(
                 )
                 Text(stringResource(R.string.run_history_detail_duration, record.durationMillis))
                 record.failedStepId?.let {
-                    Text(stringResource(R.string.run_history_detail_failed_step, it))
+                    Text(
+                        stringResource(
+                            R.string.run_history_detail_failed_step,
+                            record.failedStepLocation?.localizedName() ?: it,
+                        ),
+                    )
                 }
                 record.localizedFailureMessage(context)?.let {
                     Text(stringResource(R.string.run_failure_details, it))
@@ -5152,7 +5283,7 @@ private fun RunRecordDetailsDialog(
                         Text(
                             stringResource(
                                 R.string.execution_diagnostic_row,
-                                diagnostic.stepId,
+                                diagnostic.location?.localizedName() ?: diagnostic.stepId,
                                 diagnostic.outcome.localizedName(),
                                 diagnostic.durationMillis,
                                 diagnostic.attemptCount,
@@ -5223,7 +5354,11 @@ private fun RunRecordRow(record: RunRecord) {
             if (failureMessage != null) {
                 Text(
                     record.failedStepId?.let {
-                        context.getString(R.string.run_failure_with_step, it, failureMessage)
+                        context.getString(
+                            R.string.run_failure_with_step,
+                            record.failedStepLocation?.localizedName(context) ?: it,
+                            failureMessage,
+                        )
                     } ?: failureMessage,
                     color = Color(0xFFD04F3D),
                     fontSize = 12.sp,
@@ -5257,17 +5392,54 @@ private fun RunRecord.localizedFailureMessage(context: Context): String? {
     }.getOrNull() ?: context.getString(R.string.run_failure_unknown)
 }
 
-private fun RunResult.localizedMessage(context: Context): String = when (this) {
+private fun RunResult.localizedMessage(
+    context: Context,
+    failedStepLocation: RunStepLocation? = null,
+): String = when (this) {
     RunResult.Completed -> context.getString(R.string.run_completed)
     RunResult.AlreadyRunning -> context.getString(R.string.run_already_running)
     is RunResult.NotReady -> context.getString(R.string.cannot_run, issue.localizedMessage(context))
     RunResult.Cancelled -> context.getString(R.string.run_cancelled)
     is RunResult.Failed -> context.getString(
         R.string.run_step_failed,
-        stepId,
+        failedStepLocation?.localizedName(context) ?: stepId,
         error.localizedMessage(context),
     )
 }
+
+@Composable
+private fun RunStepLocation.localizedName(): String = segments.flatMap { segment ->
+    buildList {
+        add(stringResource(R.string.workflow_step_position, segment.index + 1))
+        segment.branch?.let { add(it.localizedName()) }
+    }
+}.joinToString(" › ")
+
+private fun RunStepLocation.localizedName(context: Context): String = segments.flatMap { segment ->
+    buildList {
+        add(context.getString(R.string.workflow_step_position, segment.index + 1))
+        segment.branch?.let { branch ->
+            add(
+                context.getString(
+                    when (branch) {
+                        RunStepBranch.RepeatBody -> R.string.workflow_branch_repeat
+                        RunStepBranch.IfTrue -> R.string.workflow_branch_when_true
+                        RunStepBranch.IfFalse -> R.string.workflow_branch_when_false
+                    },
+                ),
+            )
+        }
+    }
+}.joinToString(" › ")
+
+@Composable
+private fun RunStepBranch.localizedName(): String = stringResource(
+    when (this) {
+        RunStepBranch.RepeatBody -> R.string.workflow_branch_repeat
+        RunStepBranch.IfTrue -> R.string.workflow_branch_when_true
+        RunStepBranch.IfFalse -> R.string.workflow_branch_when_false
+    },
+)
 
 private fun ExecutionError.localizedMessage(context: Context): String = when (code) {
     ExecutionErrorCode.StepFailed -> context.getString(R.string.execution_error_step_failed)

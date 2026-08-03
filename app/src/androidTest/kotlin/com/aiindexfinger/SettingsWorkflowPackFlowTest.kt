@@ -80,6 +80,7 @@ class SettingsWorkflowPackFlowTest {
                         }
                     },
                     runRecords = emptyList(),
+                    runHistoryCorrupt = false,
                     schedules = emptyList(),
                     onCreate = {}, onEdit = {}, onImport = {}, onExportAll = {}, onExport = {},
                     onDuplicate = {}, onCompare = { _, _ -> }, onViewVersions = {}, onDelete = {},

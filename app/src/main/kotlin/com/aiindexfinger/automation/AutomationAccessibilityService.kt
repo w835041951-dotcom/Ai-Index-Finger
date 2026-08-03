@@ -8,6 +8,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.graphics.Rect
@@ -16,10 +17,16 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.view.Display
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.graphics.drawable.Icon
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.annotation.RequiresApi
 import com.aiindexfinger.MainActivity
 import com.aiindexfinger.R
@@ -63,12 +70,22 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private val runHistoryStore by lazy { RunHistoryStore(this) }
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var workflowJob: Job? = null
+    private var observationSettleJob: Job? = null
     private var screenCaptureSettleJob: Job? = null
     private var screenCaptureTimeoutJob: Job? = null
     private var screenCaptureRequestId = 0L
     private var runningWorkflowName: String? = null
+    private var lastExternalAppPackage: String? = null
+    private var homePackages: Set<String> = emptySet()
+    private var elementMonitorView: View? = null
+    private var monitoredTargetPackage: String? = null
+    private var monitoredNode: ObservedNode? = null
 
     override fun onServiceConnected() {
+        homePackages = packageManager.queryIntentActivities(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+            PackageManager.MATCH_DEFAULT_ONLY,
+        ).mapTo(mutableSetOf()) { it.activityInfo.packageName }
         serviceInfo = serviceInfo.apply {
             flags = flags or
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -87,15 +104,51 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         handleArmedScreenCapture(event)
-        if (!observationController.isObservationRequested) return
         val packageName = event?.packageName?.toString() ?: return
-        if (packageName == applicationContext.packageName) return
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            packageName == monitoredTargetPackage &&
+            elementMonitorView != null
+        ) {
+            event.source?.toDescriptor()
+                ?.takeIf { it.packageName == monitoredTargetPackage }
+                ?.let(::showMonitoredNode)
+        }
+        if (!isEligibleExternalPackage(packageName, applicationContext.packageName, homePackages)) {
+            invalidateObservedNodes()
+            return
+        }
         val root = rootInActiveWindow ?: return
-        observedNodes.value = root.depthFirstSequence()
-            .mapNotNull { it.toDescriptor() }
-            .distinctBy { listOf(it.viewId, it.text, it.contentDescription, it.className) }
-            .take(MAX_OBSERVED_NODES)
-            .toList()
+        val rootPackageName = root.packageName?.toString() ?: return
+        if (packageName != rootPackageName) {
+            invalidateObservedNodes()
+            return
+        }
+        if (packageName != lastExternalAppPackage &&
+            packageManager.getLaunchIntentForPackage(packageName) != null
+        ) {
+            lastExternalAppPackage = packageName
+        }
+        if (!observationController.isObservationRequested) return
+        observationSettleJob?.cancel()
+        observationSettleJob = serviceScope.launch {
+            delay(OBSERVATION_SETTLE_MILLIS)
+            if (!observationController.isObservationRequested) return@launch
+            val settledRoot = rootInActiveWindow ?: return@launch
+            if (settledRoot.packageName?.toString() != packageName) return@launch
+            val snapshot = settledRoot.depthFirstSequence()
+                .mapNotNull { it.toDescriptor() }
+                .filter { it.packageName == packageName }
+                .distinctBy { listOf(it.viewId, it.text, it.contentDescription, it.className) }
+                .take(MAX_OBSERVED_NODES)
+                .toList()
+            if (snapshot != observedNodes.value) observedNodes.value = snapshot
+        }
+    }
+
+    private fun invalidateObservedNodes() {
+        observationSettleJob?.cancel()
+        observationSettleJob = null
+        if (observedNodes.value.isNotEmpty()) observedNodes.value = emptyList()
     }
 
     override fun onInterrupt() {
@@ -103,6 +156,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     }
 
     override fun onDestroy() {
+        stopElementMonitor()
         if (instance === this) instance = null
         serviceScope.cancel()
         cancelRunningNotification()
@@ -158,6 +212,12 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         }
         if (screenCaptureState.value is ScreenCaptureState.Armed) return false
         clearScreenCapture()
+        val targetPackage = lastExternalAppPackage
+        val targetIntent = targetPackage?.let(packageManager::getLaunchIntentForPackage)
+        if (targetPackage == null || targetIntent == null) {
+            screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_no_previous_app))
+            return false
+        }
         val requestId = ++screenCaptureRequestId
         screenCaptureState.value = ScreenCaptureState.Armed
         screenCaptureTimeoutJob = serviceScope.launch {
@@ -167,7 +227,126 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 returnToEditor()
             }
         }
+        try {
+            startActivity(
+                targetIntent.apply {
+                    flags = flags or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                },
+            )
+        } catch (_: ActivityNotFoundException) {
+            clearScreenCapture()
+            lastExternalAppPackage = null
+            screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_previous_app_unavailable))
+            return false
+        } catch (_: SecurityException) {
+            clearScreenCapture()
+            lastExternalAppPackage = null
+            screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_previous_app_unavailable))
+            return false
+        }
         return true
+    }
+
+    fun startElementMonitor(): Boolean {
+        val targetPackage = lastExternalAppPackage
+        val targetIntent = targetPackage?.let(packageManager::getLaunchIntentForPackage)
+        if (targetPackage == null || targetIntent == null) {
+            overlayStatus.value = getString(R.string.element_monitor_no_target)
+            return false
+        }
+        stopElementMonitor()
+        monitoredTargetPackage = targetPackage
+        monitoredNode = null
+        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        val details = TextView(this).apply {
+            setText(R.string.element_monitor_tap_hint)
+            setPadding(24, 16, 24, 12)
+        }
+        val generateButton = Button(this).apply {
+            setText(R.string.element_monitor_generate_click)
+            isEnabled = false
+        }
+        val closeButton = Button(this).apply {
+            setText(R.string.close)
+            setOnClickListener { stopElementMonitor() }
+        }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(generateButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            addView(closeButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFFF7F7F7.toInt())
+            elevation = 12f
+            addView(
+                details,
+                LinearLayout.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                actions,
+                LinearLayout.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        generateButton.setOnClickListener {
+            val action = monitoredNode?.let(::createOverlayClickAction) ?: return@setOnClickListener
+            pendingOverlayAction.value = action
+            stopElementMonitor()
+            returnToEditor()
+        }
+        panel.tag = ElementMonitorViews(details, generateButton)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP
+        }
+        return try {
+            windowManager.addView(panel, params)
+            elementMonitorView = panel
+            overlayStatus.value = null
+            startActivity(
+                targetIntent.apply {
+                    flags = flags or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                },
+            )
+            true
+        } catch (_: RuntimeException) {
+            stopElementMonitor()
+            overlayStatus.value = getString(R.string.element_monitor_start_failed)
+            false
+        }
+    }
+
+    fun stopElementMonitor() {
+        elementMonitorView?.let { view ->
+            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+        }
+        elementMonitorView = null
+        monitoredTargetPackage = null
+        monitoredNode = null
+    }
+
+    private fun showMonitoredNode(node: ObservedNode) {
+        monitoredNode = node
+        val views = elementMonitorView?.tag as? ElementMonitorViews ?: return
+        views.details.text = getString(
+            R.string.element_monitor_details,
+            node.text ?: node.contentDescription ?: node.className.orEmpty(),
+            node.packageName,
+            node.viewId ?: getString(R.string.element_monitor_not_available),
+        )
+        views.generateButton.isEnabled = createOverlayClickAction(node) != null
     }
 
     fun clearScreenCapture() {
@@ -188,7 +367,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         if (screenCaptureState.value !is ScreenCaptureState.Armed) return
         val packageName = event?.packageName?.toString() ?: return
-        if (packageName == applicationContext.packageName) return
+        if (packageName != lastExternalAppPackage) return
         val requestId = screenCaptureRequestId
         screenCaptureSettleJob?.cancel()
         screenCaptureSettleJob = serviceScope.launch {
@@ -196,6 +375,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             if (requestId != screenCaptureRequestId || screenCaptureState.value !is ScreenCaptureState.Armed) {
                 return@launch
             }
+            if (rootInActiveWindow?.packageName?.toString() != packageName) return@launch
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 mainExecutor,
@@ -240,11 +420,15 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     private fun snapshotCaptureNodes(): List<CaptureNode> {
         var traversalOrder = 0
+        val ownPackageName = applicationContext.packageName
+        val targetPackageName = lastExternalAppPackage ?: return emptyList()
         return windows.asSequence()
             .mapNotNull { it.root }
+            .filter { it.packageName?.toString() == targetPackageName }
             .flatMap { root -> root.depthFirstWithDepth() }
             .mapNotNull { (node, depth) ->
                 val packageName = node.packageName?.toString() ?: return@mapNotNull null
+                if (packageName == ownPackageName || packageName != targetPackageName) return@mapNotNull null
                 val bounds = Rect().also(node::getBoundsInScreen)
                 CaptureNode(
                     packageName = packageName,
@@ -618,6 +802,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     companion object {
         private const val MAX_OBSERVED_NODES = 200
         private const val MAX_CAPTURE_NODES = 1_000
+        private const val OBSERVATION_SETTLE_MILLIS = 300L
         private const val SCREEN_CAPTURE_SETTLE_MILLIS = 450L
         private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
         private const val MAX_TEMPLATE_PNG_BYTES = 96 * 1024
@@ -628,7 +813,11 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         val connected = mutableConnected.asStateFlow()
         val observedNodes = MutableStateFlow<List<ObservedNode>>(emptyList())
         val screenCaptureState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.Idle)
+        val pendingOverlayAction = MutableStateFlow<PendingOverlayAction?>(null)
+        val overlayStatus = MutableStateFlow<String?>(null)
         private val observationController = AccessibilityObservationController {
+            instance?.observationSettleJob?.cancel()
+            instance?.observationSettleJob = null
             observedNodes.value = emptyList()
         }
         val currentStepId = MutableStateFlow<String?>(null)
@@ -657,7 +846,34 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 }
             }
         }
+
+        fun consumePendingOverlayAction(action: PendingOverlayAction) {
+            if (pendingOverlayAction.value == action) pendingOverlayAction.value = null
+        }
     }
+}
+
+private data class ElementMonitorViews(
+    val details: TextView,
+    val generateButton: Button,
+)
+
+internal fun isEligibleExternalPackage(
+    packageName: String,
+    ownPackageName: String,
+    homePackages: Set<String>,
+): Boolean = packageName != ownPackageName &&
+    packageName != "com.android.systemui" &&
+    packageName !in homePackages
+
+internal fun createOverlayClickAction(node: ObservedNode): PendingOverlayAction? {
+    if (!node.enabled || !node.clickable) return null
+    val selector = SelectorRecommendations.candidates(node).firstOrNull() ?: return null
+    return PendingOverlayAction.Click(selector)
+}
+
+sealed interface PendingOverlayAction {
+    data class Click(val selector: NodeSelector) : PendingOverlayAction
 }
 
 sealed interface ScreenCaptureState {

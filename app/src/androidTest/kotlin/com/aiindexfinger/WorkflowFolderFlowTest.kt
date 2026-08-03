@@ -57,6 +57,7 @@ class WorkflowFolderFlowTest {
                     },
                     onInstallSettingsPack = {},
                     runRecords = emptyList(),
+                    runHistoryCorrupt = false,
                     schedules = emptyList(),
                     onCreate = {},
                     onEdit = {},
