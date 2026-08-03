@@ -135,6 +135,7 @@ import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.NodeSelector
+import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.StepComparisonBranch
 import com.aiindexfinger.model.StepComparisonField
 import com.aiindexfinger.model.StepComparisonPath
@@ -1799,20 +1800,24 @@ private fun WorkflowEditor(
     LaunchedEffect(pendingOverlayAction) {
         val action = pendingOverlayAction ?: return@LaunchedEffect
         when (action) {
-            is PendingOverlayAction.Click -> {
-                val latestSteps = steps.stepsAt(currentListPath)
-                steps = steps.insertStep(
-                    currentListPath,
-                    latestSteps.size,
-                    Step.Click(newId(), action.selector),
-                )
+            is PendingOverlayAction.RecordedClicks -> {
+                action.targets.forEach { target ->
+                    val latestSteps = steps.stepsAt(currentListPath)
+                    steps = steps.insertStep(
+                        currentListPath,
+                        latestSteps.size,
+                        Step.RecordedClick(
+                            id = newId(),
+                            x = target.x,
+                            y = target.y,
+                            selector = target.selector,
+                            control = target.control,
+                        ),
+                    )
+                }
             }
         }
         AutomationAccessibilityService.consumePendingOverlayAction(action)
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { AutomationAccessibilityService.instance?.stopElementMonitor() }
     }
 
     BackHandler(onBack = requestBack)
@@ -2311,6 +2316,17 @@ private fun WorkflowEditor(
                 onDismiss = { editingStepPath = null },
                 onAdd = { selector ->
                     steps = steps.replaceStep(path, step.copy(selector = selector))
+                    editingStepPath = null
+                },
+            )
+            is Step.RecordedClick -> RecordedClickDialog(
+                initialStep = step,
+                onDismiss = { editingStepPath = null },
+                onSave = { targetMode, x, y ->
+                    steps = steps.replaceStep(
+                        path,
+                        step.copy(targetMode = targetMode, x = x, y = y),
+                    )
                     editingStepPath = null
                 },
             )
@@ -2973,6 +2989,110 @@ private fun TapDialog(
     )
 }
 
+@Composable
+private fun RecordedClickDialog(
+    initialStep: Step.RecordedClick,
+    onDismiss: () -> Unit,
+    onSave: (RecordedClickTargetMode, Int, Int) -> Unit,
+) {
+    var targetMode by remember(initialStep) { mutableStateOf(initialStep.targetMode) }
+    var xText by remember(initialStep) { mutableStateOf(initialStep.x.toString()) }
+    var yText by remember(initialStep) { mutableStateOf(initialStep.y.toString()) }
+    val x = xText.toIntOrNull()
+    val y = yText.toIntOrNull()
+    val control = initialStep.control
+    val unavailable = stringResource(R.string.element_monitor_not_available)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.recorded_click_edit_title)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(stringResource(R.string.recorded_click_target_mode), fontWeight = FontWeight.Bold)
+                RecordedClickTargetMode.entries.forEach { option ->
+                    val enabled = option != RecordedClickTargetMode.Control || initialStep.selector != null
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = enabled) { targetMode = option }
+                            .semantics { selected = targetMode == option },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = targetMode == option,
+                            enabled = enabled,
+                            onClick = { targetMode = option },
+                        )
+                        Text(
+                            stringResource(
+                                if (option == RecordedClickTargetMode.Control) {
+                                    R.string.recorded_click_target_control
+                                } else {
+                                    R.string.recorded_click_target_coordinates
+                                },
+                            ),
+                        )
+                    }
+                }
+                if (initialStep.selector == null) {
+                    Text(
+                        stringResource(R.string.recorded_click_control_unavailable),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
+                NodeField(xText, { xText = it }, stringResource(R.string.coordinate_x), true)
+                NodeField(yText, { yText = it }, stringResource(R.string.coordinate_y), true)
+                HorizontalDivider()
+                Text(stringResource(R.string.recorded_click_snapshot_title), fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.recorded_click_snapshot_package, control.packageName))
+                Text(stringResource(R.string.recorded_click_snapshot_view_id, control.viewId ?: unavailable))
+                Text(stringResource(R.string.recorded_click_snapshot_text, control.text ?: unavailable))
+                Text(
+                    stringResource(
+                        R.string.recorded_click_snapshot_description,
+                        control.contentDescription ?: unavailable,
+                    ),
+                )
+                Text(stringResource(R.string.recorded_click_snapshot_class, control.className ?: unavailable))
+                Text(
+                    stringResource(
+                        R.string.recorded_click_snapshot_bounds,
+                        control.bounds.left,
+                        control.bounds.top,
+                        control.bounds.right,
+                        control.bounds.bottom,
+                    ),
+                )
+                Text(
+                    stringResource(
+                        R.string.recorded_click_snapshot_capabilities,
+                        control.clickable,
+                        control.enabled,
+                        control.longClickable,
+                        control.scrollable,
+                    ),
+                )
+                Text(
+                    stringResource(R.string.recorded_click_privacy_notice),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = x != null && x >= 0 && y != null && y >= 0 &&
+                    (targetMode != RecordedClickTargetMode.Control || initialStep.selector != null),
+                onClick = { onSave(targetMode, requireNotNull(x), requireNotNull(y)) },
+            ) { Text(stringResource(R.string.save)) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+    )
+}
+
 private enum class ScreenshotCoordinateMode { Tap, Swipe }
 
 @Composable
@@ -3472,6 +3592,7 @@ private fun NotificationPreflightStatus.displayName(): String = when (this) {
 
 private fun com.aiindexfinger.model.SelectorRole.displayName(): String = when (this) {
     com.aiindexfinger.model.SelectorRole.Click -> "点击"
+    com.aiindexfinger.model.SelectorRole.RecordedClick -> "录制点击"
     com.aiindexfinger.model.SelectorRole.LongClick -> "长按"
     com.aiindexfinger.model.SelectorRole.InputText -> "输入文本"
     com.aiindexfinger.model.SelectorRole.ReadNodeText -> "读取元素属性"
@@ -4442,7 +4563,7 @@ private fun FailurePolicy.label(): String = when (this) {
 }
 
 private fun Step.isActionEditable(): Boolean = when (this) {
-    is Step.Click, is Step.Delay, is Step.GlobalAction, is Step.InputText, is Step.LaunchApp,
+    is Step.Click, is Step.RecordedClick, is Step.Delay, is Step.GlobalAction, is Step.InputText, is Step.LaunchApp,
     is Step.ImageClick,
     is Step.LongClick, is Step.ReadNodeText, is Step.Repeat, is Step.SetVariable, is Step.Swipe,
     is Step.WaitForNode -> true
@@ -4456,6 +4577,16 @@ private fun Step.isActionEditable(): Boolean = when (this) {
 @Composable
 private fun Step.title(): String = when (this) {
     is Step.Click -> "点击元素"
+    is Step.RecordedClick -> stringResource(
+        if (targetMode == RecordedClickTargetMode.Control) {
+            R.string.recorded_click_step_control
+        } else {
+            R.string.recorded_click_step_coordinates
+        },
+        control.text ?: control.contentDescription ?: control.viewId ?: control.className.orEmpty(),
+        x,
+        y,
+    )
     is Step.ImageClick -> stringResource(R.string.image_click_step_title, templateWidth, templateHeight)
     is Step.Delay -> "等待 $durationMillis 毫秒"
     is Step.GlobalAction -> action.displayName()

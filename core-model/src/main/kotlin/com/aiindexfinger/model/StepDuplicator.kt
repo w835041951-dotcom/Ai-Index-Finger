@@ -2,6 +2,7 @@ package com.aiindexfinger.model
 
 fun Step.duplicateWithNewIds(newId: () -> String): Step = when (this) {
     is Step.Click -> copy(id = newId())
+    is Step.RecordedClick -> copy(id = newId())
     is Step.ImageClick -> copy(id = newId())
     is Step.Delay -> copy(id = newId())
     is Step.GlobalAction -> copy(id = newId())

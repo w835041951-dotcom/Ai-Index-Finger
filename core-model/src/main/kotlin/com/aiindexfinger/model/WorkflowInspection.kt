@@ -2,6 +2,7 @@ package com.aiindexfinger.model
 
 enum class SelectorRole {
     Click,
+    RecordedClick,
     LongClick,
     InputText,
     ReadNodeText,
@@ -40,6 +41,9 @@ private fun MutableList<SelectorUse>.collectSelectorUses(steps: List<Step>) {
     steps.forEach { step ->
         when (step) {
             is Step.Click -> add(SelectorUse(step.id, SelectorRole.Click, step.selector))
+            is Step.RecordedClick -> step.selector?.let {
+                add(SelectorUse(step.id, SelectorRole.RecordedClick, it))
+            }
             is Step.ImageClick -> Unit
             is Step.LongClick -> add(SelectorUse(step.id, SelectorRole.LongClick, step.selector))
             is Step.InputText -> add(SelectorUse(step.id, SelectorRole.InputText, step.selector))

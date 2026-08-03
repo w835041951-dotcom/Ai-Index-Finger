@@ -13,6 +13,7 @@ fun Workflow.matchesSearch(query: String): Boolean {
 private fun Step.addSearchTerms(terms: MutableList<String>) {
     terms += when (this) {
         is Step.Click -> "click element"
+        is Step.RecordedClick -> "recorded click element coordinate ${control.packageName}"
         is Step.ImageClick -> "click image screenshot $packageName"
         is Step.Delay -> "wait delay"
         is Step.GlobalAction -> "global ${action.name}"
@@ -30,6 +31,12 @@ private fun Step.addSearchTerms(terms: MutableList<String>) {
     }
     when (this) {
         is Step.Click -> selector.addSearchTerms(terms)
+        is Step.RecordedClick -> {
+            selector?.addSearchTerms(terms)
+            listOf(control.viewId, control.text, control.contentDescription, control.className)
+                .filterNotNull()
+                .forEach(terms::add)
+        }
         is Step.ImageClick -> Unit
         is Step.IfElse -> {
             condition.addSearchTerms(terms)

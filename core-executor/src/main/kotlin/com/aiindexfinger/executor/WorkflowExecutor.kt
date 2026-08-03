@@ -4,6 +4,7 @@ import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
+import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.SystemAction
@@ -230,6 +231,16 @@ class WorkflowExecutor(
     private suspend fun executeStep(step: Step, context: ExecutionContext) {
         when (step) {
             is Step.Click -> requireSuccess(driver.click(step.selector), ExecutionErrorCode.TargetNotClickable)
+            is Step.RecordedClick -> when (step.targetMode) {
+                RecordedClickTargetMode.Control -> requireSuccess(
+                    driver.click(requireNotNull(step.selector)),
+                    ExecutionErrorCode.TargetNotClickable,
+                )
+                RecordedClickTargetMode.Coordinates -> requireSuccess(
+                    driver.tap(step.x, step.y),
+                    ExecutionErrorCode.TapFailed,
+                )
+            }
             is Step.ImageClick -> when (driver.clickImage(step)) {
                 is ImageClickResult.Clicked -> Unit
                 ImageClickResult.Unsupported -> fail(ExecutionErrorCode.ImageClickUnsupported)

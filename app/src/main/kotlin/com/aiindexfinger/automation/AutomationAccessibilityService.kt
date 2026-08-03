@@ -40,6 +40,8 @@ import com.aiindexfinger.data.RunRecord
 import com.aiindexfinger.data.toRunRecord
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
+import com.aiindexfinger.model.RecordedBounds
+import com.aiindexfinger.model.RecordedControl
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.SystemAction
@@ -79,9 +81,13 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var homePackages: Set<String> = emptySet()
     private var elementMonitorView: View? = null
     private var monitoredTargetPackage: String? = null
-    private var monitoredNode: ObservedNode? = null
+    private val recordedClickSession = RecordedClickSession(MAX_RECORDED_CLICKS)
+    private val targetPreferences by lazy {
+        getSharedPreferences(TARGET_PREFERENCES_NAME, MODE_PRIVATE)
+    }
 
     override fun onServiceConnected() {
+        lastExternalAppPackage = targetPreferences.getString(LAST_EXTERNAL_PACKAGE_KEY, null)
         homePackages = packageManager.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
             PackageManager.MATCH_DEFAULT_ONLY,
@@ -111,7 +117,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         ) {
             event.source?.toDescriptor()
                 ?.takeIf { it.packageName == monitoredTargetPackage }
-                ?.let(::showMonitoredNode)
+                ?.let(::recordClickTarget)
         }
         if (!isEligibleExternalPackage(packageName, applicationContext.packageName, homePackages)) {
             invalidateObservedNodes()
@@ -126,7 +132,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         if (packageName != lastExternalAppPackage &&
             packageManager.getLaunchIntentForPackage(packageName) != null
         ) {
-            lastExternalAppPackage = packageName
+            rememberExternalAppPackage(packageName)
         }
         if (!observationController.isObservationRequested) return
         observationSettleJob?.cancel()
@@ -157,6 +163,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     override fun onDestroy() {
         stopElementMonitor()
+        pendingOverlayAction.value = null
         if (instance === this) instance = null
         serviceScope.cancel()
         cancelRunningNotification()
@@ -235,12 +242,12 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             )
         } catch (_: ActivityNotFoundException) {
             clearScreenCapture()
-            lastExternalAppPackage = null
+            clearExternalAppPackage()
             screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_previous_app_unavailable))
             return false
         } catch (_: SecurityException) {
             clearScreenCapture()
-            lastExternalAppPackage = null
+            clearExternalAppPackage()
             screenCaptureState.value = ScreenCaptureState.Error(getString(R.string.capture_previous_app_unavailable))
             return false
         }
@@ -249,6 +256,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     fun startElementMonitor(): Boolean {
         val targetPackage = lastExternalAppPackage
+            ?: targetPreferences.getString(LAST_EXTERNAL_PACKAGE_KEY, null)
         val targetIntent = targetPackage?.let(packageManager::getLaunchIntentForPackage)
         if (targetPackage == null || targetIntent == null) {
             overlayStatus.value = getString(R.string.element_monitor_no_target)
@@ -256,24 +264,23 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         }
         stopElementMonitor()
         monitoredTargetPackage = targetPackage
-        monitoredNode = null
+        recordedClickSession.start()
         val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val details = TextView(this).apply {
-            setText(R.string.element_monitor_tap_hint)
+            text = getString(R.string.click_recording_count, 0)
             setPadding(24, 16, 24, 12)
         }
-        val generateButton = Button(this).apply {
-            setText(R.string.element_monitor_generate_click)
-            isEnabled = false
+        val stopButton = Button(this).apply {
+            setText(R.string.click_recording_stop)
         }
-        val closeButton = Button(this).apply {
-            setText(R.string.close)
-            setOnClickListener { stopElementMonitor() }
+        val cancelButton = Button(this).apply {
+            setText(R.string.cancel)
+            setOnClickListener { cancelElementRecording(returnToEditor = true) }
         }
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(generateButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
-            addView(closeButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            addView(stopButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            addView(cancelButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
         }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -294,13 +301,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 ),
             )
         }
-        generateButton.setOnClickListener {
-            val action = monitoredNode?.let(::createOverlayClickAction) ?: return@setOnClickListener
-            pendingOverlayAction.value = action
-            stopElementMonitor()
-            returnToEditor()
-        }
-        panel.tag = ElementMonitorViews(details, generateButton)
+        stopButton.setOnClickListener { finishElementRecording() }
+        panel.tag = ElementMonitorViews(details)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -334,19 +336,36 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         }
         elementMonitorView = null
         monitoredTargetPackage = null
-        monitoredNode = null
+        recordedClickSession.cancel()
     }
 
-    private fun showMonitoredNode(node: ObservedNode) {
-        monitoredNode = node
+    private fun recordClickTarget(node: ObservedNode) {
+        val target = createRecordedClickTarget(node) ?: return
+        if (!recordedClickSession.record(target)) return
         val views = elementMonitorView?.tag as? ElementMonitorViews ?: return
-        views.details.text = getString(
-            R.string.element_monitor_details,
-            node.text ?: node.contentDescription ?: node.className.orEmpty(),
-            node.packageName,
-            node.viewId ?: getString(R.string.element_monitor_not_available),
-        )
-        views.generateButton.isEnabled = createOverlayClickAction(node) != null
+        views.details.text = getString(R.string.click_recording_count, recordedClickSession.count)
+    }
+
+    private fun finishElementRecording() {
+        val targets = recordedClickSession.finish()
+        if (targets.isNotEmpty()) pendingOverlayAction.value = PendingOverlayAction.RecordedClicks(targets)
+        stopElementMonitor()
+        returnToEditor()
+    }
+
+    private fun cancelElementRecording(returnToEditor: Boolean) {
+        stopElementMonitor()
+        if (returnToEditor) returnToEditor()
+    }
+
+    private fun rememberExternalAppPackage(packageName: String) {
+        lastExternalAppPackage = packageName
+        targetPreferences.edit().putString(LAST_EXTERNAL_PACKAGE_KEY, packageName).apply()
+    }
+
+    private fun clearExternalAppPackage() {
+        lastExternalAppPackage = null
+        targetPreferences.edit().remove(LAST_EXTERNAL_PACKAGE_KEY).apply()
     }
 
     fun clearScreenCapture() {
@@ -783,7 +802,6 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         val text = text?.toString()?.takeIf { it.isNotBlank() }
         val description = contentDescription?.toString()?.takeIf { it.isNotBlank() }
         val className = className?.toString()?.takeIf { it.isNotBlank() }
-        if (viewId == null && text == null && description == null) return null
         val bounds = Rect().also(::getBoundsInScreen)
         return ObservedNode(
             packageName = packageName,
@@ -806,6 +824,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         private const val SCREEN_CAPTURE_SETTLE_MILLIS = 450L
         private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
         private const val MAX_TEMPLATE_PNG_BYTES = 96 * 1024
+        private const val MAX_RECORDED_CLICKS = 1_000
+        private const val TARGET_PREFERENCES_NAME = "automation_target"
+        private const val LAST_EXTERNAL_PACKAGE_KEY = "last_external_package"
         private const val RUNNING_CHANNEL_ID = "workflow_execution"
         private const val RUNNING_NOTIFICATION_ID = 1001
         private const val TAP_DURATION_MILLIS = 50L
@@ -855,7 +876,6 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
 private data class ElementMonitorViews(
     val details: TextView,
-    val generateButton: Button,
 )
 
 internal fun isEligibleExternalPackage(
@@ -866,14 +886,73 @@ internal fun isEligibleExternalPackage(
     packageName != "com.android.systemui" &&
     packageName !in homePackages
 
-internal fun createOverlayClickAction(node: ObservedNode): PendingOverlayAction? {
-    if (!node.enabled || !node.clickable) return null
-    val selector = SelectorRecommendations.candidates(node).firstOrNull() ?: return null
-    return PendingOverlayAction.Click(selector)
+internal fun createRecordedClickTarget(node: ObservedNode): RecordedClickTarget? {
+    if (!node.enabled) return null
+    val values = node.bounds.split(' ').mapNotNull(String::toIntOrNull)
+    if (values.size != 4) return null
+    val bounds = runCatching { RecordedBounds(values[0], values[1], values[2], values[3]) }.getOrNull()
+        ?: return null
+    return RecordedClickTarget(
+        x = bounds.left + (bounds.right - bounds.left) / 2,
+        y = bounds.top + (bounds.bottom - bounds.top) / 2,
+        selector = SelectorRecommendations.candidates(node).firstOrNull(),
+        control = RecordedControl(
+            packageName = node.packageName,
+            viewId = node.viewId,
+            text = node.text,
+            contentDescription = node.contentDescription,
+            className = node.className,
+            bounds = bounds,
+            clickable = node.clickable,
+            enabled = node.enabled,
+            longClickable = node.longClickable,
+            scrollable = node.scrollable,
+        ),
+    )
+}
+
+data class RecordedClickTarget(
+    val x: Int,
+    val y: Int,
+    val selector: NodeSelector?,
+    val control: RecordedControl,
+)
+
+internal class RecordedClickSession(private val capacity: Int) {
+    private var recording = false
+    private val targets = mutableListOf<RecordedClickTarget>()
+
+    val count: Int get() = targets.size
+
+    init {
+        require(capacity > 0) { "Recording capacity must be positive" }
+    }
+
+    fun start() {
+        targets.clear()
+        recording = true
+    }
+
+    fun record(target: RecordedClickTarget): Boolean {
+        if (!recording || targets.size >= capacity) return false
+        targets += target
+        return true
+    }
+
+    fun finish(): List<RecordedClickTarget> {
+        if (!recording) return emptyList()
+        recording = false
+        return targets.toList().also { targets.clear() }
+    }
+
+    fun cancel() {
+        recording = false
+        targets.clear()
+    }
 }
 
 sealed interface PendingOverlayAction {
-    data class Click(val selector: NodeSelector) : PendingOverlayAction
+    data class RecordedClicks(val targets: List<RecordedClickTarget>) : PendingOverlayAction
 }
 
 sealed interface ScreenCaptureState {

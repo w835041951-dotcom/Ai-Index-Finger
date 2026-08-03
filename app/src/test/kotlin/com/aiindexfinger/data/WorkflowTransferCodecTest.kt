@@ -2,6 +2,9 @@ package com.aiindexfinger.data
 
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
+import com.aiindexfinger.model.RecordedBounds
+import com.aiindexfinger.model.RecordedClickTargetMode
+import com.aiindexfinger.model.RecordedControl
 import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.Step
@@ -84,6 +87,40 @@ class WorkflowTransferCodecTest {
                 Step.LongClick(
                     "hold",
                     NodeSelector("com.example", viewId = "com.example:id/item"),
+                ),
+            ),
+        )
+
+        val decoded = WorkflowTransferCodec.decode(WorkflowTransferCodec.encode(workflow))
+
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, decoded.schemaVersion)
+        assertEquals(workflow, decoded)
+    }
+
+    @Test
+    fun recordedClickRoundTripsWithBothTargetsAndFullControlSnapshot() {
+        val workflow = Workflow(
+            id = "recorded-click",
+            name = "Recorded click",
+            steps = listOf(
+                Step.RecordedClick(
+                    id = "recorded",
+                    x = 160,
+                    y = 260,
+                    selector = NodeSelector("com.example", viewId = "com.example:id/save"),
+                    control = RecordedControl(
+                        packageName = "com.example",
+                        viewId = "com.example:id/save",
+                        text = "保存",
+                        contentDescription = "Save changes",
+                        className = "android.widget.Button",
+                        bounds = RecordedBounds(100, 200, 220, 320),
+                        clickable = true,
+                        enabled = true,
+                        longClickable = true,
+                        scrollable = false,
+                    ),
+                    targetMode = RecordedClickTargetMode.Coordinates,
                 ),
             ),
         )

@@ -126,6 +126,7 @@ private fun MutableList<WorkflowDifference>.compareSteps(
 private fun Step.comparisonType(): String = when (this) {
     is Step.LaunchApp -> "launch_app"
     is Step.Click -> "click"
+    is Step.RecordedClick -> "recorded_click"
     is Step.ImageClick -> "image_click"
     is Step.LongClick -> "long_click"
     is Step.InputText -> "input_text"
@@ -144,6 +145,15 @@ private fun Step.comparisonType(): String = when (this) {
 private fun Step.comparisonConfiguration(): Any = when (this) {
     is Step.LaunchApp -> listOf(packageName, intentAction, timeoutMillis, failurePolicy)
     is Step.Click -> listOf(selector, timeoutMillis, failurePolicy)
+    is Step.RecordedClick -> listOf(
+        x,
+        y,
+        selector,
+        control,
+        targetMode,
+        timeoutMillis,
+        failurePolicy,
+    )
     is Step.ImageClick -> listOf(
         packageName,
         templatePngBase64,

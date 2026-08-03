@@ -25,6 +25,25 @@ class WorkflowSerializationTest {
                 Step.LaunchApp("launch", "com.example.target"),
                 Step.InputText("input", selector, "hello", inputMethod = TextInputMethod.Paste),
                 Step.Click("click", selector),
+                Step.RecordedClick(
+                    id = "recorded-click",
+                    x = 220,
+                    y = 440,
+                    selector = selector,
+                    control = RecordedControl(
+                        packageName = "com.example.target",
+                        viewId = "com.example.target:id/search",
+                        text = "订单",
+                        contentDescription = "Search orders",
+                        className = "android.widget.EditText",
+                        bounds = RecordedBounds(120, 340, 320, 540),
+                        clickable = true,
+                        enabled = true,
+                        longClickable = false,
+                        scrollable = false,
+                    ),
+                    targetMode = RecordedClickTargetMode.Coordinates,
+                ),
                 Step.Tap("tap", 120, 340),
                 Step.Scroll("scroll", selector, ScrollDirection.Backward),
                 Step.Swipe("swipe", 500, 1600, 500, 400, 350),
@@ -61,6 +80,37 @@ class WorkflowSerializationTest {
         val decoded = json.decodeFromString(Workflow.serializer(), encoded)
 
         assertEquals(workflow, decoded)
+    }
+
+    @Test
+    fun `defaults recorded click target mode from selector availability`() {
+        val control = RecordedControl(
+            packageName = "com.example.target",
+            bounds = RecordedBounds(0, 0, 20, 40),
+            clickable = true,
+            enabled = true,
+            longClickable = false,
+            scrollable = false,
+        )
+        val selector = NodeSelector("com.example.target", className = "android.widget.Button")
+
+        assertEquals(
+            RecordedClickTargetMode.Control,
+            Step.RecordedClick("control", 10, 20, selector, control).targetMode,
+        )
+        assertEquals(
+            RecordedClickTargetMode.Coordinates,
+            Step.RecordedClick("coordinates", 10, 20, control = control).targetMode,
+        )
+        assertFailsWith<IllegalArgumentException> {
+            Step.RecordedClick(
+                "invalid",
+                10,
+                20,
+                control = control,
+                targetMode = RecordedClickTargetMode.Control,
+            )
+        }
     }
 
     @Test

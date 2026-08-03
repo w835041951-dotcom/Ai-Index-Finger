@@ -5,6 +5,9 @@ import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
+import com.aiindexfinger.model.RecordedBounds
+import com.aiindexfinger.model.RecordedClickTargetMode
+import com.aiindexfinger.model.RecordedControl
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.SystemAction
@@ -435,6 +438,47 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `recorded control click does not use saved coordinates`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "recorded-control",
+            name = "Recorded control",
+            steps = listOf(recordedClick(RecordedClickTargetMode.Control)),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.clickCount)
+        assertEquals(null, driver.lastTap)
+    }
+
+    @Test
+    fun `recorded coordinate click does not use saved selector`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "recorded-coordinates",
+            name = "Recorded coordinates",
+            steps = listOf(recordedClick(RecordedClickTargetMode.Coordinates)),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(0, driver.clickCount)
+        assertEquals(120 to 340, driver.lastTap)
+    }
+
+    @Test
+    fun `failed recorded control click does not fall back to coordinates`() = runTest {
+        val driver = FakeDriver(clickResult = false)
+        val workflow = Workflow(
+            id = "recorded-control-failure",
+            name = "Recorded control failure",
+            steps = listOf(recordedClick(RecordedClickTargetMode.Control)),
+        )
+
+        assertIs<RunResult.Failed>(WorkflowExecutor(driver).run(workflow))
+        assertEquals(null, driver.lastTap)
+    }
+
+    @Test
     fun `scrolls a selected node backward`() = runTest {
         val driver = FakeDriver()
         val workflow = Workflow(
@@ -541,6 +585,24 @@ class WorkflowExecutorTest {
                 templateHeight = 12,
             ),
         ),
+    )
+
+    private fun recordedClick(targetMode: RecordedClickTargetMode) = Step.RecordedClick(
+        id = "recorded",
+        x = 120,
+        y = 340,
+        selector = selector,
+        control = RecordedControl(
+            packageName = "com.example.target",
+            viewId = "com.example.target:id/submit",
+            className = "android.widget.Button",
+            bounds = RecordedBounds(100, 300, 140, 380),
+            clickable = true,
+            enabled = true,
+            longClickable = false,
+            scrollable = false,
+        ),
+        targetMode = targetMode,
     )
 
     private class FakeDriver(

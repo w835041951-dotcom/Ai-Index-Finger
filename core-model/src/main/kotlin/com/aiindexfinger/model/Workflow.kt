@@ -20,7 +20,7 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 15
+        const val CURRENT_SCHEMA_VERSION = 16
     }
 }
 
@@ -59,6 +59,30 @@ sealed interface Step {
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step
+
+    @Serializable
+    @SerialName("recorded_click")
+    data class RecordedClick(
+        override val id: String,
+        val x: Int,
+        val y: Int,
+        val selector: NodeSelector? = null,
+        val control: RecordedControl,
+        val targetMode: RecordedClickTargetMode = if (selector != null) {
+            RecordedClickTargetMode.Control
+        } else {
+            RecordedClickTargetMode.Coordinates
+        },
+        override val timeoutMillis: Long? = null,
+        override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
+    ) : Step {
+        init {
+            require(x >= 0 && y >= 0) { "Recorded click coordinates must not be negative" }
+            require(targetMode != RecordedClickTargetMode.Control || selector != null) {
+                "Control target mode requires a node selector"
+            }
+        }
+    }
 
     @Serializable
     @SerialName("image_click")
@@ -249,6 +273,42 @@ sealed interface Step {
 enum class TextInputMethod {
     SetText,
     Paste,
+}
+
+@Serializable
+enum class RecordedClickTargetMode {
+    Control,
+    Coordinates,
+}
+
+@Serializable
+data class RecordedBounds(
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
+) {
+    init {
+        require(right > left && bottom > top) { "Recorded control bounds must have a positive size" }
+    }
+}
+
+@Serializable
+data class RecordedControl(
+    val packageName: String,
+    val viewId: String? = null,
+    val text: String? = null,
+    val contentDescription: String? = null,
+    val className: String? = null,
+    val bounds: RecordedBounds,
+    val clickable: Boolean,
+    val enabled: Boolean,
+    val longClickable: Boolean,
+    val scrollable: Boolean,
+) {
+    init {
+        require(packageName.isNotBlank()) { "Recorded control package name must not be blank" }
+    }
 }
 
 @Serializable

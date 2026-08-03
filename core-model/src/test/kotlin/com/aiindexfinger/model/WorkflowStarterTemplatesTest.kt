@@ -225,6 +225,7 @@ class WorkflowStarterTemplatesTest {
     private fun Step.structuralSignature(): String = when (this) {
         is Step.LaunchApp -> "launch:$packageName"
         is Step.Click -> "click:${selector.signature()}"
+        is Step.RecordedClick -> "recorded_click:$x:$y:${selector?.signature()}:$control:$targetMode"
         is Step.ImageClick -> "image:$packageName:$templateWidth:$templateHeight:$minimumScorePermille:$ambiguityMarginPermille"
         is Step.LongClick -> "long_click:${selector.signature()}"
         is Step.InputText -> "input:${selector.signature()}:$text:$variableName:$inputMethod"
@@ -255,6 +256,7 @@ class WorkflowStarterTemplatesTest {
 
     private fun Step.selectorOrNull(): NodeSelector? = when (this) {
         is Step.Click -> selector
+        is Step.RecordedClick -> selector
         is Step.LongClick -> selector
         is Step.InputText -> selector
         is Step.ReadNodeText -> selector
@@ -269,6 +271,7 @@ class WorkflowStarterTemplatesTest {
     private fun Step.conceptSignature(): String = when (this) {
         is Step.LaunchApp -> "launch"
         is Step.Click -> "click"
+        is Step.RecordedClick -> "recorded_click:$targetMode"
         is Step.ImageClick -> "image"
         is Step.LongClick -> "long_click"
         is Step.InputText -> "input:$inputMethod"
