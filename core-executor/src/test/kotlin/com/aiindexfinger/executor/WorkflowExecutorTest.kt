@@ -20,12 +20,119 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class WorkflowExecutorTest {
+    @Test
+    fun `step through starts paused and advances one action at a time`() = runTest {
+        val driver = FakeDriver()
+        val executor = WorkflowExecutor(driver)
+        val workflow = Workflow(
+            id = "debug",
+            name = "Debug",
+            steps = listOf(Step.Click("first", selector), Step.Click("second", selector)),
+        )
+
+        val execution = async { executor.runWithDiagnostics(workflow, stepThrough = true) }
+        runCurrent()
+        assertEquals(RunState.Paused("debug", "first"), executor.state.value)
+        assertEquals(0, driver.clickCount)
+
+        assertTrue(executor.advance())
+        runCurrent()
+        assertEquals(1, driver.clickCount)
+        assertEquals(RunState.Paused("debug", "second"), executor.state.value)
+
+        assertTrue(executor.advance())
+        assertEquals(RunResult.Completed, execution.await().result)
+        assertEquals(2, driver.clickCount)
+    }
+
+    @Test
+    fun `advance outside a paused debug session is rejected`() {
+        assertEquals(false, WorkflowExecutor(FakeDriver()).advance())
+    }
+
+    @Test
+    fun `duplicate advance cannot preauthorize the next step`() = runTest {
+        val driver = FakeDriver()
+        val executor = WorkflowExecutor(driver)
+        val workflow = Workflow(
+            id = "debug",
+            name = "Debug",
+            steps = listOf(Step.Click("first", selector), Step.Click("second", selector)),
+        )
+        val execution = async { executor.runWithDiagnostics(workflow, stepThrough = true) }
+        runCurrent()
+
+        assertTrue(executor.advance())
+        assertEquals(false, executor.advance())
+        runCurrent()
+
+        assertEquals(1, driver.clickCount)
+        assertEquals(RunState.Paused("debug", "second"), executor.state.value)
+        execution.cancelAndJoin()
+    }
+
+    @Test
+    fun `cancelling while paused performs no driver action`() = runTest {
+        val driver = FakeDriver()
+        val executor = WorkflowExecutor(driver)
+        val workflow = Workflow(
+            id = "debug",
+            name = "Debug",
+            steps = listOf(Step.Click("click", selector)),
+        )
+        val execution = async { executor.runWithDiagnostics(workflow, stepThrough = true) }
+        runCurrent()
+
+        execution.cancelAndJoin()
+
+        assertEquals(0, driver.clickCount)
+        assertEquals(RunState.Idle, executor.state.value)
+    }
+
+    @Test
+    fun `step through pauses through nested condition and repeat order`() = runTest {
+        val driver = FakeDriver()
+        val executor = WorkflowExecutor(driver)
+        val workflow = Workflow(
+            id = "nested-debug",
+            name = "Nested debug",
+            steps = listOf(
+                Step.IfElse(
+                    id = "condition",
+                    condition = Condition.Equals(Value.Literal("yes"), Value.Literal("yes")),
+                    whenTrue = listOf(
+                        Step.Repeat(
+                            id = "repeat",
+                            times = 2,
+                            steps = listOf(Step.Click("nested-click", selector)),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val execution = async { executor.runWithDiagnostics(workflow, stepThrough = true) }
+        runCurrent()
+
+        val pausedOrder = mutableListOf<String>()
+        repeat(4) {
+            pausedOrder += assertIs<RunState.Paused>(executor.state.value).stepId
+            assertTrue(executor.advance())
+            runCurrent()
+        }
+
+        assertEquals(listOf("condition", "repeat", "nested-click", "nested-click"), pausedOrder)
+        assertEquals(RunResult.Completed, execution.await().result)
+        assertEquals(2, driver.clickCount)
+    }
+
     @Test
     fun `forwards a package scoped intent action`() = runTest {
         val driver = FakeDriver()

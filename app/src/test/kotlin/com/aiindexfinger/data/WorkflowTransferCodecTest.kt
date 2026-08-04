@@ -3,6 +3,7 @@ package com.aiindexfinger.data
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.RecordedBounds
+import com.aiindexfinger.model.RecordedClickFallbackCause
 import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.RecordedControl
 import com.aiindexfinger.model.ComparisonOperator
@@ -121,6 +122,7 @@ class WorkflowTransferCodecTest {
                         scrollable = false,
                     ),
                     targetMode = RecordedClickTargetMode.Coordinates,
+                    fallbackCause = RecordedClickFallbackCause.SelectorNotUnique,
                 ),
             ),
         )

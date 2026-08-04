@@ -1,5 +1,6 @@
 package com.aiindexfinger.automation
 
+import com.aiindexfinger.model.RecordedClickFallbackCause
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -107,6 +108,7 @@ class RecordingTargetResolverTest {
 
         assertEquals(oldSource, resolved.node)
         assertNull(resolved.selector)
+        assertEquals(RecordedClickFallbackCause.HierarchyUnavailable, resolved.fallbackCause)
     }
 
     @Test
@@ -120,6 +122,7 @@ class RecordingTargetResolverTest {
 
         assertEquals(oldSource, resolved.node)
         assertNull(resolved.selector)
+        assertEquals(RecordedClickFallbackCause.HierarchyChanged, resolved.fallbackCause)
     }
 
     @Test
@@ -144,6 +147,7 @@ class RecordingTargetResolverTest {
 
         assertEquals(firstButton, resolved.node)
         assertNull(resolved.selector)
+        assertEquals(RecordedClickFallbackCause.SelectorNotUnique, resolved.fallbackCause)
     }
 
     @Test
@@ -158,6 +162,7 @@ class RecordingTargetResolverTest {
 
         assertEquals(source, resolved.node)
         assertNull(resolved.selector)
+        assertEquals(RecordedClickFallbackCause.HierarchyIncomplete, resolved.fallbackCause)
     }
 
     @Test

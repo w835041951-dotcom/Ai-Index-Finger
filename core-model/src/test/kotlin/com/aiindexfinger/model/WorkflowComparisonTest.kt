@@ -6,6 +6,35 @@ import kotlin.test.assertTrue
 
 class WorkflowComparisonTest {
     @Test
+    fun `reports recorded click fallback cause changes`() {
+        val control = RecordedControl(
+            packageName = "com.example",
+            bounds = RecordedBounds(0, 0, 20, 20),
+            clickable = true,
+            enabled = true,
+            longClickable = false,
+            scrollable = false,
+        )
+        val before = workflow(steps = listOf(Step.RecordedClick("click", 10, 10, control = control)))
+        val after = workflow(steps = listOf(
+            Step.RecordedClick(
+                "click",
+                10,
+                10,
+                control = control,
+                fallbackCause = RecordedClickFallbackCause.HierarchyUnavailable,
+            ),
+        ))
+
+        assertEquals(
+            listOf(WorkflowDifference.StepChanged(
+                rootPath(0), StepComparisonField.Configuration, "recorded_click", "recorded_click",
+            )),
+            compareWorkflows(before, after).differences,
+        )
+    }
+
+    @Test
     fun `ignores workflow and step ids`() {
         val before = workflow(
             id = "before",

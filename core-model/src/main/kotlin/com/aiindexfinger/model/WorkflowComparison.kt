@@ -151,6 +151,7 @@ private fun Step.comparisonConfiguration(): Any = when (this) {
         selector,
         control,
         targetMode,
+        fallbackCause,
         timeoutMillis,
         failurePolicy,
     )

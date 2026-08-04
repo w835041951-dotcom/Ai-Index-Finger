@@ -1,6 +1,7 @@
 package com.aiindexfinger.automation
 
 import com.aiindexfinger.model.NodeSelector
+import com.aiindexfinger.model.RecordedClickFallbackCause
 
 data class RecordingHierarchyNode(
     val node: ObservedNode,
@@ -36,6 +37,7 @@ data class RecordingIssue(
 data class ResolvedRecordingNode(
     val node: ObservedNode,
     val selector: NodeSelector?,
+    val fallbackCause: RecordedClickFallbackCause? = null,
 )
 
 enum class RecordingNodeCapability {
@@ -80,15 +82,24 @@ internal class RecordingTargetResolver(
                     it.windowId == windowId &&
                     it.eventTimeMillis <= eventTimeMillis &&
                     eventTimeMillis - it.eventTimeMillis <= snapshotTtlMillis
-            } ?: return resolveWithoutSnapshot(source)
+            } ?: return resolveWithoutSnapshot(source, RecordedClickFallbackCause.HierarchyUnavailable)
         val mutationTime = mutationBarriers[packageName to windowId]
         if (mutationTime != null && mutationTime <= eventTimeMillis && mutationTime >= snapshot.eventTimeMillis) {
-            return resolveWithoutSnapshot(source)
+            return resolveWithoutSnapshot(source, RecordedClickFallbackCause.HierarchyChanged)
         }
-        val sourceIndex = uniqueSourceIndex(snapshot, source) ?: return resolveWithoutSnapshot(source)
+        val sourceIndex = uniqueSourceIndex(snapshot, source)
+            ?: return resolveWithoutSnapshot(source, RecordedClickFallbackCause.SourceNotUnique)
         val targetIndex = capableAncestorIndex(snapshot, sourceIndex, capability) ?: sourceIndex
         val target = snapshot.nodes[targetIndex].node
-        return ResolvedRecordingNode(target, uniqueSelector(snapshot, target))
+        if (!snapshot.complete) {
+            return ResolvedRecordingNode(target, null, RecordedClickFallbackCause.HierarchyIncomplete)
+        }
+        val selector = uniqueSelector(snapshot, target)
+        return ResolvedRecordingNode(
+            node = target,
+            selector = selector,
+            fallbackCause = RecordedClickFallbackCause.SelectorNotUnique.takeIf { selector == null },
+        )
     }
 
     fun clear() {
@@ -98,8 +109,10 @@ internal class RecordingTargetResolver(
 
     internal fun snapshotCount(): Int = snapshots.size
 
-    private fun resolveWithoutSnapshot(source: ObservedNode): ResolvedRecordingNode =
-        ResolvedRecordingNode(source, null)
+    private fun resolveWithoutSnapshot(
+        source: ObservedNode,
+        fallbackCause: RecordedClickFallbackCause,
+    ): ResolvedRecordingNode = ResolvedRecordingNode(source, null, fallbackCause)
 
     private fun uniqueSourceIndex(snapshot: RecordingHierarchySnapshot, source: ObservedNode): Int? {
         val matchers = buildList<(ObservedNode) -> Boolean> {
@@ -137,7 +150,7 @@ internal class RecordingTargetResolver(
     }
 
     private fun uniqueSelector(snapshot: RecordingHierarchySnapshot, node: ObservedNode): NodeSelector? =
-        if (!snapshot.complete) null else SelectorRecommendations.candidates(node).firstOrNull { selector ->
+        SelectorRecommendations.candidates(node).firstOrNull { selector ->
             snapshot.nodes.count { selector.matches(it.node) } == 1
         }
 

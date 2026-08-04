@@ -18,8 +18,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -52,6 +55,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -121,6 +125,8 @@ import com.aiindexfinger.data.WorkflowFolder
 import com.aiindexfinger.data.WorkflowFolderSelection
 import com.aiindexfinger.data.filterWorkflows
 import com.aiindexfinger.data.SettingsWorkflowPack
+import com.aiindexfinger.data.AppPreferences
+import com.aiindexfinger.data.AppearanceMode
 import com.aiindexfinger.data.ClockWorkflowPack
 import com.aiindexfinger.data.FilesWorkflowPack
 import com.aiindexfinger.data.AiIndexFingerSelfTestPack
@@ -136,6 +142,7 @@ import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.RecordedClickTargetMode
+import com.aiindexfinger.model.RecordedClickFallbackCause
 import com.aiindexfinger.model.StepComparisonBranch
 import com.aiindexfinger.model.StepComparisonField
 import com.aiindexfinger.model.StepComparisonPath
@@ -214,6 +221,7 @@ class MainActivity : ComponentActivity() {
     private val workflowStore by lazy { WorkflowStore(this) }
     private val runHistoryStore by lazy { RunHistoryStore(this) }
     private val workflowScheduler by lazy { WorkflowScheduler(this) }
+    private val appPreferences by lazy { AppPreferences(this) }
     private val releasePreferences by lazy {
         getSharedPreferences(RELEASE_PREFERENCES_NAME, MODE_PRIVATE)
     }
@@ -227,7 +235,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         scheduledWorkflowEvents.publish(intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID))
         setContent {
-            AiIndexFingerTheme {
+            var appearanceMode by remember { mutableStateOf(appPreferences.appearanceMode()) }
+            AiIndexFingerTheme(appearanceMode) {
                 val initialState by produceState<InitialAppState?>(null) {
                     value = withContext(Dispatchers.IO) { loadInitialState() }
                 }
@@ -270,6 +279,11 @@ class MainActivity : ComponentActivity() {
                         onCancelSchedule = workflowScheduler::cancel,
                         onReloadSchedules = workflowScheduler::load,
                         onOpenAccessibilitySettings = ::openAccessibilitySettings,
+                        appearanceMode = appearanceMode,
+                        onAppearanceModeChanged = { mode ->
+                            appearanceMode = mode
+                            appPreferences.setAppearanceMode(mode)
+                        },
                         accessibilityDisclosureAcknowledged = releasePreferences.getBoolean(
                             ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED,
                             false,
@@ -368,6 +382,8 @@ private fun WorkflowApp(
     onCancelSchedule: (String) -> List<WorkflowSchedule>,
     onReloadSchedules: (Set<String>) -> List<WorkflowSchedule>,
     onOpenAccessibilitySettings: () -> Unit,
+    appearanceMode: AppearanceMode,
+    onAppearanceModeChanged: (AppearanceMode) -> Unit,
     accessibilityDisclosureAcknowledged: Boolean,
     onAccessibilityDisclosureAcknowledged: () -> Unit,
 ) {
@@ -384,6 +400,7 @@ private fun WorkflowApp(
     var editingWorkflow by remember { mutableStateOf<Workflow?>(null) }
     var initialEditingStepPath by remember { mutableStateOf<StepPath?>(null) }
     var showRunHistory by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var workflowComparison by remember { mutableStateOf<Pair<Workflow, Workflow>?>(null) }
         var versionHistory by remember { mutableStateOf<Pair<Workflow, List<WorkflowVersion>>?>(null) }
     var runMessage by remember { mutableStateOf(initialRunMessage) }
@@ -598,6 +615,20 @@ private fun WorkflowApp(
                 }
             },
         )
+    } else if (showSettings) {
+        SettingsScreen(
+            appearanceMode = appearanceMode,
+            onAppearanceModeChanged = onAppearanceModeChanged,
+            onOpenAccessibilitySettings = requestAccessibilitySetup,
+            onReviewAccessibilityDisclosure = {
+                if (accessibilityDisclosureGate.reviewDisclosure() ==
+                    AccessibilityDisclosureAction.ShowDisclosure
+                ) {
+                    showAccessibilityDisclosure = true
+                }
+            },
+            onBack = { showSettings = false },
+        )
     } else if (showRunHistory) {
         RunHistoryScreen(
             records = runRecords,
@@ -805,6 +836,7 @@ private fun WorkflowApp(
                 runHistoryCorrupt = false
             },
             onViewRunHistory = { showRunHistory = true },
+            onOpenSettings = { showSettings = true },
             runningWorkflowId = runningWorkflowId,
             runMessage = runMessage,
             onRun = { workflow ->
@@ -819,6 +851,23 @@ private fun WorkflowApp(
                     val started = service.startWorkflow(workflow)
                     runMessage = if (started) {
                         context.getString(R.string.running_workflow, workflow.name)
+                    } else {
+                        context.getString(R.string.another_workflow_running)
+                    }
+                }
+            },
+            onDebug = { workflow ->
+                val service = AutomationAccessibilityService.instance
+                val issue = workflow.readinessIssues().firstOrNull()
+                if (issue != null) {
+                    runMessage = context.getString(R.string.cannot_run, issue.localizedMessage(context))
+                } else if (service == null) {
+                    runMessage = context.getString(R.string.enable_automation_before_run)
+                    requestAccessibilitySetup()
+                } else {
+                    val started = service.startWorkflow(workflow, debug = true)
+                    runMessage = if (started) {
+                        context.getString(R.string.debugging_workflow, workflow.name)
                     } else {
                         context.getString(R.string.another_workflow_running)
                     }
@@ -951,9 +1000,11 @@ internal fun WorkflowHome(
     onCancelSchedule: (Workflow) -> Unit,
     onClearRunHistory: () -> Unit,
     onViewRunHistory: () -> Unit,
+    onOpenSettings: () -> Unit,
     runningWorkflowId: String?,
     runMessage: String?,
     onRun: (Workflow) -> Unit,
+    onDebug: (Workflow) -> Unit,
     onPreflight: (Workflow) -> Unit,
     onStop: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
@@ -961,6 +1012,7 @@ internal fun WorkflowHome(
 ) {
     val serviceConnected by AutomationAccessibilityService.connected.collectAsStateWithLifecycle()
     val currentStepId by AutomationAccessibilityService.currentStepId.collectAsStateWithLifecycle()
+    val debugPaused by AutomationAccessibilityService.debugPaused.collectAsStateWithLifecycle()
     val workflowStartedAtMillis by AutomationAccessibilityService.workflowStartedAtMillis
         .collectAsStateWithLifecycle()
     val observedNodes by AutomationAccessibilityService.observedNodes.collectAsStateWithLifecycle()
@@ -1027,7 +1079,17 @@ internal fun WorkflowHome(
                 .padding(horizontal = 20.dp),
         ) {
             Spacer(Modifier.height(24.dp))
-            Text("AI Index Finger", fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "AI Index Finger",
+                    modifier = Modifier.weight(1f),
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                TextButton(onClick = onOpenSettings) {
+                    Text(stringResource(R.string.settings_title))
+                }
+            }
             Text(stringResource(R.string.workflows), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp)
             Spacer(Modifier.height(24.dp))
             PermissionStatus(
@@ -1043,6 +1105,8 @@ internal fun WorkflowHome(
                     workflowName = currentWorkflow?.name ?: stringResource(R.string.workflow),
                     stepName = currentStep?.title() ?: currentStepId,
                     elapsedMillis = elapsedMillis,
+                    debugPaused = debugPaused,
+                    onNext = { AutomationAccessibilityService.instance?.advanceWorkflow() },
                     onStop = onStop,
                 )
             }
@@ -1156,6 +1220,7 @@ internal fun WorkflowHome(
                     onSchedule = { workflowToSchedule = workflow },
                     onCancelSchedule = { onCancelSchedule(workflow) },
                     onRun = { onRun(workflow) },
+                    onDebug = { onDebug(workflow) },
                     onPreflight = { onPreflight(workflow) },
                     onStop = onStop,
                 )
@@ -1814,6 +1879,7 @@ private fun WorkflowEditor(
                                 y = recordedAction.target.y,
                                 selector = recordedAction.target.selector,
                                 control = recordedAction.target.control,
+                                fallbackCause = recordedAction.target.fallbackCause,
                             )
                             is com.aiindexfinger.automation.RecordedAction.ExistingStep -> recordedAction.step
                         }
@@ -2051,6 +2117,11 @@ private fun WorkflowEditor(
                 },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.monitor_elements_overlay)) }
+            OutlinedButton(
+                enabled = AutomationAccessibilityService.instance != null,
+                onClick = { AutomationAccessibilityService.instance?.startElementInspector() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.inspect_element_overlay)) }
             overlayStatus?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
             }
@@ -2624,18 +2695,18 @@ private fun WorkflowEditor(
         } else {
             AlertDialog(
                 onDismissRequest = { stepToDeletePath = null },
-                title = { Text("删除步骤？") },
-                text = { Text("将从此工作流中删除第 ${path.index + 1} 步：${step.title()}。") },
+                title = { Text(stringResource(R.string.delete_step_title)) },
+                text = { Text(stringResource(R.string.delete_step_message, path.index + 1, step.title())) },
                 confirmButton = {
                     TextButton(
                         onClick = {
                             steps = steps.removeStep(path)
                             stepToDeletePath = null
                         },
-                    ) { Text("删除") }
+                    ) { Text(stringResource(R.string.delete)) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { stepToDeletePath = null }) { Text("取消") }
+                    TextButton(onClick = { stepToDeletePath = null }) { Text(stringResource(R.string.cancel)) }
                 },
             )
         }
@@ -2643,13 +2714,15 @@ private fun WorkflowEditor(
     if (confirmDiscardChanges) {
         AlertDialog(
             onDismissRequest = { confirmDiscardChanges = false },
-            title = { Text("放弃更改？") },
-            text = { Text("未保存的工作流更改将会丢失。") },
+            title = { Text(stringResource(R.string.discard_changes_title)) },
+            text = { Text(stringResource(R.string.discard_changes_message)) },
             confirmButton = {
-                TextButton(onClick = onBack) { Text("放弃") }
+                TextButton(onClick = onBack) { Text(stringResource(R.string.discard)) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDiscardChanges = false }) { Text("继续编辑") }
+                TextButton(onClick = { confirmDiscardChanges = false }) {
+                    Text(stringResource(R.string.continue_editing))
+                }
             },
         )
     }
@@ -2663,7 +2736,7 @@ private fun GlobalActionSettingsDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("全局操作") },
+        title = { Text(stringResource(R.string.global_action)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SystemAction.entries.forEach { action ->
@@ -2681,7 +2754,7 @@ private fun GlobalActionSettingsDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -2695,15 +2768,15 @@ private fun RepeatSettingsDialog(
     val count = countText.toIntOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("重复设置") },
+        title = { Text(stringResource(R.string.repeat_settings)) },
         text = { NodeField(countText, { countText = it }, "重复次数（1-${Step.Repeat.MAX_REPEAT_COUNT}）", true) },
         confirmButton = {
             TextButton(
                 enabled = count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT,
                 onClick = { onSave(requireNotNull(count)) },
-            ) { Text("保存") }
+            ) { Text(stringResource(R.string.save)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -2720,7 +2793,7 @@ private fun ConditionSettingsDialog(
     var operator by remember(initialOperator) { mutableStateOf(initialOperator) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("条件设置") },
+        title = { Text(stringResource(R.string.condition_settings)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 NodeField(variableName, { variableName = it }, "变量名", true)
@@ -2732,9 +2805,9 @@ private fun ConditionSettingsDialog(
             TextButton(
                 enabled = variableName.isNotBlank(),
                 onClick = { onSave(variableName.trim(), expectedValue, operator) },
-            ) { Text("保存") }
+            ) { Text(stringResource(R.string.save)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -2755,7 +2828,7 @@ private fun FailurePolicyDialog(
     val delay = retryDelay.toLongOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("步骤设置") },
+        title = { Text(stringResource(R.string.step_settings_title)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -2766,20 +2839,20 @@ private fun FailurePolicyDialog(
                     { timeoutText = it },
                     "超时毫秒数（留空使用 $defaultTimeoutMillis）",
                 )
-                Text("失败时", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.on_failure), fontWeight = FontWeight.SemiBold)
                 Button(
                     enabled = timeoutValid,
                     onClick = { onSelect(FailurePolicy.Stop, timeoutMillis) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("停止工作流")
+                    Text(stringResource(R.string.stop_workflow))
                 }
                 OutlinedButton(
                     enabled = timeoutValid,
                     onClick = { onSelect(FailurePolicy.Continue, timeoutMillis) },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("继续下一步") }
-                Text("重试", fontWeight = FontWeight.SemiBold)
+                ) { Text(stringResource(R.string.continue_next_step)) }
+                Text(stringResource(R.string.retry), fontWeight = FontWeight.SemiBold)
                 NodeField(retryAttempts, { retryAttempts = it }, "重试次数（1-10）", true)
                 NodeField(retryDelay, { retryDelay = it }, "重试间隔（毫秒）", true)
                 OutlinedButton(
@@ -2791,11 +2864,11 @@ private fun FailurePolicyDialog(
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("使用重试策略") }
+                ) { Text(stringResource(R.string.use_retry_policy)) }
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -2819,7 +2892,7 @@ private fun InputTextDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("输入文本") },
+        title = { Text(stringResource(R.string.input_text)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -2829,7 +2902,7 @@ private fun InputTextDialog(
                     onSelectorSelected = { selector -> selectedSelector = selector },
                 )
                 HorizontalDivider()
-                Text("选择最近观察到的文本框", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.select_recent_text_field), fontWeight = FontWeight.SemiBold)
                 if (observedNodes.isEmpty()) {
                     Text(
                         "打开目标应用并进入输入界面，然后返回此处。",
@@ -2874,7 +2947,7 @@ private fun InputTextDialog(
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        label = { Text("要输入的文本") },
+                        label = { Text(stringResource(R.string.text_to_input)) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -2917,7 +2990,7 @@ private fun InputTextDialog(
             ) { Text(confirmLabel) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         },
     )
 }
@@ -3069,7 +3142,8 @@ private fun RecordedClickDialog(
                 }
                 if (initialStep.selector == null) {
                     Text(
-                        stringResource(R.string.recorded_click_control_unavailable),
+                        stringResource(initialStep.fallbackCause?.messageResourceId()
+                            ?: R.string.recorded_click_control_unavailable),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                     )
@@ -3122,6 +3196,16 @@ private fun RecordedClickDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+private fun RecordedClickFallbackCause.messageResourceId(): Int = when (this) {
+    RecordedClickFallbackCause.SourceUnavailable -> R.string.recorded_click_fallback_source_unavailable
+    RecordedClickFallbackCause.SourceInvalid -> R.string.recorded_click_fallback_source_invalid
+    RecordedClickFallbackCause.HierarchyUnavailable -> R.string.recorded_click_fallback_hierarchy_unavailable
+    RecordedClickFallbackCause.HierarchyChanged -> R.string.recorded_click_fallback_hierarchy_changed
+    RecordedClickFallbackCause.HierarchyIncomplete -> R.string.recorded_click_fallback_hierarchy_incomplete
+    RecordedClickFallbackCause.SourceNotUnique -> R.string.recorded_click_fallback_source_not_unique
+    RecordedClickFallbackCause.SelectorNotUnique -> R.string.recorded_click_fallback_selector_not_unique
 }
 
 private enum class ScreenshotCoordinateMode { Tap, Swipe }
@@ -3288,7 +3372,7 @@ private fun ScrollStepDialog(
     val scrollableNodes = observedNodes.filter { it.scrollable }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("滚动元素") },
+        title = { Text(stringResource(R.string.scroll_element)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -3340,7 +3424,7 @@ private fun ScrollStepDialog(
                 onClick = { onAdd(requireNotNull(selectedSelector), direction) },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3365,7 +3449,7 @@ private fun NumberDialog(
                 onClick = { onAdd(requireNotNull(number)) },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3385,13 +3469,13 @@ private fun WaitNodeDialog(
     val timeoutValue = timeout.toLongOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("等待元素") },
+        title = { Text(stringResource(R.string.wait_for_element)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("选择最近观察到的元素", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.select_recent_element), fontWeight = FontWeight.SemiBold)
                 if (observedNodes.isEmpty()) {
                     Text(
                         "打开一次目标应用，然后返回此处。",
@@ -3438,7 +3522,7 @@ private fun WaitNodeDialog(
                 },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3463,7 +3547,7 @@ private fun SetVariableDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("设置变量") },
+        title = { Text(stringResource(R.string.set_variable)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 NodeField(variableName, { variableName = it }, "变量名", true)
@@ -3495,7 +3579,7 @@ private fun SetVariableDialog(
                 },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3519,7 +3603,7 @@ private fun WrapStepDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("选择要包装的步骤", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.select_step_to_wrap), fontWeight = FontWeight.SemiBold)
                 steps.forEachIndexed { index, step ->
                     OutlinedButton(
                         onClick = { selectedIndex = index },
@@ -3533,9 +3617,9 @@ private fun WrapStepDialog(
             TextButton(
                 enabled = selectedIndex != null && count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT.toLong(),
                 onClick = { onAdd(requireNotNull(selectedIndex), requireNotNull(count)) },
-            ) { Text("包装") }
+            ) { Text(stringResource(R.string.wrap_step)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3551,7 +3635,7 @@ private fun ConditionDialog(
     var operator by remember { mutableStateOf(ComparisonOperator.Equals) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("如果变量匹配") },
+        title = { Text(stringResource(R.string.if_variable_matches)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -3560,7 +3644,7 @@ private fun ConditionDialog(
                 NodeField(variableName, { variableName = it }, "变量名", true)
                 ComparisonOperatorSelector(operator) { operator = it }
                 NodeField(expectedValue, { expectedValue = it }, "预期值")
-                Text("条件为真时运行此步骤", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.run_step_when_true), fontWeight = FontWeight.SemiBold)
                 steps.forEachIndexed { index, step ->
                     OutlinedButton(
                         onClick = { selectedIndex = index },
@@ -3575,9 +3659,9 @@ private fun ConditionDialog(
                 onClick = {
                     onAdd(requireNotNull(selectedIndex), variableName.trim(), expectedValue, operator)
                 },
-            ) { Text("包装") }
+            ) { Text(stringResource(R.string.wrap_step)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3597,40 +3681,45 @@ private fun ComparisonOperatorSelector(
     }
 }
 
-private fun ComparisonOperator.displayName(): String = when (this) {
-    ComparisonOperator.Equals -> "等于"
-    ComparisonOperator.NotEquals -> "不等于"
-    ComparisonOperator.Contains -> "包含"
-    ComparisonOperator.NotContains -> "不包含"
-}
+@Composable
+private fun ComparisonOperator.displayName(): String = stringResource(when (this) {
+    ComparisonOperator.Equals -> R.string.comparison_equals
+    ComparisonOperator.NotEquals -> R.string.comparison_not_equals
+    ComparisonOperator.Contains -> R.string.comparison_contains
+    ComparisonOperator.NotContains -> R.string.comparison_not_contains
+})
 
-private fun SystemAction.displayName(): String = when (this) {
-    SystemAction.Back -> "返回"
-    SystemAction.Home -> "主屏幕"
-    SystemAction.Recents -> "最近任务"
-}
+@Composable
+private fun SystemAction.displayName(): String = stringResource(when (this) {
+    SystemAction.Back -> R.string.system_action_back
+    SystemAction.Home -> R.string.system_action_home
+    SystemAction.Recents -> R.string.system_action_recents
+})
 
-private fun WorkflowState.displayName(): String = when (this) {
-    WorkflowState.Draft -> "草稿"
-    WorkflowState.Ready -> "就绪"
-}
+@Composable
+private fun WorkflowState.displayName(): String = stringResource(when (this) {
+    WorkflowState.Draft -> R.string.workflow_state_draft
+    WorkflowState.Ready -> R.string.workflow_state_ready
+})
 
-private fun NotificationPreflightStatus.displayName(): String = when (this) {
-    NotificationPreflightStatus.Granted -> "已授予"
-    NotificationPreflightStatus.Denied -> "未授予"
-    NotificationPreflightStatus.NotRequired -> "无需授权"
-}
+@Composable
+private fun NotificationPreflightStatus.displayName(): String = stringResource(when (this) {
+    NotificationPreflightStatus.Granted -> R.string.notification_status_granted
+    NotificationPreflightStatus.Denied -> R.string.notification_status_denied
+    NotificationPreflightStatus.NotRequired -> R.string.notification_status_not_required
+})
 
-private fun com.aiindexfinger.model.SelectorRole.displayName(): String = when (this) {
-    com.aiindexfinger.model.SelectorRole.Click -> "点击"
-    com.aiindexfinger.model.SelectorRole.RecordedClick -> "录制点击"
-    com.aiindexfinger.model.SelectorRole.LongClick -> "长按"
-    com.aiindexfinger.model.SelectorRole.InputText -> "输入文本"
-    com.aiindexfinger.model.SelectorRole.ReadNodeText -> "读取元素属性"
-    com.aiindexfinger.model.SelectorRole.Scroll -> "滚动"
-    com.aiindexfinger.model.SelectorRole.WaitForNode -> "等待元素"
-    com.aiindexfinger.model.SelectorRole.NodeCondition -> "元素条件"
-}
+@Composable
+private fun com.aiindexfinger.model.SelectorRole.displayName(): String = stringResource(when (this) {
+    com.aiindexfinger.model.SelectorRole.Click -> R.string.selector_role_click
+    com.aiindexfinger.model.SelectorRole.RecordedClick -> R.string.selector_role_recorded_click
+    com.aiindexfinger.model.SelectorRole.LongClick -> R.string.selector_role_long_click
+    com.aiindexfinger.model.SelectorRole.InputText -> R.string.selector_role_input_text
+    com.aiindexfinger.model.SelectorRole.ReadNodeText -> R.string.selector_role_read_node_text
+    com.aiindexfinger.model.SelectorRole.Scroll -> R.string.selector_role_scroll
+    com.aiindexfinger.model.SelectorRole.WaitForNode -> R.string.selector_role_wait_for_node
+    com.aiindexfinger.model.SelectorRole.NodeCondition -> R.string.selector_role_node_condition
+})
 
 @Composable
 private fun RunStatus.localizedName(): String = stringResource(
@@ -3654,13 +3743,13 @@ private fun NodeConditionDialog(
     var selectedStepIndex by remember { mutableStateOf<Int?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("如果元素存在") },
+        title = { Text(stringResource(R.string.if_element_exists)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("选择元素", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.select_element), fontWeight = FontWeight.SemiBold)
                 observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
                     OutlinedButton(
                         onClick = { selectedSelector = node.toSelector() },
@@ -3675,7 +3764,7 @@ private fun NodeConditionDialog(
                 }
                 SelectorMatchModeControls(selectedSelector) { selectedSelector = it }
                 steps?.let { availableSteps ->
-                    Text("元素存在时运行此步骤", fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.run_step_when_element_exists), fontWeight = FontWeight.SemiBold)
                     availableSteps.forEachIndexed { index, step ->
                         OutlinedButton(
                             onClick = { selectedStepIndex = index },
@@ -3691,7 +3780,7 @@ private fun NodeConditionDialog(
                 onClick = { onSave(selectedStepIndex, requireNotNull(selectedSelector)) },
             ) { Text(if (steps == null) "保存" else "包装") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3709,14 +3798,14 @@ private fun ReadNodeTextDialog(
     var attribute by remember(initialAttribute) { mutableStateOf(initialAttribute) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("读取元素属性") },
+        title = { Text(stringResource(R.string.read_element_attribute)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 NodeField(variableName, { variableName = it }, "保存到变量", true)
-                Text("属性", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.attribute), fontWeight = FontWeight.SemiBold)
                 NodeAttribute.entries.forEach { option ->
                     Row(
                         modifier = Modifier
@@ -3728,7 +3817,7 @@ private fun ReadNodeTextDialog(
                         Text(option.displayName())
                     }
                 }
-                Text("选择元素", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.select_element), fontWeight = FontWeight.SemiBold)
                 observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
                     OutlinedButton(
                         onClick = { selectedSelector = node.toSelector() },
@@ -3748,9 +3837,9 @@ private fun ReadNodeTextDialog(
             TextButton(
                 enabled = selectedSelector != null && variableName.isNotBlank(),
                 onClick = { onSave(requireNotNull(selectedSelector), variableName.trim(), attribute) },
-            ) { Text("保存") }
+            ) { Text(stringResource(R.string.save)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -3764,7 +3853,7 @@ private fun SelectorMatchModeControls(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("文本包含", modifier = Modifier.weight(1f))
+            Text(stringResource(R.string.text_contains), modifier = Modifier.weight(1f))
             Switch(
                 checked = selector.textMatchMode == TextMatchMode.Contains,
                 onCheckedChange = { contains ->
@@ -3782,7 +3871,7 @@ private fun SelectorMatchModeControls(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("描述包含", modifier = Modifier.weight(1f))
+            Text(stringResource(R.string.description_contains), modifier = Modifier.weight(1f))
             Switch(
                 checked = selector.contentDescriptionMatchMode == TextMatchMode.Contains,
                 onCheckedChange = { contains ->
@@ -3812,7 +3901,7 @@ private fun MatchIndexControl(matchIndex: Int, onChange: (Int) -> Unit) {
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("第 ${matchIndex + 1} 个匹配项", modifier = Modifier.weight(1f))
+        Text(stringResource(R.string.match_index, matchIndex + 1), modifier = Modifier.weight(1f))
         TextButton(onClick = { onChange(matchIndex - 1) }, enabled = matchIndex > 0) {
             Text("-")
         }
@@ -3834,13 +3923,14 @@ private fun ObservedNode.toSelector() = NodeSelector(
 private fun ObservedNode.displayName(): String =
     text ?: contentDescription ?: viewId ?: className.orEmpty()
 
-private fun NodeAttribute.displayName(): String = when (this) {
-    NodeAttribute.TextOrDescription -> "文本，无文本时读取描述"
-    NodeAttribute.Text -> "文本"
-    NodeAttribute.ContentDescription -> "内容描述"
-    NodeAttribute.ViewId -> "资源 ID"
-    NodeAttribute.ClassName -> "控件类型"
-}
+@Composable
+private fun NodeAttribute.displayName(): String = stringResource(when (this) {
+    NodeAttribute.TextOrDescription -> R.string.node_attribute_text_or_description
+    NodeAttribute.Text -> R.string.node_attribute_text
+    NodeAttribute.ContentDescription -> R.string.node_attribute_content_description
+    NodeAttribute.ViewId -> R.string.node_attribute_view_id
+    NodeAttribute.ClassName -> R.string.node_attribute_class_name
+})
 
 private fun <T> MutableList<T>.move(fromIndex: Int, toIndex: Int) {
     val item = removeAt(fromIndex)
@@ -4021,7 +4111,7 @@ private fun ClickStepDialog(
                     onSelectionError = { matchResult = it },
                 )
                 HorizontalDivider()
-                Text("最近观察到的元素", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.recent_observed_elements), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 if (observedNodes.isEmpty()) {
                     Text(
                         "打开一次目标应用，然后返回此处。可访问的元素会显示在这里。",
@@ -4067,7 +4157,7 @@ private fun ClickStepDialog(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("元素属性", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.element_attributes), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 NodeField(packageName, { packageName = it }, "包名", true)
                 NodeField(viewId, { viewId = it }, "资源 ID")
                 NodeField(text, { text = it }, "文本")
@@ -4075,7 +4165,7 @@ private fun ClickStepDialog(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("文本包含", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.text_contains), modifier = Modifier.weight(1f))
                     Switch(
                         checked = textContains,
                         enabled = text.isNotBlank(),
@@ -4087,7 +4177,7 @@ private fun ClickStepDialog(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("描述包含", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.description_contains), modifier = Modifier.weight(1f))
                     Switch(
                         checked = descriptionContains,
                         enabled = description.isNotBlank(),
@@ -4121,7 +4211,7 @@ private fun ClickStepDialog(
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("测试选择器") }
+                ) { Text(stringResource(R.string.test_selector)) }
                 matchResult?.let { result ->
                     Text(
                         result,
@@ -4153,7 +4243,7 @@ private fun ClickStepDialog(
             ) { Text(confirmLabel) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         },
     )
 }
@@ -4320,7 +4410,7 @@ private fun ImageClickStepDialog(
                 },
             ) { Text(confirmLabel) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -4559,38 +4649,39 @@ private fun StepRow(
         }
         Column {
             if (onOpenRepeat != null) {
-                TextButton(onClick = onOpenRepeat) { Text("打开步骤") }
+                TextButton(onClick = onOpenRepeat) { Text(stringResource(R.string.open_steps)) }
             }
             if (onOpenIfTrue != null || onOpenIfFalse != null) {
                 Row {
                     onOpenIfTrue?.let { open ->
-                        TextButton(onClick = open) { Text("为真") }
+                        TextButton(onClick = open) { Text(stringResource(R.string.when_true)) }
                     }
                     onOpenIfFalse?.let { open ->
-                        TextButton(onClick = open) { Text("为假") }
+                        TextButton(onClick = open) { Text(stringResource(R.string.when_false)) }
                     }
                 }
             }
             Row {
-                TextButton(onClick = onMoveUp, enabled = canMoveUp) { Text("上移") }
-                TextButton(onClick = onMoveDown, enabled = canMoveDown) { Text("下移") }
+                TextButton(onClick = onMoveUp, enabled = canMoveUp) { Text(stringResource(R.string.move_up)) }
+                TextButton(onClick = onMoveDown, enabled = canMoveDown) { Text(stringResource(R.string.move_down)) }
             }
             Row {
-                TextButton(onClick = onEdit, enabled = canEdit) { Text("编辑") }
-                TextButton(onClick = onEditPolicy) { Text("设置") }
+                TextButton(onClick = onEdit, enabled = canEdit) { Text(stringResource(R.string.edit)) }
+                TextButton(onClick = onEditPolicy) { Text(stringResource(R.string.settings_title)) }
             }
             Row {
-                TextButton(onClick = onDuplicate) { Text("复制") }
-                TextButton(onClick = onDelete) { Text("删除") }
+                TextButton(onClick = onDuplicate) { Text(stringResource(R.string.duplicate)) }
+                TextButton(onClick = onDelete) { Text(stringResource(R.string.delete)) }
             }
         }
     }
 }
 
+@Composable
 private fun FailurePolicy.label(): String = when (this) {
-    FailurePolicy.Stop -> "停止"
-    FailurePolicy.Continue -> "继续"
-    is FailurePolicy.Retry -> "重试 $attempts 次"
+    FailurePolicy.Stop -> stringResource(R.string.failure_policy_stop)
+    FailurePolicy.Continue -> stringResource(R.string.failure_policy_continue)
+    is FailurePolicy.Retry -> stringResource(R.string.failure_policy_retry, attempts)
 }
 
 private fun Step.isActionEditable(): Boolean = when (this) {
@@ -4607,7 +4698,7 @@ private fun Step.isActionEditable(): Boolean = when (this) {
 
 @Composable
 private fun Step.title(): String = when (this) {
-    is Step.Click -> "点击元素"
+    is Step.Click -> stringResource(R.string.step_click_element)
     is Step.RecordedClick -> stringResource(
         if (targetMode == RecordedClickTargetMode.Control) {
             R.string.recorded_click_step_control
@@ -4619,25 +4710,26 @@ private fun Step.title(): String = when (this) {
         y,
     )
     is Step.ImageClick -> stringResource(R.string.image_click_step_title, templateWidth, templateHeight)
-    is Step.Delay -> "等待 $durationMillis 毫秒"
+    is Step.Delay -> stringResource(R.string.step_delay, durationMillis)
     is Step.GlobalAction -> action.displayName()
     is Step.IfElse -> when (val current = condition) {
-        is Condition.Equals -> "如果变量${current.operator.displayName()}"
-        is Condition.NodeExists -> "如果元素存在"
+        is Condition.Equals -> stringResource(R.string.step_if_variable, current.operator.displayName())
+        is Condition.NodeExists -> stringResource(R.string.if_element_exists)
     }
     is Step.InputText -> {
-        val source = variableName?.let { "变量 $it" } ?: "文本"
-        if (inputMethod == TextInputMethod.Paste) "粘贴$source" else "输入$source"
+        val source = variableName?.let { stringResource(R.string.variable_value, it) }
+            ?: stringResource(R.string.literal_text)
+        stringResource(if (inputMethod == TextInputMethod.Paste) R.string.step_paste else R.string.step_input, source)
     }
-    is Step.Repeat -> "重复 $times 次"
-    is Step.Scroll -> if (direction == ScrollDirection.Forward) "向后滚动" else "向前滚动"
-    is Step.LaunchApp -> "启动 $packageName"
-    is Step.LongClick -> "长按元素"
-    is Step.ReadNodeText -> "读取${attribute.displayName()}到 $variableName"
-    is Step.SetVariable -> "设置变量 $name"
-    is Step.Swipe -> "从 ($startX, $startY) 滑动到 ($endX, $endY)"
-    is Step.Tap -> "点击 ($x, $y)"
-    is Step.WaitForNode -> if (mustExist) "等待元素出现" else "等待元素消失"
+    is Step.Repeat -> stringResource(R.string.step_repeat, times)
+    is Step.Scroll -> stringResource(if (direction == ScrollDirection.Forward) R.string.scroll_backward else R.string.scroll_forward)
+    is Step.LaunchApp -> stringResource(R.string.step_launch_app, packageName)
+    is Step.LongClick -> stringResource(R.string.long_click_element)
+    is Step.ReadNodeText -> stringResource(R.string.step_read_attribute, attribute.displayName(), variableName)
+    is Step.SetVariable -> stringResource(R.string.step_set_variable, name)
+    is Step.Swipe -> stringResource(R.string.step_swipe, startX, startY, endX, endY)
+    is Step.Tap -> stringResource(R.string.step_tap, x, y)
+    is Step.WaitForNode -> stringResource(if (mustExist) R.string.wait_element_appear else R.string.wait_element_disappear)
 }
 
 private fun List<Step>.findById(stepId: String): Step? {
@@ -4661,6 +4753,8 @@ private fun RunningWorkflowStatus(
     workflowName: String,
     stepName: String?,
     elapsedMillis: Long,
+    debugPaused: Boolean,
+    onNext: () -> Unit,
     onStop: () -> Unit,
 ) {
     Surface(
@@ -4673,22 +4767,26 @@ private fun RunningWorkflowStatus(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Column(Modifier.weight(1f)) {
-                Text("正在运行 $workflowName", fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.running_workflow, workflowName), fontWeight = FontWeight.SemiBold)
                 Text(
-                    stepName?.let { "当前步骤：$it" } ?: "正在准备第一个步骤",
+                    stepName?.let { stringResource(R.string.running_current_step, it) }
+                        ?: stringResource(R.string.running_preparing_first_step),
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     fontSize = 13.sp,
                 )
                 Text(
-                    "已用时 ${formatElapsed(elapsedMillis)}",
+                    stringResource(R.string.running_elapsed, formatElapsed(elapsedMillis)),
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     fontSize = 13.sp,
                 )
             }
+            if (debugPaused) {
+                Button(onClick = onNext) { Text(stringResource(R.string.debug_next_step)) }
+            }
             Button(
                 onClick = onStop,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-            ) { Text("停止") }
+            ) { Text(stringResource(R.string.stop)) }
         }
     }
 }
@@ -4707,31 +4805,28 @@ private fun AccessibilityDisclosureDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDecline,
-        title = { Text("允许自动化访问？") },
+        title = { Text(stringResource(R.string.accessibility_disclosure_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    "启用后，AI Index Finger 会读取屏幕上可见的文本、描述、视图标识和应用名称，" +
-                        "以便你检查元素并运行自己创建的工作流。",
+                    stringResource(R.string.accessibility_disclosure_observation),
                 )
                 Text(
                     stringResource(R.string.accessibility_disclosure_screenshot),
                 )
                 Text(
-                    "运行工作流时，应用可以点击、滑动、输入文本、使用系统导航，" +
-                        "还可临时替换剪贴板内容进行粘贴；若剪贴板未再次变化，之后会恢复原内容。",
+                    stringResource(R.string.accessibility_disclosure_actions),
                 )
                 Text(
-                    "观察到的界面数据和运行历史仅保存在此设备上。应用没有网络权限，" +
-                        "不会向外发送这些数据。你可以随时在 Android 设置中关闭此服务。",
+                    stringResource(R.string.accessibility_disclosure_privacy),
                 )
             }
         },
         confirmButton = {
-            TextButton(onClick = onAccept) { Text("继续前往设置") }
+            TextButton(onClick = onAccept) { Text(stringResource(R.string.continue_to_settings)) }
         },
         dismissButton = {
-            TextButton(onClick = onDecline) { Text("暂不") }
+            TextButton(onClick = onDecline) { Text(stringResource(R.string.not_now)) }
         },
     )
 }
@@ -4772,9 +4867,9 @@ private fun PermissionStatus(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.secondary,
                     ),
-                ) { Text("设置") }
+                ) { Text(stringResource(R.string.settings_title)) }
             }
-            TextButton(onClick = onReviewDisclosure) { Text("详情") }
+            TextButton(onClick = onReviewDisclosure) { Text(stringResource(R.string.details)) }
         }
     }
 }
@@ -4797,6 +4892,7 @@ private fun WorkflowRow(
     onSchedule: () -> Unit,
     onCancelSchedule: () -> Unit,
     onRun: () -> Unit,
+    onDebug: () -> Unit,
     onPreflight: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -4827,7 +4923,10 @@ private fun WorkflowRow(
         }
         Column(horizontalAlignment = Alignment.End) {
             Row {
-                TextButton(onClick = onEdit, enabled = !isRunning) { Text("编辑") }
+                TextButton(onClick = onEdit, enabled = !isRunning) { Text(stringResource(R.string.edit)) }
+                TextButton(onClick = onDebug, enabled = !isRunning && isReady) {
+                    Text(stringResource(R.string.debug_workflow))
+                }
                 Button(
                     onClick = if (isRunning) onStop else onRun,
                     enabled = isRunning || isReady,
@@ -4836,8 +4935,10 @@ private fun WorkflowRow(
                 }
             }
             Row {
-                TextButton(onClick = onExport, enabled = !isRunning) { Text("导出") }
-                TextButton(onClick = onDuplicate, enabled = !isRunning) { Text("复制") }
+                TextButton(onClick = onExport, enabled = !isRunning) { Text(stringResource(R.string.export)) }
+                TextButton(onClick = onDuplicate, enabled = !isRunning) {
+                    Text(stringResource(R.string.duplicate))
+                }
                 TextButton(
                     onClick = onMove,
                     enabled = !isRunning,
@@ -4845,7 +4946,7 @@ private fun WorkflowRow(
                 ) {
                     Text(stringResource(R.string.move_to_folder))
                 }
-                TextButton(onClick = onDelete, enabled = !isRunning) { Text("删除") }
+                TextButton(onClick = onDelete, enabled = !isRunning) { Text(stringResource(R.string.delete)) }
             }
             TextButton(onClick = onCompare, enabled = !isRunning && canCompare) {
                 Text(stringResource(R.string.compare_workflow))
@@ -4853,7 +4954,7 @@ private fun WorkflowRow(
             TextButton(onClick = onViewVersions, enabled = !isRunning) {
                 Text(stringResource(R.string.workflow_version_history))
             }
-            TextButton(onClick = onPreflight, enabled = !isRunning) { Text("检查") }
+            TextButton(onClick = onPreflight, enabled = !isRunning) { Text(stringResource(R.string.preflight)) }
             TextButton(
                 onClick = if (schedule == null) onSchedule else onCancelSchedule,
                 enabled = !isRunning && (schedule != null || isReady),
@@ -5887,18 +5988,122 @@ private fun WorkflowExampleCapability.localizedName(): String = stringResource(
 private const val VISIBLE_RUN_RECORDS = 10
 
 @Composable
-private fun AiIndexFingerTheme(content: @Composable () -> Unit) {
+private fun SettingsScreen(
+    appearanceMode: AppearanceMode,
+    onAppearanceModeChanged: (AppearanceMode) -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onReviewAccessibilityDisclosure: () -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    Scaffold { contentPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(contentPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text(stringResource(R.string.back)) }
+                Text(
+                    stringResource(R.string.settings_title),
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Text(
+                stringResource(R.string.settings_appearance),
+                fontWeight = FontWeight.SemiBold,
+            )
+            Column(Modifier.selectableGroup()) {
+                AppearanceMode.entries.forEach { mode ->
+                    val selectedMode = appearanceMode == mode
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = selectedMode,
+                                role = Role.RadioButton,
+                                onClick = { onAppearanceModeChanged(mode) },
+                            )
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = selectedMode,
+                            onClick = null,
+                        )
+                        Text(mode.localizedName())
+                    }
+                }
+            }
+            Text(
+                stringResource(R.string.settings_appearance_description),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+            )
+            HorizontalDivider()
+            Text(
+                stringResource(R.string.settings_automation_access),
+                fontWeight = FontWeight.SemiBold,
+            )
+            OutlinedButton(
+                onClick = onOpenAccessibilitySettings,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_open_accessibility)) }
+            TextButton(
+                onClick = onReviewAccessibilityDisclosure,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.settings_review_disclosure)) }
+        }
+    }
+}
+
+@Composable
+private fun AppearanceMode.localizedName(): String = stringResource(
+    when (this) {
+        AppearanceMode.System -> R.string.settings_appearance_system
+        AppearanceMode.Light -> R.string.settings_appearance_light
+        AppearanceMode.Dark -> R.string.settings_appearance_dark
+    },
+)
+
+@Composable
+private fun AiIndexFingerTheme(
+    appearanceMode: AppearanceMode,
+    content: @Composable () -> Unit,
+) {
+    val darkTheme = appearanceMode.usesDarkTheme(isSystemInDarkTheme())
     MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = Color(0xFF116B56),
-            secondary = Color(0xFF3C6257),
-            background = Color(0xFFF4F6F1),
-            surface = Color.White,
-            onSurface = Color(0xFF18201D),
-            onSurfaceVariant = Color(0xFF5B6863),
-        ),
+        colorScheme = if (darkTheme) {
+            darkColorScheme(
+                primary = Color(0xFF78D6B6),
+                secondary = Color(0xFF9BCDC0),
+                background = Color(0xFF111613),
+                surface = Color(0xFF171D1A),
+                onSurface = Color(0xFFE1E9E4),
+                onSurfaceVariant = Color(0xFFBAC7C1),
+            )
+        } else {
+            lightColorScheme(
+                primary = Color(0xFF116B56),
+                secondary = Color(0xFF3C6257),
+                background = Color(0xFFF4F6F1),
+                surface = Color.White,
+                onSurface = Color(0xFF18201D),
+                onSurfaceVariant = Color(0xFF5B6863),
+            )
+        },
         content = content,
     )
+}
+
+internal fun AppearanceMode.usesDarkTheme(systemInDarkTheme: Boolean): Boolean = when (this) {
+    AppearanceMode.System -> systemInDarkTheme
+    AppearanceMode.Light -> false
+    AppearanceMode.Dark -> true
 }
 
 private const val MAX_VISIBLE_OBSERVED_NODES = 8

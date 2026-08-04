@@ -73,6 +73,7 @@ sealed interface Step {
         } else {
             RecordedClickTargetMode.Coordinates
         },
+        val fallbackCause: RecordedClickFallbackCause? = null,
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step {
@@ -279,6 +280,17 @@ enum class TextInputMethod {
 enum class RecordedClickTargetMode {
     Control,
     Coordinates,
+}
+
+@Serializable
+enum class RecordedClickFallbackCause {
+    SourceUnavailable,
+    SourceInvalid,
+    HierarchyUnavailable,
+    HierarchyChanged,
+    HierarchyIncomplete,
+    SourceNotUnique,
+    SelectorNotUnique,
 }
 
 @Serializable

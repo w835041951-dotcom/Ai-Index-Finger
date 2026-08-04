@@ -6,6 +6,44 @@ import org.junit.Test
 
 class ScreenCaptureTargetingTest {
     @Test
+    fun `image match must remain inside target app window`() {
+        val targetBounds = listOf(ScreenBounds(0, 0, 500, 1_000))
+
+        assertEquals(
+            true,
+            matchIsInsideTargetWindow(TemplateMatchResult.Unique(250, 500, 980), targetBounds),
+        )
+        assertEquals(
+            false,
+            matchIsInsideTargetWindow(TemplateMatchResult.Unique(750, 500, 980), targetBounds),
+        )
+    }
+
+    @Test
+    fun `accepts target package from an interactive window when active root is stale`() {
+        assertEquals(
+            true,
+            targetPackageIsVisible(
+                targetPackage = "com.example.target",
+                activePackage = "com.android.systemui",
+                windowPackages = listOf("com.android.systemui", "com.example.target"),
+            ),
+        )
+    }
+
+    @Test
+    fun `rejects target package absent from active root and interactive windows`() {
+        assertEquals(
+            false,
+            targetPackageIsVisible(
+                targetPackage = "com.example.target",
+                activePackage = null,
+                windowPackages = listOf("com.android.systemui"),
+            ),
+        )
+    }
+
+    @Test
     fun `maps taps through fit center letterboxing`() {
         assertEquals(
             ScreenPoint(50, 25),

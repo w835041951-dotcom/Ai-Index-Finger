@@ -19,6 +19,7 @@ import com.aiindexfinger.model.renderTemplate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +54,7 @@ sealed interface ImageClickResult {
 sealed interface RunState {
     data object Idle : RunState
     data class Running(val workflowId: String, val stepId: String?) : RunState
+    data class Paused(val workflowId: String, val stepId: String) : RunState
 }
 
 sealed interface RunResult {
@@ -118,18 +120,23 @@ class WorkflowExecutor(
 ) {
     private val runMutex = Mutex()
     private val mutableState = MutableStateFlow<RunState>(RunState.Idle)
+    private var stepGate: Channel<Unit>? = null
 
     val state: StateFlow<RunState> = mutableState.asStateFlow()
 
     suspend fun run(workflow: Workflow): RunResult = runWithDiagnostics(workflow).result
 
-    suspend fun runWithDiagnostics(workflow: Workflow): RunExecution {
+    suspend fun runWithDiagnostics(
+        workflow: Workflow,
+        stepThrough: Boolean = false,
+    ): RunExecution {
         workflow.readinessIssues().firstOrNull()?.let { issue ->
             return RunExecution(RunResult.NotReady(issue), emptyList())
         }
         if (!runMutex.tryLock()) return RunExecution(RunResult.AlreadyRunning, emptyList())
 
         val context = ExecutionContext(workflow, nanoTime = nanoTime)
+        stepGate = Channel<Unit>(Channel.CONFLATED).takeIf { stepThrough }
         return try {
             executeSteps(workflow.steps, context)
             RunExecution(RunResult.Completed, context.diagnostics.toList())
@@ -141,13 +148,28 @@ class WorkflowExecutor(
                 context.diagnostics.toList(),
             )
         } finally {
+            stepGate?.close()
+            stepGate = null
             mutableState.value = RunState.Idle
             runMutex.unlock()
         }
     }
 
+    fun advance(): Boolean {
+        val paused = mutableState.value as? RunState.Paused ?: return false
+        val running = RunState.Running(paused.workflowId, paused.stepId)
+        if (!mutableState.compareAndSet(paused, running)) return false
+        val sent = stepGate?.trySend(Unit)?.isSuccess == true
+        if (!sent) mutableState.compareAndSet(running, paused)
+        return sent
+    }
+
     private suspend fun executeSteps(steps: List<Step>, context: ExecutionContext) {
         for (step in steps) {
+            stepGate?.let { gate ->
+                mutableState.value = RunState.Paused(context.workflow.id, step.id)
+                gate.receive()
+            }
             mutableState.value = RunState.Running(context.workflow.id, step.id)
             val sequence = context.nextDiagnosticSequence++
             val startedAtNanos = nanoTime()

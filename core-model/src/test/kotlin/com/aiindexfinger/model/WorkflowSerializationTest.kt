@@ -114,6 +114,20 @@ class WorkflowSerializationTest {
     }
 
     @Test
+    fun `older recorded click defaults fallback cause to null`() {
+        val encoded = """{"id":"workflow","name":"Legacy recording","steps":[{"type":"recorded_click","id":"click","x":10,"y":20,"control":{"packageName":"com.example.target","bounds":{"left":0,"top":0,"right":20,"bottom":40},"clickable":true,"enabled":true,"longClickable":false,"scrollable":false}}]}"""
+
+        val decoded = json.decodeFromString(Workflow.serializer(), encoded)
+        val recordedClick = decoded.steps.single() as Step.RecordedClick
+
+        assertEquals(RecordedClickTargetMode.Coordinates, recordedClick.targetMode)
+        assertEquals(null, recordedClick.selector)
+        assertEquals(10, recordedClick.x)
+        assertEquals(20, recordedClick.y)
+        assertEquals(null, recordedClick.fallbackCause)
+    }
+
+    @Test
     fun `round trips explicit draft and ready states`() {
         val draft = Workflow(
             id = "draft",
