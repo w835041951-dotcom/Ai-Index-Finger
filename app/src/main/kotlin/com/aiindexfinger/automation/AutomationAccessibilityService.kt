@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.Rect
 import android.graphics.Path
 import android.graphics.Bitmap
@@ -18,6 +19,7 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.view.Display
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.graphics.drawable.Icon
@@ -26,6 +28,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.annotation.RequiresApi
 import com.aiindexfinger.MainActivity
@@ -44,6 +47,7 @@ import com.aiindexfinger.model.RecordedBounds
 import com.aiindexfinger.model.RecordedControl
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
+import com.aiindexfinger.model.StepListPath
 import com.aiindexfinger.model.SystemAction
 import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.TextInputMethod
@@ -65,7 +69,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Base64
+import java.util.UUID
 import kotlin.coroutines.resume
+import kotlin.math.hypot
 
 class AutomationAccessibilityService : AccessibilityService(), AutomationDriver {
     private val workflowExecutor by lazy { WorkflowExecutor(this) }
@@ -73,6 +79,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var workflowJob: Job? = null
     private var observationSettleJob: Job? = null
+    private var recordingSnapshotJob: Job? = null
     private var screenCaptureSettleJob: Job? = null
     private var screenCaptureTimeoutJob: Job? = null
     private var screenCaptureRequestId = 0L
@@ -80,8 +87,19 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var lastExternalAppPackage: String? = null
     private var homePackages: Set<String> = emptySet()
     private var elementMonitorView: View? = null
+    private var swipeCaptureView: View? = null
+    private var swipeInFlight = false
+    private var finishAfterSwipe = false
+    private var appPickerView: View? = null
     private var monitoredTargetPackage: String? = null
+    private var lastRecordedLongClick: Pair<String, Long>? = null
+    private val lastScrollPositions = mutableMapOf<String, Pair<Int, Int>>()
+    private var lastRecordedScroll: Triple<String, ScrollDirection, Long>? = null
+    private var suppressScrollUntilMillis = Long.MIN_VALUE
+    private var recordingWorkflowId: String? = null
+    private var recordingListPath: StepListPath? = null
     private val recordedClickSession = RecordedClickSession(MAX_RECORDED_CLICKS)
+    private val recordingTargetResolver = RecordingTargetResolver()
     private val targetPreferences by lazy {
         getSharedPreferences(TARGET_PREFERENCES_NAME, MODE_PRIVATE)
     }
@@ -111,13 +129,166 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         handleArmedScreenCapture(event)
         val packageName = event?.packageName?.toString() ?: return
+        if (packageName == monitoredTargetPackage && elementMonitorView?.isAttachedToWindow != true) {
+            showRecordingOverlay()
+        }
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
             packageName == monitoredTargetPackage &&
             elementMonitorView != null
         ) {
-            event.source?.toDescriptor()
+            recordedClickSession.closeAllTextBursts()
+            showRecordingOverlay()
+            recordingSnapshotJob?.cancel()
+            recordingSnapshotJob = null
+            val source = event.source?.toDescriptor()
                 ?.takeIf { it.packageName == monitoredTargetPackage }
-                ?.let(::recordClickTarget)
+            if (source == null) {
+                recordClickIssue(event, RecordingIssueReason.SourceUnavailable)
+            } else {
+                val resolved = recordingTargetResolver.resolve(
+                    source = source,
+                    packageName = packageName,
+                    windowId = event.windowId,
+                    eventTimeMillis = event.eventTime,
+                )
+                val targetNode = resolved?.node ?: source
+                val selectorKey = resolved?.selector?.toString()
+                val duplicateLongClick = lastRecordedLongClick?.let { (lastKey, lastTime) ->
+                    selectorKey != null && selectorKey == lastKey &&
+                        event.eventTime - lastTime <= LONG_CLICK_CLICK_SUPPRESSION_MILLIS
+                } == true
+                if (duplicateLongClick) return
+                val recorded = recordClickTarget(
+                    targetNode,
+                    resolved?.selector,
+                    allowRecommendedSelector = false,
+                )
+                if (!recorded) {
+                    recordClickIssue(event, RecordingIssueReason.SourceInvalid)
+                } else if (resolved?.selector == null) {
+                    recordClickIssue(event, RecordingIssueReason.ControlNotUnique)
+                }
+            }
+            scheduleRecordingSnapshot(packageName, event.windowId, event.eventTime)
+        }
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED &&
+            packageName == monitoredTargetPackage &&
+            elementMonitorView != null
+        ) {
+            recordedClickSession.closeAllTextBursts()
+            recordingSnapshotJob?.cancel()
+            recordingSnapshotJob = null
+            val source = event.source?.toDescriptor()
+                ?.takeIf { it.packageName == monitoredTargetPackage }
+            val resolved = source?.let {
+                recordingTargetResolver.resolve(
+                    source = it,
+                    packageName = packageName,
+                    windowId = event.windowId,
+                    eventTimeMillis = event.eventTime,
+                    capability = RecordingNodeCapability.LongClick,
+                )
+            }
+            val selector = resolved?.selector
+            if (selector != null && resolved.node.longClickable) {
+                if (recordedClickSession.recordStep(Step.LongClick(UUID.randomUUID().toString(), selector))) {
+                    lastRecordedLongClick = selector.toString() to event.eventTime
+                    updateRecordingOverlay()
+                }
+            } else {
+                recordClickIssue(event, RecordingIssueReason.ControlNotUnique)
+            }
+            scheduleRecordingSnapshot(packageName, event.windowId, event.eventTime)
+        }
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED &&
+            packageName == monitoredTargetPackage &&
+            elementMonitorView != null
+        ) {
+            val sourceInfo = event.source
+            val source = sourceInfo?.toDescriptor()
+                ?.takeIf { it.packageName == monitoredTargetPackage }
+            if (event.isPassword || sourceInfo?.isPassword == true) {
+                recordClickIssue(event, RecordingIssueReason.SensitiveText)
+            } else if (source != null) {
+                val resolved = recordingTargetResolver.resolve(
+                    source = source,
+                    packageName = packageName,
+                    windowId = event.windowId,
+                    eventTimeMillis = event.eventTime,
+                )
+                val selector = resolved?.selector
+                val text = sourceInfo?.text?.toString()
+                    ?: event.text.lastOrNull()?.toString()
+                    ?: "".takeIf { event.removedCount > 0 }
+                if (selector != null && text != null) {
+                    val key = listOf(packageName, event.windowId, selector).joinToString("|")
+                    recordedClickSession.recordOrReplaceText(
+                        key,
+                        Step.InputText(
+                            id = UUID.randomUUID().toString(),
+                            selector = selector,
+                            text = text,
+                            inputMethod = TextInputMethod.SetText,
+                        ),
+                    )
+                    updateRecordingOverlay()
+                } else {
+                    recordClickIssue(event, RecordingIssueReason.ControlNotUnique)
+                }
+            } else {
+                recordClickIssue(event, RecordingIssueReason.SourceUnavailable)
+            }
+        }
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
+            packageName == monitoredTargetPackage &&
+            elementMonitorView != null
+        ) {
+            if (event.eventTime <= suppressScrollUntilMillis) return
+            recordedClickSession.closeAllTextBursts()
+            val source = event.source?.toDescriptor()
+                ?.takeIf { it.packageName == monitoredTargetPackage }
+            val resolved = source?.let {
+                recordingTargetResolver.resolve(
+                    source = it,
+                    packageName = packageName,
+                    windowId = event.windowId,
+                    eventTimeMillis = event.eventTime,
+                    capability = RecordingNodeCapability.Scroll,
+                )
+            }
+            val selector = resolved?.selector
+            val key = selector?.let { listOf(packageName, event.windowId, it).joinToString("|") }
+            val currentPosition = event.scrollX to event.scrollY
+            val previousPosition = key?.let(lastScrollPositions::get)?.takeIf { it != currentPosition }
+            if (key != null) lastScrollPositions[key] = currentPosition
+            val deltaX = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) event.scrollDeltaX else 0
+            val deltaY = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) event.scrollDeltaY else 0
+            val direction = when {
+                deltaY > 0 || deltaX > 0 -> ScrollDirection.Forward
+                deltaY < 0 || deltaX < 0 -> ScrollDirection.Backward
+                previousPosition != null &&
+                    (currentPosition.first > previousPosition.first || currentPosition.second > previousPosition.second) ->
+                    ScrollDirection.Forward
+                previousPosition != null &&
+                    (currentPosition.first < previousPosition.first || currentPosition.second < previousPosition.second) ->
+                    ScrollDirection.Backward
+                else -> null
+            }
+            if (selector != null && key != null && direction != null && resolved.node.scrollable) {
+                val duplicate = lastRecordedScroll?.let { (lastKey, lastDirection, lastTime) ->
+                    lastKey == key && lastDirection == direction &&
+                        event.eventTime - lastTime <= SCROLL_DUPLICATE_SUPPRESSION_MILLIS
+                } == true
+                if (!duplicate && recordedClickSession.recordStep(
+                        Step.Scroll(UUID.randomUUID().toString(), selector, direction),
+                    )
+                ) {
+                    lastRecordedScroll = Triple(key, direction, event.eventTime)
+                    updateRecordingOverlay()
+                }
+            } else {
+                recordClickIssue(event, RecordingIssueReason.ControlNotUnique)
+            }
         }
         if (!isEligibleExternalPackage(packageName, applicationContext.packageName, homePackages)) {
             invalidateObservedNodes()
@@ -133,6 +304,20 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             packageManager.getLaunchIntentForPackage(packageName) != null
         ) {
             rememberExternalAppPackage(packageName)
+        }
+        if (packageName == monitoredTargetPackage && elementMonitorView != null &&
+            event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED
+        ) {
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                showRecordingOverlay()
+            }
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+            ) {
+                recordingTargetResolver.markHierarchyMutation(packageName, event.windowId, event.eventTime)
+            }
+            captureRecordingSnapshot(packageName, event.windowId)
+            scheduleRecordingSnapshot(packageName, event.windowId, event.eventTime)
         }
         if (!observationController.isObservationRequested) return
         observationSettleJob?.cancel()
@@ -237,7 +422,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         try {
             startActivity(
                 targetIntent.apply {
-                    flags = flags or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    flags = targetAppLaunchFlags(flags)
                 },
             )
         } catch (_: ActivityNotFoundException) {
@@ -254,7 +439,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         return true
     }
 
-    fun startElementMonitor(): Boolean {
+    fun startElementMonitor(workflowId: String, listPath: StepListPath): Boolean {
         val targetPackage = lastExternalAppPackage
             ?: targetPreferences.getString(LAST_EXTERNAL_PACKAGE_KEY, null)
         val targetIntent = targetPackage?.let(packageManager::getLaunchIntentForPackage)
@@ -264,10 +449,40 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         }
         stopElementMonitor()
         monitoredTargetPackage = targetPackage
+        recordingWorkflowId = workflowId
+        recordingListPath = listPath
         recordedClickSession.start()
+        lastRecordedLongClick = null
+        lastScrollPositions.clear()
+        lastRecordedScroll = null
+        suppressScrollUntilMillis = Long.MIN_VALUE
+        recordingTargetResolver.clear()
+        startRecordingForeground(targetPackage)
+        return try {
+            if (!showRecordingOverlay() || !performGlobalAction(GLOBAL_ACTION_RECENTS)) {
+                stopElementMonitor()
+                overlayStatus.value = getString(R.string.element_monitor_start_failed)
+                return false
+            }
+            scheduleRecordingSnapshot(targetPackage, windowId = null, eventTimeMillis = null)
+            true
+        } catch (_: RuntimeException) {
+            stopElementMonitor()
+            overlayStatus.value = getString(R.string.element_monitor_start_failed)
+            false
+        }
+    }
+
+    private fun showRecordingOverlay(): Boolean {
+        elementMonitorView?.let { staleView ->
+            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(staleView) }
+        }
         val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val details = TextView(this).apply {
-            text = getString(R.string.click_recording_count, 0)
+            text = getString(
+                R.string.click_recording_choose_recent_app,
+                monitoredTargetPackage.orEmpty(),
+            )
             setPadding(24, 16, 24, 12)
         }
         val stopButton = Button(this).apply {
@@ -277,10 +492,33 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             setText(R.string.cancel)
             setOnClickListener { cancelElementRecording(returnToEditor = true) }
         }
+        val backButton = Button(this).apply {
+            setText(R.string.record_action_back)
+            setOnClickListener { recordSystemAction(SystemAction.Back, GLOBAL_ACTION_BACK) }
+        }
+        val homeButton = Button(this).apply {
+            setText(R.string.record_action_home)
+            setOnClickListener { recordSystemAction(SystemAction.Home, GLOBAL_ACTION_HOME) }
+        }
+        val swipeButton = Button(this).apply {
+            setText(R.string.record_action_swipe)
+            setOnClickListener { startSwipeCapture() }
+        }
+        val launchButton = Button(this).apply {
+            setText(R.string.record_action_launch_app)
+            setOnClickListener { showRecordingAppPicker() }
+        }
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(stopButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
             addView(cancelButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        val systemActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(backButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            addView(homeButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            addView(swipeButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            addView(launchButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
         }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -295,6 +533,13 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             )
             addView(
                 actions,
+                LinearLayout.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                systemActions,
                 LinearLayout.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -317,38 +562,287 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             windowManager.addView(panel, params)
             elementMonitorView = panel
             overlayStatus.value = null
-            startActivity(
-                targetIntent.apply {
-                    flags = flags or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                },
-            )
             true
         } catch (_: RuntimeException) {
-            stopElementMonitor()
-            overlayStatus.value = getString(R.string.element_monitor_start_failed)
+            elementMonitorView = null
             false
         }
     }
 
+    private fun recordSystemAction(action: SystemAction, globalAction: Int) {
+        if (!recordedClickSession.isActive()) return
+        recordedClickSession.closeAllTextBursts()
+        if (performGlobalAction(globalAction) && recordedClickSession.recordStep(
+                Step.GlobalAction(UUID.randomUUID().toString(), action),
+            )
+        ) {
+            updateRecordingOverlay()
+        }
+    }
+
+    private fun startSwipeCapture() {
+        if (swipeCaptureView != null) return
+        recordedClickSession.closeAllTextBursts()
+        var startX = 0
+        var startY = 0
+        var startTime = 0L
+        val captureView = TextView(this).apply {
+            text = getString(R.string.record_swipe_instruction)
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0x66000000)
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startX = event.rawX.toInt()
+                        startY = event.rawY.toInt()
+                        startTime = event.eventTime
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        val endX = event.rawX.toInt()
+                        val endY = event.rawY.toInt()
+                        val duration = (event.eventTime - startTime).coerceIn(1L, 10_000L)
+                        if (hypot((endX - startX).toDouble(), (endY - startY).toDouble()) >=
+                            MIN_RECORDED_SWIPE_DISTANCE_PX
+                        ) {
+                            swipeInFlight = true
+                            text = getString(R.string.record_swipe_executing)
+                            isEnabled = false
+                            suppressScrollUntilMillis = android.os.SystemClock.uptimeMillis() + duration +
+                                SWIPE_SCROLL_SUPPRESSION_PADDING_MILLIS
+                            serviceScope.launch {
+                                val succeeded = swipe(startX, startY, endX, endY, duration)
+                                if (succeeded &&
+                                    recordedClickSession.recordStep(
+                                        Step.Swipe(
+                                            UUID.randomUUID().toString(),
+                                            startX,
+                                            startY,
+                                            endX,
+                                            endY,
+                                            duration,
+                                        ),
+                                    )
+                                ) {
+                                    updateRecordingOverlay()
+                                }
+                                swipeInFlight = false
+                                stopSwipeCapture()
+                                if (recordedClickSession.isActive()) showRecordingOverlay()
+                                if (finishAfterSwipe) {
+                                    finishAfterSwipe = false
+                                    finishElementRecording()
+                                }
+                            }
+                        } else {
+                            stopSwipeCapture()
+                            showRecordingOverlay()
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        stopSwipeCapture()
+                        showRecordingOverlay()
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        )
+        runCatching {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(captureView, params)
+            swipeCaptureView = captureView
+        }
+    }
+
+    private fun stopSwipeCapture() {
+        swipeCaptureView?.let { view ->
+            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+        }
+        swipeCaptureView = null
+    }
+
+    private fun showRecordingAppPicker() {
+        if (appPickerView != null) return
+        recordedClickSession.closeAllTextBursts()
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        LaunchableAppCatalog(this).load().forEach { app ->
+            list.addView(
+                Button(this).apply {
+                    text = getString(R.string.record_launch_app_item, app.label, app.packageName)
+                    setOnClickListener {
+                        stopRecordingAppPicker()
+                        serviceScope.launch {
+                            val launched = launchApp(app.packageName, null)
+                            if (launched) {
+                                monitoredTargetPackage = app.packageName
+                                rememberExternalAppPackage(app.packageName)
+                                recordingTargetResolver.clear()
+                                lastScrollPositions.clear()
+                                lastRecordedScroll = null
+                                startRecordingForeground(app.packageName)
+                            }
+                            if (launched &&
+                                recordedClickSession.recordStep(
+                                    Step.LaunchApp(UUID.randomUUID().toString(), app.packageName),
+                                )
+                            ) {
+                                updateRecordingOverlay()
+                            }
+                        }
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+        list.addView(
+            Button(this).apply {
+                setText(R.string.cancel)
+                setOnClickListener { stopRecordingAppPicker() }
+            },
+        )
+        val picker = ScrollView(this).apply {
+            setBackgroundColor(0xFFF7F7F7.toInt())
+            addView(list)
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            (resources.displayMetrics.heightPixels * 0.7f).toInt(),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.CENTER }
+        runCatching {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(picker, params)
+            appPickerView = picker
+        }
+    }
+
+    private fun stopRecordingAppPicker() {
+        appPickerView?.let { view ->
+            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+        }
+        appPickerView = null
+    }
+
     fun stopElementMonitor() {
+        stopSwipeCapture()
+        stopRecordingAppPicker()
         elementMonitorView?.let { view ->
             runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
         }
         elementMonitorView = null
         monitoredTargetPackage = null
+        recordingWorkflowId = null
+        recordingListPath = null
+        recordingSnapshotJob?.cancel()
+        recordingSnapshotJob = null
+        recordingTargetResolver.clear()
         recordedClickSession.cancel()
+        stopRecordingForeground()
+        swipeInFlight = false
+        finishAfterSwipe = false
     }
 
-    private fun recordClickTarget(node: ObservedNode) {
-        val target = createRecordedClickTarget(node) ?: return
-        if (!recordedClickSession.record(target)) return
-        val views = elementMonitorView?.tag as? ElementMonitorViews ?: return
-        views.details.text = getString(R.string.click_recording_count, recordedClickSession.count)
+    fun stopRecording() {
+        if (recordingWorkflowId != null) finishElementRecording()
+    }
+
+    private fun recordClickTarget(
+        node: ObservedNode,
+        selector: NodeSelector? = null,
+        allowRecommendedSelector: Boolean = true,
+    ): Boolean {
+        val target = createRecordedClickTarget(node, selector, allowRecommendedSelector) ?: return false
+        if (!recordedClickSession.record(target)) return false
+        updateRecordingOverlay()
+        return true
+    }
+
+    private fun recordClickIssue(event: AccessibilityEvent, reason: RecordingIssueReason) {
+        recordedClickSession.recordIssue(
+            RecordingIssue(event.eventTime, event.packageName?.toString().orEmpty(), reason),
+        )
+        updateRecordingOverlay()
+    }
+
+    private fun updateRecordingOverlay() {
+        (elementMonitorView?.tag as? ElementMonitorViews)?.details?.text = getString(
+                R.string.click_recording_status,
+                recordedClickSession.count,
+                recordedClickSession.issueCount,
+            )
+        monitoredTargetPackage?.let { targetPackage ->
+            startRecordingForeground(
+                targetPackage,
+                recordedClickSession.count,
+                recordedClickSession.issueCount,
+            )
+        }
+    }
+
+    private fun scheduleRecordingSnapshot(
+        packageName: String,
+        windowId: Int?,
+        eventTimeMillis: Long?,
+    ) {
+        recordingSnapshotJob?.cancel()
+        recordingSnapshotJob = serviceScope.launch {
+            delay(RECORDING_SNAPSHOT_SETTLE_MILLIS)
+            captureRecordingSnapshot(packageName, windowId)
+        }
+    }
+
+    private fun captureRecordingSnapshot(packageName: String, windowId: Int?) {
+        if (monitoredTargetPackage != packageName || elementMonitorView == null) return
+        val matchingWindow = windows.firstOrNull { window ->
+            window.root?.packageName?.toString() == packageName &&
+                (windowId == null || window.id == windowId)
+        } ?: windows.firstOrNull { it.root?.packageName?.toString() == packageName }
+        val root = matchingWindow?.root ?: return
+        val hierarchy = root.toRecordingHierarchyNodes(MAX_RECORDING_SNAPSHOT_NODES)
+        val nodes = hierarchy.nodes
+        if (nodes.isEmpty()) return
+        recordingTargetResolver.update(
+            RecordingHierarchySnapshot(
+                packageName = packageName,
+                windowId = matchingWindow.id,
+                eventTimeMillis = android.os.SystemClock.uptimeMillis(),
+                nodes = nodes,
+                complete = hierarchy.complete,
+            ),
+        )
     }
 
     private fun finishElementRecording() {
-        val targets = recordedClickSession.finish()
-        if (targets.isNotEmpty()) pendingOverlayAction.value = PendingOverlayAction.RecordedClicks(targets)
+        if (swipeInFlight) {
+            finishAfterSwipe = true
+            return
+        }
+        val batch = recordedClickSession.finish()
+        val workflowId = recordingWorkflowId
+        val listPath = recordingListPath
+        if (batch.actions.isNotEmpty() || batch.issues.isNotEmpty()) {
+            if (workflowId != null && listPath != null) {
+                pendingOverlayAction.value = PendingOverlayAction.RecordedClicks(
+                    workflowId = workflowId,
+                    listPath = listPath,
+                    actions = batch.actions,
+                    issues = batch.issues,
+                )
+            }
+        }
         stopElementMonitor()
         returnToEditor()
     }
@@ -529,6 +1023,121 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             )
             .build()
         notificationManager.notify(RUNNING_NOTIFICATION_ID, notification)
+    }
+
+    private fun startRecordingForeground(
+        targetPackage: String,
+        recordedCount: Int? = null,
+        issueCount: Int? = null,
+    ) {
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                RECORDING_CHANNEL_ID,
+                getString(R.string.click_recording_notification_channel),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
+        )
+        val stopIntent = Intent(this, StopWorkflowReceiver::class.java).apply {
+            putExtra(StopWorkflowReceiver.EXTRA_STOP_RECORDING, true)
+        }
+        val stopPendingIntent = PendingIntent.getBroadcast(
+            this,
+            RECORDING_NOTIFICATION_ID,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val showControlsPendingIntent = recordingCommandPendingIntent(
+            StopWorkflowReceiver.COMMAND_SHOW_CONTROLS,
+            RECORDING_NOTIFICATION_ID,
+        )
+        val backPendingIntent = recordingCommandPendingIntent(
+            StopWorkflowReceiver.COMMAND_RECORD_BACK,
+            RECORDING_NOTIFICATION_ID + 1,
+        )
+        val homePendingIntent = recordingCommandPendingIntent(
+            StopWorkflowReceiver.COMMAND_RECORD_HOME,
+            RECORDING_NOTIFICATION_ID + 2,
+        )
+        val notification = android.app.Notification.Builder(this, RECORDING_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle(getString(R.string.click_recording_notification_title))
+            .setContentText(
+                if (recordedCount != null && issueCount != null) {
+                    getString(
+                        R.string.click_recording_notification_status,
+                        targetPackage,
+                        recordedCount,
+                        issueCount,
+                    )
+                } else {
+                    getString(R.string.click_recording_notification_text, targetPackage)
+                },
+            )
+            .setContentIntent(showControlsPendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
+            .addAction(
+                android.app.Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_media_previous),
+                    getString(R.string.record_action_back),
+                    backPendingIntent,
+                ).build(),
+            )
+            .addAction(
+                android.app.Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_menu_view),
+                    getString(R.string.record_action_home),
+                    homePendingIntent,
+                ).build(),
+            )
+            .addAction(
+                android.app.Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_media_pause),
+                    getString(R.string.stop),
+                    stopPendingIntent,
+                ).build(),
+            )
+            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                RECORDING_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(RECORDING_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun recordingCommandPendingIntent(command: String, requestCode: Int): PendingIntent {
+        val intent = Intent(this, StopWorkflowReceiver::class.java).apply {
+            putExtra(StopWorkflowReceiver.EXTRA_RECORDING_COMMAND, command)
+        }
+        return PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    fun performRecordingCommand(command: String) {
+        if (!recordedClickSession.isActive() || recordingWorkflowId == null) return
+        when (command) {
+            StopWorkflowReceiver.COMMAND_SHOW_CONTROLS -> showRecordingOverlay()
+            StopWorkflowReceiver.COMMAND_RECORD_BACK -> recordSystemAction(SystemAction.Back, GLOBAL_ACTION_BACK)
+            StopWorkflowReceiver.COMMAND_RECORD_HOME -> recordSystemAction(SystemAction.Home, GLOBAL_ACTION_HOME)
+        }
+    }
+
+    private fun stopRecordingForeground() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
     }
 
     private fun cancelRunningNotification() {
@@ -780,6 +1389,34 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         }
     }
 
+    private fun AccessibilityNodeInfo.toRecordingHierarchyNodes(
+        limit: Int,
+    ): RecordingHierarchyCapture {
+        val result = mutableListOf<RecordingHierarchyNode>()
+        var truncated = false
+        fun collect(node: AccessibilityNodeInfo, parentIndex: Int?) {
+            if (result.size >= limit) {
+                truncated = true
+                return
+            }
+            val descriptor = node.toDescriptor()
+            val currentIndex = if (descriptor != null) {
+                result.size.also { result += RecordingHierarchyNode(descriptor, parentIndex) }
+            } else {
+                parentIndex
+            }
+            for (index in 0 until node.childCount) {
+                node.getChild(index)?.let { collect(it, currentIndex) }
+                if (result.size >= limit) {
+                    if (index < node.childCount - 1) truncated = true
+                    return
+                }
+            }
+        }
+        collect(this, null)
+        return RecordingHierarchyCapture(result, complete = !truncated)
+    }
+
     private fun AccessibilityNodeInfo.matches(selector: NodeSelector): Boolean {
         return packageName?.toString() == selector.packageName &&
             selector.viewId.matchesIfPresent(viewIdResourceName) &&
@@ -799,8 +1436,11 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private fun AccessibilityNodeInfo.toDescriptor(): ObservedNode? {
         val packageName = packageName?.toString() ?: return null
         val viewId = viewIdResourceName
-        val text = text?.toString()?.takeIf { it.isNotBlank() }
-        val description = contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        val (text, description) = sanitizedRecordedText(
+            isPassword = isPassword,
+            text = text?.toString()?.takeIf { it.isNotBlank() },
+            contentDescription = contentDescription?.toString()?.takeIf { it.isNotBlank() },
+        )
         val className = className?.toString()?.takeIf { it.isNotBlank() }
         val bounds = Rect().also(::getBoundsInScreen)
         return ObservedNode(
@@ -825,10 +1465,18 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
         private const val MAX_TEMPLATE_PNG_BYTES = 96 * 1024
         private const val MAX_RECORDED_CLICKS = 1_000
+        private const val MAX_RECORDING_SNAPSHOT_NODES = 500
+        private const val RECORDING_SNAPSHOT_SETTLE_MILLIS = 120L
+        private const val LONG_CLICK_CLICK_SUPPRESSION_MILLIS = 350L
+        private const val SCROLL_DUPLICATE_SUPPRESSION_MILLIS = 250L
+        private const val SWIPE_SCROLL_SUPPRESSION_PADDING_MILLIS = 300L
+        private const val MIN_RECORDED_SWIPE_DISTANCE_PX = 24.0
         private const val TARGET_PREFERENCES_NAME = "automation_target"
         private const val LAST_EXTERNAL_PACKAGE_KEY = "last_external_package"
         private const val RUNNING_CHANNEL_ID = "workflow_execution"
         private const val RUNNING_NOTIFICATION_ID = 1001
+        private const val RECORDING_CHANNEL_ID = "click_recording"
+        private const val RECORDING_NOTIFICATION_ID = 1002
         private const val TAP_DURATION_MILLIS = 50L
         private val mutableConnected = MutableStateFlow(false)
         val connected = mutableConnected.asStateFlow()
@@ -878,6 +1526,15 @@ private data class ElementMonitorViews(
     val details: TextView,
 )
 
+internal fun sanitizedRecordedText(
+    isPassword: Boolean,
+    text: String?,
+    contentDescription: String?,
+): Pair<String?, String?> = if (isPassword) null to null else text to contentDescription
+
+internal fun targetAppLaunchFlags(initialFlags: Int): Int =
+    (initialFlags or Intent.FLAG_ACTIVITY_NEW_TASK) and Intent.FLAG_ACTIVITY_REORDER_TO_FRONT.inv()
+
 internal fun isEligibleExternalPackage(
     packageName: String,
     ownPackageName: String,
@@ -886,7 +1543,11 @@ internal fun isEligibleExternalPackage(
     packageName != "com.android.systemui" &&
     packageName !in homePackages
 
-internal fun createRecordedClickTarget(node: ObservedNode): RecordedClickTarget? {
+internal fun createRecordedClickTarget(
+    node: ObservedNode,
+    recoveredSelector: NodeSelector? = null,
+    allowRecommendedSelector: Boolean = true,
+): RecordedClickTarget? {
     if (!node.enabled) return null
     val values = node.bounds.split(' ').mapNotNull(String::toIntOrNull)
     if (values.size != 4) return null
@@ -895,7 +1556,9 @@ internal fun createRecordedClickTarget(node: ObservedNode): RecordedClickTarget?
     return RecordedClickTarget(
         x = bounds.left + (bounds.right - bounds.left) / 2,
         y = bounds.top + (bounds.bottom - bounds.top) / 2,
-        selector = SelectorRecommendations.candidates(node).firstOrNull(),
+        selector = recoveredSelector ?: SelectorRecommendations.candidates(node)
+            .firstOrNull()
+            ?.takeIf { allowRecommendedSelector },
         control = RecordedControl(
             packageName = node.packageName,
             viewId = node.viewId,
@@ -920,39 +1583,111 @@ data class RecordedClickTarget(
 
 internal class RecordedClickSession(private val capacity: Int) {
     private var recording = false
-    private val targets = mutableListOf<RecordedClickTarget>()
+    private val actions = mutableListOf<RecordedAction>()
+    private val issues = mutableListOf<RecordingIssue>()
+    private val textActionIndexes = mutableMapOf<String, Int>()
+    private var activeTextKey: String? = null
 
-    val count: Int get() = targets.size
+    val count: Int get() = actions.size
+    val issueCount: Int get() = issues.size
+    fun isActive(): Boolean = recording
 
     init {
         require(capacity > 0) { "Recording capacity must be positive" }
     }
 
     fun start() {
-        targets.clear()
+        actions.clear()
+        issues.clear()
+        textActionIndexes.clear()
+        activeTextKey = null
         recording = true
     }
 
     fun record(target: RecordedClickTarget): Boolean {
-        if (!recording || targets.size >= capacity) return false
-        targets += target
+        return recordAction(RecordedAction.Click(target))
+    }
+
+    fun recordStep(step: Step): Boolean = recordAction(RecordedAction.ExistingStep(step))
+
+    fun recordOrReplaceText(key: String, step: Step.InputText): Boolean {
+        if (!recording) return false
+        if (activeTextKey != key) {
+            closeTextBurst(activeTextKey)
+            activeTextKey = key
+        }
+        val existingIndex = textActionIndexes[key]
+        if (existingIndex != null) {
+            actions[existingIndex] = RecordedAction.ExistingStep(step)
+            return true
+        }
+        if (actions.size >= capacity) return false
+        textActionIndexes[key] = actions.size
+        actions += RecordedAction.ExistingStep(step)
         return true
     }
 
-    fun finish(): List<RecordedClickTarget> {
-        if (!recording) return emptyList()
+    fun closeTextBurst(key: String?) {
+        if (key != null) {
+            textActionIndexes.remove(key)
+            if (activeTextKey == key) activeTextKey = null
+        }
+    }
+
+    fun closeAllTextBursts() {
+        textActionIndexes.clear()
+        activeTextKey = null
+    }
+
+    private fun recordAction(action: RecordedAction): Boolean {
+        if (!recording || actions.size >= capacity) return false
+        actions += action
+        return true
+    }
+
+    fun recordIssue(issue: RecordingIssue): Boolean {
+        if (!recording || issues.size >= capacity) return false
+        issues += issue
+        return true
+    }
+
+    fun finish(): RecordedClickBatch {
+        if (!recording) return RecordedClickBatch(emptyList(), emptyList())
         recording = false
-        return targets.toList().also { targets.clear() }
+        return RecordedClickBatch(actions.toList(), issues.toList()).also {
+            actions.clear()
+            issues.clear()
+            textActionIndexes.clear()
+            activeTextKey = null
+        }
     }
 
     fun cancel() {
         recording = false
-        targets.clear()
+        actions.clear()
+        issues.clear()
+        textActionIndexes.clear()
+        activeTextKey = null
     }
 }
 
+data class RecordedClickBatch(
+    val actions: List<RecordedAction>,
+    val issues: List<RecordingIssue>,
+)
+
+sealed interface RecordedAction {
+    data class Click(val target: RecordedClickTarget) : RecordedAction
+    data class ExistingStep(val step: Step) : RecordedAction
+}
+
 sealed interface PendingOverlayAction {
-    data class RecordedClicks(val targets: List<RecordedClickTarget>) : PendingOverlayAction
+    data class RecordedClicks(
+        val workflowId: String,
+        val listPath: StepListPath,
+        val actions: List<RecordedAction>,
+        val issues: List<RecordingIssue>,
+    ) : PendingOverlayAction
 }
 
 sealed interface ScreenCaptureState {

@@ -1767,6 +1767,7 @@ private fun WorkflowEditor(
     var editingStepPath by remember(workflow.id) { mutableStateOf(initialEditingStepPath) }
     var stepToDeletePath by remember { mutableStateOf<StepPath?>(null) }
     var confirmDiscardChanges by remember { mutableStateOf(false) }
+    var unrecognizedClickCount by remember { mutableStateOf(0) }
     var showAllValidationIssues by remember(workflow.id) { mutableStateOf(false) }
     val observedNodes by AutomationAccessibilityService.observedNodes.collectAsStateWithLifecycle()
     val pendingOverlayAction by AutomationAccessibilityService.pendingOverlayAction.collectAsStateWithLifecycle()
@@ -1801,26 +1802,54 @@ private fun WorkflowEditor(
         val action = pendingOverlayAction ?: return@LaunchedEffect
         when (action) {
             is PendingOverlayAction.RecordedClicks -> {
-                action.targets.forEach { target ->
-                    val latestSteps = steps.stepsAt(currentListPath)
-                    steps = steps.insertStep(
-                        currentListPath,
-                        latestSteps.size,
-                        Step.RecordedClick(
-                            id = newId(),
-                            x = target.x,
-                            y = target.y,
-                            selector = target.selector,
-                            control = target.control,
-                        ),
-                    )
+                if (matchesRecordingDestination(action.workflowId, workflow.id) &&
+                    runCatching { steps.stepsAt(action.listPath) }.isSuccess
+                ) {
+                    action.actions.forEach { recordedAction ->
+                        val latestSteps = steps.stepsAt(action.listPath)
+                        val step = when (recordedAction) {
+                            is com.aiindexfinger.automation.RecordedAction.Click -> Step.RecordedClick(
+                                id = newId(),
+                                x = recordedAction.target.x,
+                                y = recordedAction.target.y,
+                                selector = recordedAction.target.selector,
+                                control = recordedAction.target.control,
+                            )
+                            is com.aiindexfinger.automation.RecordedAction.ExistingStep -> recordedAction.step
+                        }
+                        steps = steps.insertStep(
+                            action.listPath,
+                            latestSteps.size,
+                            step,
+                        )
+                    }
+                    unrecognizedClickCount = action.issues.size
+                    AutomationAccessibilityService.consumePendingOverlayAction(action)
                 }
             }
         }
-        AutomationAccessibilityService.consumePendingOverlayAction(action)
     }
 
     BackHandler(onBack = requestBack)
+    if (unrecognizedClickCount > 0) {
+        AlertDialog(
+            onDismissRequest = { unrecognizedClickCount = 0 },
+            title = { Text(stringResource(R.string.click_recording_unrecognized_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.click_recording_unrecognized_message,
+                        unrecognizedClickCount,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { unrecognizedClickCount = 0 }) {
+                    Text(stringResource(R.string.close))
+                }
+            },
+        )
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -2017,7 +2046,9 @@ private fun WorkflowEditor(
             ) { Text(stringResource(R.string.image_click)) }
             OutlinedButton(
                 enabled = AutomationAccessibilityService.instance != null,
-                onClick = { AutomationAccessibilityService.instance?.startElementMonitor() },
+                onClick = {
+                    AutomationAccessibilityService.instance?.startElementMonitor(workflow.id, currentListPath)
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.monitor_elements_overlay)) }
             overlayStatus?.let {
@@ -4621,6 +4652,9 @@ private fun List<Step>.findById(stepId: String): Step? {
     }
     return null
 }
+
+internal fun matchesRecordingDestination(recordingWorkflowId: String, editorWorkflowId: String): Boolean =
+    recordingWorkflowId == editorWorkflowId
 
 @Composable
 private fun RunningWorkflowStatus(
