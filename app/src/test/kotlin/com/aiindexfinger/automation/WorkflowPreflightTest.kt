@@ -70,6 +70,86 @@ class WorkflowPreflightTest {
     }
 
     @Test
+    fun launchDependentActiveWindowSelectorIsDeferredToRuntime() {
+        var probeCount = 0
+        val workflow = Workflow(
+            id = "handoff",
+            name = "Handoff",
+            steps = listOf(
+                Step.LaunchApp("launch", "com.example"),
+                Step.Click("click", NodeSelector("", text = "Continue")),
+            ),
+        )
+
+        val report = buildWorkflowPreflightReport(
+            workflow = workflow,
+            accessibilityConnected = true,
+            notificationStatus = NotificationPreflightStatus.NotRequired,
+            isLaunchable = { _, _ -> true },
+            countMatches = { probeCount++; 1 },
+        )
+
+        assertEquals(0, probeCount)
+        assertNull(report.selectors.single().matchCount)
+        assertNull(report.selectors.single().requiredMatchAvailable)
+    }
+
+    @Test
+    fun activeWindowSelectorBeforeLaunchIsStillProbed() {
+        var probeCount = 0
+        val workflow = Workflow(
+            id = "before-handoff",
+            name = "Before handoff",
+            steps = listOf(
+                Step.Click("click", NodeSelector("", text = "Continue")),
+                Step.LaunchApp("launch", "com.example"),
+            ),
+        )
+
+        val report = buildWorkflowPreflightReport(
+            workflow = workflow,
+            accessibilityConnected = true,
+            notificationStatus = NotificationPreflightStatus.NotRequired,
+            isLaunchable = { _, _ -> true },
+            countMatches = { probeCount++; 1 },
+        )
+
+        assertEquals(1, probeCount)
+        assertEquals(1, report.selectors.single().matchCount)
+    }
+
+    @Test
+    fun launchInOnlyOneBranchDoesNotDeferFollowingSelector() {
+        var probeCount = 0
+        val workflow = Workflow(
+            id = "conditional-handoff",
+            name = "Conditional handoff",
+            steps = listOf(
+                Step.IfElse(
+                    id = "branch",
+                    condition = com.aiindexfinger.model.Condition.Equals(
+                        com.aiindexfinger.model.Value.Literal("a"),
+                        com.aiindexfinger.model.Value.Literal("a"),
+                    ),
+                    whenTrue = listOf(Step.LaunchApp("launch", "com.example")),
+                ),
+                Step.Click("click", NodeSelector("", text = "Continue")),
+            ),
+        )
+
+        val report = buildWorkflowPreflightReport(
+            workflow = workflow,
+            accessibilityConnected = true,
+            notificationStatus = NotificationPreflightStatus.NotRequired,
+            isLaunchable = { _, _ -> true },
+            countMatches = { probeCount++; 1 },
+        )
+
+        assertEquals(1, probeCount)
+        assertEquals(1, report.selectors.single().matchCount)
+    }
+
+    @Test
     fun selectorMatchIndexMustExistAndMissingLaunchTargetIsReported() {
         val workflow = Workflow(
             id = "ready",

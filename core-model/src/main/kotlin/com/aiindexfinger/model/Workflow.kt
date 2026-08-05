@@ -20,7 +20,7 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 16
+        const val CURRENT_SCHEMA_VERSION = 17
     }
 }
 
@@ -324,6 +324,22 @@ data class RecordedControl(
 }
 
 @Serializable
+data class AncestorSelector(
+    val viewId: String? = null,
+    val text: String? = null,
+    val textMatchMode: TextMatchMode = TextMatchMode.Exact,
+    val contentDescription: String? = null,
+    val contentDescriptionMatchMode: TextMatchMode = TextMatchMode.Exact,
+    val className: String? = null,
+) {
+    init {
+        require(listOf(viewId, text, contentDescription, className).any { !it.isNullOrBlank() }) {
+            "An ancestor selector requires at least one node attribute"
+        }
+    }
+}
+
+@Serializable
 data class NodeSelector(
     val packageName: String,
     val viewId: String? = null,
@@ -333,9 +349,9 @@ data class NodeSelector(
     val contentDescriptionMatchMode: TextMatchMode = TextMatchMode.Exact,
     val className: String? = null,
     val matchIndex: Int = 0,
+    val ancestor: AncestorSelector? = null,
 ) {
     init {
-        require(packageName.isNotBlank()) { "Package name must not be blank" }
         require(listOf(viewId, text, contentDescription, className).any { !it.isNullOrBlank() }) {
             "A node selector requires at least one node attribute"
         }

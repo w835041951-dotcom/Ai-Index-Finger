@@ -1,6 +1,8 @@
 package com.aiindexfinger.automation
 
+import com.aiindexfinger.model.AncestorSelector
 import com.aiindexfinger.model.NodeSelector
+import com.aiindexfinger.model.matches
 
 enum class ElementSelectorReliability {
     Unique,
@@ -14,7 +16,11 @@ data class ElementInspection(
     val selector: NodeSelector?,
     val selectorReliability: ElementSelectorReliability,
     val selectorMatchCount: Int,
-)
+    val ancestorCandidates: List<NodeSelector> = emptyList(),
+) {
+    val canUseSelector: Boolean
+        get() = selector != null && selectorReliability == ElementSelectorReliability.Unique
+}
 
 fun inspectElementAt(
     hierarchy: RecordingHierarchyCapture,
@@ -34,13 +40,28 @@ fun inspectElementAt(
         return ElementInspection(target, null, ElementSelectorReliability.HierarchyIncomplete, 0)
     }
     val assessed = candidates.map { selector ->
-        selector to hierarchy.nodes.count { selector.matches(it.node) }
+        selector to hierarchy.nodes.indices.count { hierarchy.nodes.matches(it, selector) }
     }
     val unique = assessed.firstOrNull { it.second == 1 }
     if (unique != null) {
         return ElementInspection(target, unique.first, ElementSelectorReliability.Unique, 1)
     }
     val best = assessed.minByOrNull { it.second }
+    val ancestorCandidates = candidates.flatMap { selector ->
+        hierarchy.nodes.ancestorCandidates(targetIndex, selector)
+    }.distinct()
+    val uniqueAncestorCandidates = ancestorCandidates.filter { selector ->
+        hierarchy.nodes.indices.count { hierarchy.nodes.matches(it, selector) } == 1
+    }
+    if (uniqueAncestorCandidates.isNotEmpty()) {
+        return ElementInspection(
+            node = target,
+            selector = uniqueAncestorCandidates.first(),
+            selectorReliability = ElementSelectorReliability.Unique,
+            selectorMatchCount = 1,
+            ancestorCandidates = uniqueAncestorCandidates,
+        )
+    }
     return ElementInspection(
         node = target,
         selector = best?.first,
@@ -50,7 +71,25 @@ fun inspectElementAt(
             ElementSelectorReliability.Ambiguous
         },
         selectorMatchCount = best?.second ?: 0,
+        ancestorCandidates = emptyList(),
     )
+}
+
+private fun List<RecordingHierarchyNode>.ancestorCandidates(
+    targetIndex: Int,
+    targetSelector: NodeSelector,
+): List<NodeSelector> {
+    val hierarchy = this
+    return buildList {
+        var ancestorIndex: Int? = hierarchy.getOrNull(targetIndex)?.parentIndex
+        while (ancestorIndex != null) {
+            val ancestorNode = hierarchy.getOrNull(ancestorIndex) ?: break
+            ancestorSelectorCandidates(ancestorNode.node).forEach { ancestor ->
+                add(targetSelector.copy(ancestor = ancestor))
+            }
+            ancestorIndex = ancestorNode.parentIndex
+        }
+    }
 }
 
 private fun List<RecordingHierarchyNode>.depthOf(index: Int): Int {
@@ -85,9 +124,28 @@ private fun ObservedNode.area(): Long {
         (values[3] - values[1]).toLong().coerceAtLeast(0)
 }
 
+private fun List<RecordingHierarchyNode>.matches(index: Int, selector: NodeSelector): Boolean {
+    val hierarchyNode = getOrNull(index) ?: return false
+    if (!selector.matches(hierarchyNode.node)) return false
+    val ancestor = selector.ancestor ?: return true
+    var ancestorIndex = hierarchyNode.parentIndex
+    while (ancestorIndex != null) {
+        val candidate = getOrNull(ancestorIndex) ?: return false
+        if (ancestor.matches(candidate.node)) return true
+        ancestorIndex = candidate.parentIndex
+    }
+    return false
+}
+
 private fun NodeSelector.matches(node: ObservedNode): Boolean =
     packageName == node.packageName &&
         (viewId == null || viewId == node.viewId) &&
-        (text == null || text == node.text) &&
-        (contentDescription == null || contentDescription == node.contentDescription) &&
+        textMatchMode.matches(text, node.text) &&
+        contentDescriptionMatchMode.matches(contentDescription, node.contentDescription) &&
+        (className == null || className == node.className)
+
+private fun AncestorSelector.matches(node: ObservedNode): Boolean =
+    (viewId == null || viewId == node.viewId) &&
+        textMatchMode.matches(text, node.text) &&
+        contentDescriptionMatchMode.matches(contentDescription, node.contentDescription) &&
         (className == null || className == node.className)

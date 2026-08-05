@@ -2,6 +2,19 @@ package com.aiindexfinger.data
 
 import com.aiindexfinger.model.Workflow
 
+internal const val MAX_UNIQUE_ID_ATTEMPTS = 16
+
+private fun allocateUniqueId(
+    usedIds: MutableSet<String>,
+    newId: () -> String,
+): String {
+    repeat(MAX_UNIQUE_ID_ATTEMPTS) {
+        val candidate = newId()
+        if (usedIds.add(candidate)) return candidate
+    }
+    throw IllegalStateException("Unable to allocate a unique import ID")
+}
+
 internal fun normalizeImportedWorkflows(
     existing: List<Workflow>,
     imported: List<Workflow>,
@@ -12,7 +25,7 @@ internal fun normalizeImportedWorkflows(
         if (usedIds.add(workflow.id)) {
             workflow
         } else {
-            val replacementId = generateSequence(newId).first(usedIds::add)
+            val replacementId = allocateUniqueId(usedIds, newId)
             workflow.copy(id = replacementId, name = "${workflow.name} imported")
         }
     }
@@ -31,7 +44,7 @@ internal fun mergeImportedLibrary(
         val targetId = when {
             matchingName != null -> matchingName.id
             usedFolderIds.add(folder.id) -> folder.id
-            else -> generateSequence(newId).first(usedFolderIds::add)
+            else -> allocateUniqueId(usedFolderIds, newId)
         }
         folderIdMap[folder.id] = targetId
         if (folders.none { it.id == targetId }) folders += folder.copy(id = targetId)
@@ -43,7 +56,7 @@ internal fun mergeImportedLibrary(
         val targetId = if (usedWorkflowIds.add(workflow.id)) {
             workflow.id
         } else {
-            generateSequence(newId).first(usedWorkflowIds::add)
+            allocateUniqueId(usedWorkflowIds, newId)
         }
         workflowIdMap[workflow.id] = targetId
         if (targetId == workflow.id) workflow else workflow.copy(id = targetId, name = "${workflow.name} imported")

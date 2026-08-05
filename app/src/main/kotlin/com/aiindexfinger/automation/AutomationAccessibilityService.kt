@@ -41,6 +41,7 @@ import com.aiindexfinger.executor.WorkflowExecutor
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
 import com.aiindexfinger.data.toRunRecord
+import com.aiindexfinger.model.AncestorSelector
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.RecordedBounds
@@ -559,6 +560,19 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(pickButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
+            inspection?.selector?.takeIf { inspection.canUseSelector }?.let { selector ->
+                addView(
+                    Button(this@AutomationAccessibilityService).apply {
+                        setText(R.string.element_inspector_use_selector)
+                        contentDescription = getString(R.string.element_inspector_use_selector_description)
+                        setOnClickListener {
+                            inspectedSelectorHandoff.publish(selector)
+                            stopElementInspector(returnToEditor = true, preservePendingSelector = true)
+                        }
+                    },
+                    LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f),
+                )
+            }
             addView(closeButton, LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f))
         }
         val panel = LinearLayout(this).apply {
@@ -650,6 +664,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             ElementSelectorReliability.HierarchyIncomplete ->
                 getString(R.string.element_inspector_hierarchy_incomplete)
         }
+        val ancestorCandidates = inspection.ancestorCandidates
+            .joinToString(separator = "\n") { it.toString() }
+            .ifBlank { unavailable }
         return getString(
             R.string.element_inspector_result,
             node.packageName,
@@ -664,6 +681,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             localizedBoolean(node.scrollable),
             inspection.selector?.toString() ?: unavailable,
             reliability,
+            ancestorCandidates,
         )
     }
 
@@ -679,13 +697,17 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         elementInspectionCapture = null
     }
 
-    private fun stopElementInspector(returnToEditor: Boolean = false) {
+    private fun stopElementInspector(
+        returnToEditor: Boolean = false,
+        preservePendingSelector: Boolean = false,
+    ) {
         stopElementPickOverlay()
         elementInspectorView?.let { view ->
             runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
         }
         elementInspectorView = null
         monitoredTargetPackage = null
+        if (!preservePendingSelector) inspectedSelectorHandoff.clear()
         if (returnToEditor) returnToEditor()
     }
 
@@ -1166,11 +1188,16 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 val packageName = node.packageName?.toString() ?: return@mapNotNull null
                 if (packageName == ownPackageName || packageName != targetPackageName) return@mapNotNull null
                 val bounds = Rect().also(node::getBoundsInScreen)
+                val (text, description) = sanitizedRecordedText(
+                    isPassword = node.isPassword,
+                    text = node.text.nonBlankString(),
+                    contentDescription = node.contentDescription.nonBlankString(),
+                )
                 CaptureNode(
                     packageName = packageName,
                     viewId = node.viewIdResourceName,
-                    text = node.text.nonBlankString(),
-                    contentDescription = node.contentDescription.nonBlankString(),
+                    text = text,
+                    contentDescription = description,
                     className = node.className.nonBlankString(),
                     left = bounds.left,
                     top = bounds.top,
@@ -1397,10 +1424,17 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             ?: packageManager.getLaunchIntentForPackage(packageName)
             ?: return false
         if (launchIntent.resolveActivity(packageManager) == null) return false
-        return runCatching {
+        val started = runCatching {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(launchIntent)
         }.isSuccess
+        if (!started) return false
+        return awaitTargetPackageVisible(
+            packageName = packageName,
+            isVisible = { targetPackage ->
+                rootInActiveWindow?.packageName?.toString() == targetPackage
+            },
+        )
     }
 
     override suspend fun click(selector: NodeSelector): Boolean {
@@ -1633,22 +1667,27 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     override suspend fun nodeExists(selector: NodeSelector): Boolean = findNode(selector) != null
 
     fun countMatches(selector: NodeSelector): Int {
-        return windows.asSequence()
-            .filter { it.root?.packageName?.toString() == selector.packageName }
-            .mapNotNull { it.root }
+        return selectorRoots(selector)
             .flatMap { root -> root.depthFirstSequence() }
             .count { node -> node.matches(selector) }
     }
 
     private fun findNode(selector: NodeSelector): AccessibilityNodeInfo? {
-        return windows.asSequence()
-            .filter { it.root?.packageName?.toString() == selector.packageName }
-            .mapNotNull { it.root }
+        return selectorRoots(selector)
             .flatMap { root -> root.depthFirstSequence() }
                 .filter { node -> node.matches(selector) }
                 .drop(selector.matchIndex)
                 .firstOrNull()
     }
+
+    private fun selectorRoots(selector: NodeSelector): Sequence<AccessibilityNodeInfo> =
+        if (selectorUsesActiveWindow(selector.packageName)) {
+            rootInActiveWindow?.let { sequenceOf(it) } ?: emptySequence()
+        } else {
+            windows.asSequence()
+                .filter { it.root?.packageName?.toString() == selector.packageName }
+                .mapNotNull { it.root }
+        }
 
     private fun AccessibilityNodeInfo.depthFirstSequence(): Sequence<AccessibilityNodeInfo> = sequence {
         yield(this@depthFirstSequence)
@@ -1686,7 +1725,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     }
 
     private fun AccessibilityNodeInfo.matches(selector: NodeSelector): Boolean {
-        return packageName?.toString() == selector.packageName &&
+        val targetMatches =
+            (selector.packageName.isBlank() || packageName?.toString() == selector.packageName) &&
             selector.viewId.matchesIfPresent(viewIdResourceName) &&
             selector.text.matchesIfPresent(text?.toString(), selector.textMatchMode) &&
             selector.contentDescription.matchesIfPresent(
@@ -1694,7 +1734,24 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 selector.contentDescriptionMatchMode,
             ) &&
             selector.className.matchesIfPresent(className?.toString())
+        return targetMatches && selector.ancestor?.let { hasMatchingAncestor(it) } != false
     }
+
+    private fun AccessibilityNodeInfo.hasMatchingAncestor(selector: AncestorSelector): Boolean {
+        var ancestor = parent
+        while (ancestor != null) {
+            if (selector.matches(ancestor.toMatchSnapshot())) return true
+            ancestor = ancestor.parent
+        }
+        return false
+    }
+
+    private fun AccessibilityNodeInfo.toMatchSnapshot(): NodeMatchSnapshot = NodeMatchSnapshot(
+        viewId = viewIdResourceName,
+        text = text?.toString(),
+        contentDescription = contentDescription?.toString(),
+        className = className?.toString(),
+    )
 
     private fun String?.matchesIfPresent(actual: String?): Boolean = this == null || this == actual
 
@@ -1752,6 +1809,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         val screenCaptureState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.Idle)
         val pendingOverlayAction = MutableStateFlow<PendingOverlayAction?>(null)
         val overlayStatus = MutableStateFlow<String?>(null)
+        private val inspectedSelectorHandoff = InspectedSelectorHandoff()
+        val inspectedSelector = inspectedSelectorHandoff.selector
         private val observationController = AccessibilityObservationController {
             instance?.observationSettleJob?.cancel()
             instance?.observationSettleJob = null
@@ -1785,10 +1844,27 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             }
         }
 
+        fun consumeInspectedSelector(): NodeSelector? = inspectedSelectorHandoff.consume()
+
         fun consumePendingOverlayAction(action: PendingOverlayAction) {
             if (pendingOverlayAction.value == action) pendingOverlayAction.value = null
         }
     }
+}
+
+internal fun selectorUsesActiveWindow(packageName: String): Boolean = packageName.isBlank()
+
+internal suspend fun awaitTargetPackageVisible(
+    packageName: String,
+    isVisible: (String) -> Boolean,
+    maxChecks: Int = 50,
+    pollIntervalMillis: Long = 100L,
+): Boolean {
+    repeat(maxChecks) { checkIndex ->
+        if (isVisible(packageName)) return true
+        if (checkIndex < maxChecks - 1) delay(pollIntervalMillis)
+    }
+    return false
 }
 
 private data class ElementMonitorViews(

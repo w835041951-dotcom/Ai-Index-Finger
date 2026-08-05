@@ -1,5 +1,6 @@
 package com.aiindexfinger.automation
 
+import com.aiindexfinger.model.NodeSelector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -22,6 +23,7 @@ class ElementInspectorTest {
         assertEquals(button, inspection.node)
         assertEquals("com.example:id/save", inspection.selector?.viewId)
         assertEquals(ElementSelectorReliability.Unique, inspection.selectorReliability)
+        assertEquals(true, inspection.canUseSelector)
     }
 
     @Test
@@ -37,6 +39,50 @@ class ElementInspectorTest {
 
         assertEquals(ElementSelectorReliability.Ambiguous, inspection.selectorReliability)
         assertEquals(2, inspection.selectorMatchCount)
+        assertEquals(false, inspection.canUseSelector)
+    }
+
+    @Test
+    fun `recommends unique ancestor candidates for duplicate controls`() {
+        val aliceRow = node(text = "Alice", bounds = "0 0 200 100")
+        val aliceDelete = node(text = "Delete", bounds = "100 0 200 100", clickable = true)
+        val bobRow = node(text = "Bob", bounds = "0 100 200 200")
+        val bobDelete = node(text = "Delete", bounds = "100 100 200 200", clickable = true)
+        val hierarchy = RecordingHierarchyCapture(
+            nodes = listOf(
+                RecordingHierarchyNode(aliceRow, null),
+                RecordingHierarchyNode(aliceDelete, 0),
+                RecordingHierarchyNode(bobRow, null),
+                RecordingHierarchyNode(bobDelete, 2),
+            ),
+            complete = true,
+        )
+
+        val inspection = inspectElementAt(hierarchy, 150, 50)!!
+
+        assertEquals(ElementSelectorReliability.Unique, inspection.selectorReliability)
+        assertEquals("Delete", inspection.selector?.text)
+        assertEquals("Alice", inspection.selector?.ancestor?.text)
+        assertEquals(1, inspection.selectorMatchCount)
+        assertEquals("Alice", inspection.ancestorCandidates.first().ancestor?.text)
+        assertEquals(true, inspection.canUseSelector)
+    }
+
+    @Test
+    fun `does not generate ancestor candidates for incomplete hierarchy`() {
+        val row = node(text = "Alice", bounds = "0 0 200 100")
+        val button = node(text = "Delete", bounds = "100 0 200 100", clickable = true)
+
+        val inspection = inspectElementAt(
+            RecordingHierarchyCapture(
+                listOf(RecordingHierarchyNode(row, null), RecordingHierarchyNode(button, 0)),
+                complete = false,
+            ),
+            150,
+            50,
+        )!!
+
+        assertEquals(emptyList<NodeSelector>(), inspection.ancestorCandidates)
     }
 
     @Test
@@ -51,6 +97,7 @@ class ElementInspectorTest {
 
         assertNull(inspection.selector)
         assertEquals(ElementSelectorReliability.HierarchyIncomplete, inspection.selectorReliability)
+        assertEquals(false, inspection.canUseSelector)
     }
 
     @Test

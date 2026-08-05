@@ -27,9 +27,13 @@ class WorkflowScheduler(
         require(workflow.isReadyToRun()) { "只能计划就绪状态的工作流" }
         val schedule = WorkflowSchedule(workflow.id, workflow.name, targetEpochMillis, recurrence = recurrence)
         val delayMillis = scheduleDelayMillis(targetEpochMillis, currentTimeMillis())
-        val schedules = store.put(schedule)
-        enqueue(schedule, delayMillis)
-        schedules
+        persistScheduledWork(
+            schedule = schedule,
+            loadSchedules = store::load,
+            persistSchedule = store::put,
+            removeSchedule = store::remove,
+            enqueue = { enqueue(schedule, delayMillis) },
+        )
     }
 
     internal fun completeOccurrence(workflowId: String, expectedAtMillis: Long) =
@@ -120,3 +124,21 @@ internal fun scheduleDelayMillis(targetEpochMillis: Long, currentEpochMillis: Lo
 }
 
 internal val MAX_SCHEDULE_DELAY_MILLIS: Long = TimeUnit.DAYS.toMillis(365)
+
+internal inline fun persistScheduledWork(
+    schedule: WorkflowSchedule,
+    loadSchedules: () -> List<WorkflowSchedule>,
+    persistSchedule: (WorkflowSchedule) -> List<WorkflowSchedule>,
+    removeSchedule: (String) -> List<WorkflowSchedule>,
+    enqueue: () -> Unit,
+): List<WorkflowSchedule> {
+    val previous = loadSchedules().firstOrNull { it.workflowId == schedule.workflowId }
+    val schedules = persistSchedule(schedule)
+    try {
+        enqueue()
+    } catch (error: Exception) {
+        if (previous == null) removeSchedule(schedule.workflowId) else persistSchedule(previous)
+        throw error
+    }
+    return schedules
+}

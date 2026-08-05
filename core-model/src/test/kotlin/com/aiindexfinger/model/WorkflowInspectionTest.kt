@@ -56,4 +56,15 @@ class WorkflowInspectionTest {
         assertEquals(3, workflow.selectorUses().size)
         assertEquals(setOf("com.example", "com.other"), workflow.targetPackages())
     }
+
+    @Test
+    fun `omits active-window selectors from target packages`() {
+        val workflow = Workflow(
+            id = "active-window",
+            name = "Active window",
+            steps = listOf(Step.Click("click", NodeSelector("", text = "Target"))),
+        )
+
+        assertEquals(emptySet(), workflow.targetPackages())
+    }
 }

@@ -1,5 +1,6 @@
 package com.aiindexfinger.data
 
+import com.aiindexfinger.model.AncestorSelector
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.RecordedBounds
@@ -96,6 +97,48 @@ class WorkflowTransferCodecTest {
 
         assertEquals(Workflow.CURRENT_SCHEMA_VERSION, decoded.schemaVersion)
         assertEquals(workflow, decoded)
+    }
+
+    @Test
+    fun activeWindowSelectorRoundTripsWithoutAPackage() {
+        val workflow = Workflow(
+            id = "active-window",
+            name = "Active window",
+            steps = listOf(Step.Click("click", NodeSelector("", text = "Continue"))),
+        )
+
+        val decoded = WorkflowTransferCodec.decode(WorkflowTransferCodec.encode(workflow))
+
+        assertEquals(workflow, decoded)
+        assertEquals("", (decoded.steps.single() as Step.Click).selector.packageName)
+    }
+
+    @Test
+    fun ancestorScopedSelectorRoundTripsInCurrentSchema() {
+        val selector = NodeSelector(
+            packageName = "com.example",
+            text = "Delete",
+            ancestor = AncestorSelector(text = "Alice"),
+        )
+        val workflow = Workflow(
+            id = "ancestor-selector",
+            name = "Ancestor selector",
+            steps = listOf(Step.Click("click", selector)),
+        )
+
+        val decoded = WorkflowTransferCodec.decode(WorkflowTransferCodec.encode(workflow))
+
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, decoded.schemaVersion)
+        assertEquals(selector, (decoded.steps.single() as Step.Click).selector)
+    }
+
+    @Test
+    fun schemaSixteenSelectorDefaultsToNoAncestorConstraint() {
+        val previous = """{"schemaVersion":16,"id":"old-16","name":"Old 16","steps":[{"type":"click","id":"click","selector":{"packageName":"com.example","text":"Delete"},"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
+
+        val selector = (WorkflowTransferCodec.decode(previous).steps.single() as Step.Click).selector
+
+        assertEquals(null, selector.ancestor)
     }
 
     @Test

@@ -45,6 +45,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -82,7 +83,9 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -108,6 +111,7 @@ import com.aiindexfinger.automation.WorkflowPreflightReport
 import com.aiindexfinger.automation.buildWorkflowPreflightReport
 import com.aiindexfinger.automation.recoveryActions
 import com.aiindexfinger.data.RunHistoryStore
+import com.aiindexfinger.data.clearRunHistory
 import com.aiindexfinger.data.RunRecord
 import com.aiindexfinger.data.RunStepBranch
 import com.aiindexfinger.data.RunStepLocation
@@ -121,6 +125,7 @@ import com.aiindexfinger.data.filterRunRecords
 import com.aiindexfinger.data.WorkflowStore
 import com.aiindexfinger.data.WorkflowLoadResult
 import com.aiindexfinger.data.WorkflowLibrary
+import com.aiindexfinger.data.readAndCommitImportedLibrary
 import com.aiindexfinger.data.WorkflowFolder
 import com.aiindexfinger.data.WorkflowFolderSelection
 import com.aiindexfinger.data.filterWorkflows
@@ -133,13 +138,13 @@ import com.aiindexfinger.data.AiIndexFingerSelfTestPack
 import com.aiindexfinger.data.sortedFolders
 import com.aiindexfinger.data.WorkflowTransfer
 import com.aiindexfinger.data.WorkflowVersion
-import com.aiindexfinger.data.mergeImportedLibrary
 import com.aiindexfinger.data.resolveRunHistoryDestination
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeAttribute
+import com.aiindexfinger.model.AncestorSelector
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.RecordedClickFallbackCause
@@ -209,16 +214,13 @@ import java.io.ByteArrayOutputStream
 import java.util.Base64
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
-    private val workflowStore by lazy { WorkflowStore(this) }
+    private val workflowPersistence by lazy { application as AiIndexFingerApplication }
     private val runHistoryStore by lazy { RunHistoryStore(this) }
     private val workflowScheduler by lazy { WorkflowScheduler(this) }
     private val appPreferences by lazy { AppPreferences(this) }
@@ -226,10 +228,6 @@ class MainActivity : ComponentActivity() {
         getSharedPreferences(RELEASE_PREFERENCES_NAME, MODE_PRIVATE)
     }
     private val scheduledWorkflowEvents = ScheduledWorkflowEventController()
-    private val persistenceDispatcher = Dispatchers.IO.limitedParallelism(1)
-    private val persistenceScope = CoroutineScope(SupervisorJob() + persistenceDispatcher)
-    private val mutablePersistenceError = MutableStateFlow<String?>(null)
-    private val persistenceError = mutablePersistenceError.asStateFlow()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -247,33 +245,25 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     val scheduledWorkflowEvent by scheduledWorkflowEvents.event.collectAsStateWithLifecycle()
-                    val persistenceFailure by persistenceError.collectAsStateWithLifecycle()
+                    val workflowPersistenceFailure by
+                        workflowPersistence.persistenceFailure.collectAsStateWithLifecycle()
                     WorkflowApp(
                         initialLibrary = state.library,
                         initialRunRecords = state.runRecords,
                         initialRunHistoryCorrupt = state.runHistoryCorrupt,
                         initialSchedules = state.schedules,
                         initialRunMessage = state.loadMessageRes?.let { stringResource(it) },
-                        persistenceFailure = persistenceFailure,
+                        workflowPersistenceFailure = workflowPersistenceFailure,
+                        onWorkflowPersistenceFailureConsumed =
+                            workflowPersistence::consumePersistenceFailure,
                         scheduledWorkflowEvent = scheduledWorkflowEvent,
                         onScheduledWorkflowEventConsumed = scheduledWorkflowEvents::consume,
-                        onSave = { library ->
-                            persistenceScope.launch {
-                                runCatching { workflowStore.saveLibrary(library) }
-                                    .onFailure { mutablePersistenceError.value = getString(R.string.save_failed) }
-                            }
-                        },
-                        onListVersions = { workflowId ->
-                            withContext(persistenceDispatcher) { workflowStore.listVersions(workflowId) }
-                        },
-                        onRollback = { workflowId, versionId ->
-                            withContext(persistenceDispatcher) { workflowStore.rollback(workflowId, versionId) }
-                        },
+                        onSave = workflowPersistence::saveLibrary,
+                        onCommitImport = workflowPersistence::commitLibrary,
+                        onListVersions = workflowPersistence::listVersions,
+                        onRollback = workflowPersistence::rollback,
                         onClearRunHistory = {
-                            persistenceScope.launch {
-                                runCatching { runHistoryStore.clear() }
-                                    .onFailure { mutablePersistenceError.value = getString(R.string.clear_history_failed) }
-                            }
+                            withContext(Dispatchers.IO) { runHistoryStore.clear() }
                         },
                         onSchedule = workflowScheduler::schedule,
                         onCancelSchedule = workflowScheduler::cancel,
@@ -300,12 +290,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadInitialState(): InitialAppState {
-        val workflowResult = workflowStore.loadDetailed()
+        val workflowResult = workflowPersistence.loadLibrary()
         val runHistoryResult = runHistoryStore.loadDetailed()
         val library = workflowResult.library
         val scheduleResult = runCatching {
             workflowScheduler.load(
-                library.workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
+                library.workflows.filter { it.isReadyToRun() }.map { it.id }.toSet()
             )
         }
         scheduleResult.exceptionOrNull()?.let { error ->
@@ -314,9 +304,7 @@ class MainActivity : ComponentActivity() {
         val loadedSchedules = scheduleResult.getOrDefault(emptyList())
         val missed = missedSchedules(loadedSchedules)
         var schedules = loadedSchedules
-        missed.forEach { schedule ->
-            schedules = workflowScheduler.consumeMissedOccurrence(schedule.workflowId)
-        }
+        missed.forEach { schedule -> schedules = workflowScheduler.consumeMissedOccurrence(schedule.workflowId) }
         val hasMissedSchedule = missed.isNotEmpty()
         return InitialAppState(
             library = library,
@@ -371,13 +359,15 @@ private fun WorkflowApp(
     initialRunHistoryCorrupt: Boolean,
     initialSchedules: List<WorkflowSchedule>,
     initialRunMessage: String?,
-    persistenceFailure: String?,
+    workflowPersistenceFailure: com.aiindexfinger.data.PersistenceFailureEvent?,
+    onWorkflowPersistenceFailureConsumed: (Long) -> Unit,
     scheduledWorkflowEvent: ScheduledWorkflowEvent?,
     onScheduledWorkflowEventConsumed: (Long) -> Unit,
     onSave: (WorkflowLibrary) -> Unit,
+    onCommitImport: suspend (WorkflowLibrary) -> Unit,
         onListVersions: suspend (String) -> List<WorkflowVersion>,
         onRollback: suspend (String, String) -> Workflow,
-    onClearRunHistory: () -> Unit,
+    onClearRunHistory: suspend () -> Unit,
     onSchedule: (Workflow, Long, ScheduleRecurrence) -> List<WorkflowSchedule>,
     onCancelSchedule: (String) -> List<WorkflowSchedule>,
     onReloadSchedules: (Set<String>) -> List<WorkflowSchedule>,
@@ -404,17 +394,35 @@ private fun WorkflowApp(
     var workflowComparison by remember { mutableStateOf<Pair<Workflow, Workflow>?>(null) }
         var versionHistory by remember { mutableStateOf<Pair<Workflow, List<WorkflowVersion>>?>(null) }
     var runMessage by remember { mutableStateOf(initialRunMessage) }
-    LaunchedEffect(persistenceFailure) {
-        if (persistenceFailure != null) runMessage = persistenceFailure
+    LaunchedEffect(workflowPersistenceFailure?.sequence) {
+        workflowPersistenceFailure?.let { failure ->
+            runMessage = failure.message
+            onWorkflowPersistenceFailureConsumed(failure.sequence)
+        }
     }
     var preflightReport by remember { mutableStateOf<Pair<Workflow, WorkflowPreflightReport>?>(null) }
     val runningWorkflowId by AutomationAccessibilityService.runningWorkflowId.collectAsStateWithLifecycle()
     val latestRun by AutomationAccessibilityService.latestRun.collectAsStateWithLifecycle()
     var pendingExport by remember { mutableStateOf<Workflow?>(null) }
     var pendingBundleExport by remember { mutableStateOf<WorkflowLibrary?>(null) }
+    var importInProgress by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val workflowTransfer = remember { WorkflowTransfer(context.contentResolver) }
+    val requestClearRunHistory: () -> Unit = {
+        coroutineScope.launch {
+            try {
+                clearRunHistory(onClearRunHistory)
+                runRecords = emptyList()
+                runHistoryCorrupt = false
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                runMessage = context.getString(R.string.clear_history_failed)
+            }
+        }
+        Unit
+    }
     DisposableEffect(editingWorkflow != null) {
         val observationLease = if (editingWorkflow != null) {
             AutomationAccessibilityService.acquireObservationLease()
@@ -529,27 +537,39 @@ private fun WorkflowApp(
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
-        if (uri != null) {
+        if (uri != null && !importInProgress) {
+            importInProgress = true
             coroutineScope.launch {
-                val outcome = withContext(Dispatchers.IO) {
-                    runCatching { workflowTransfer.readLibrary(uri) }
-                }
-                outcome.onSuccess { importedLibrary ->
-                    val updated = mergeImportedLibrary(library, importedLibrary, ::newId)
-                    persist(updated)
+                try {
+                    var currentWorkflowCount = 0
+                    val updated = readAndCommitImportedLibrary(
+                        readImported = {
+                            withContext(Dispatchers.IO) { workflowTransfer.readLibrary(uri) }
+                        },
+                        current = {
+                            library.also { currentWorkflowCount = it.workflows.size }
+                        },
+                        newId = ::newId,
+                        save = onCommitImport,
+                    )
+                    library = updated
                     runMessage = context.getString(
                         R.string.workflows_imported,
-                        updated.workflows.size - workflows.size,
+                        updated.workflows.size - currentWorkflowCount,
                     )
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    val details = (error as? InvalidWorkflowException)
+                        ?.issue
+                        ?.localizedMessage(context)
+                        ?: error.message?.takeIf(String::isNotBlank)
+                        ?: context.getString(R.string.import_error_unknown)
+                    runMessage = context.getString(R.string.import_failed, details)
+                } finally {
+                    importInProgress = false
                 }
-                        .onFailure { error ->
-                            val details = (error as? InvalidWorkflowException)
-                                ?.issue
-                                ?.localizedMessage(context)
-                                ?: error.message.orEmpty()
-                            runMessage = context.getString(R.string.import_failed, details)
-                        }
-                    }
+            }
         }
     }
 
@@ -639,11 +659,7 @@ private fun WorkflowApp(
                 initialEditingStepPath = stepPath
                 editingWorkflow = workflow
             },
-            onClear = {
-                onClearRunHistory()
-                runRecords = emptyList()
-                runHistoryCorrupt = false
-            },
+            onClear = requestClearRunHistory,
         )
     } else {
         WorkflowHome(
@@ -736,7 +752,10 @@ private fun WorkflowApp(
                 initialEditingStepPath = null
                 editingWorkflow = it
             },
-            onImport = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
+            onImport = {
+                if (!importInProgress) importLauncher.launch(arrayOf("application/json", "text/plain"))
+            },
+            importInProgress = importInProgress,
             onExportAll = {
                 pendingBundleExport = library
                 bundleExportLauncher.launch("ai-index-finger-backup.json")
@@ -830,11 +849,7 @@ private fun WorkflowApp(
                         )
                     }
             },
-            onClearRunHistory = {
-                onClearRunHistory()
-                runRecords = emptyList()
-                runHistoryCorrupt = false
-            },
+            onClearRunHistory = requestClearRunHistory,
             onViewRunHistory = { showRunHistory = true },
             onOpenSettings = { showSettings = true },
             runningWorkflowId = runningWorkflowId,
@@ -973,6 +988,24 @@ private fun WorkflowApp(
             },
         )
     }
+
+    if (importInProgress) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(stringResource(R.string.import_in_progress_title)) },
+            text = {
+                Row(
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(Modifier.size(24.dp))
+                    Text(stringResource(R.string.import_in_progress_message))
+                }
+            },
+            confirmButton = {},
+        )
+    }
 }
 
 @Composable
@@ -990,6 +1023,7 @@ internal fun WorkflowHome(
     onCreate: (Workflow) -> Unit,
     onEdit: (Workflow) -> Unit,
     onImport: () -> Unit,
+    importInProgress: Boolean,
     onExportAll: () -> Unit,
     onExport: (Workflow) -> Unit,
     onDuplicate: (Workflow) -> Unit,
@@ -1127,7 +1161,10 @@ internal fun WorkflowHome(
                     onClick = onExportAll,
                     enabled = workflows.isNotEmpty() && runningWorkflowId == null,
                 ) { Text(stringResource(R.string.backup)) }
-                TextButton(onClick = onImport, enabled = runningWorkflowId == null) { Text(stringResource(R.string.import_action)) }
+                TextButton(
+                    onClick = onImport,
+                    enabled = runningWorkflowId == null && !importInProgress,
+                ) { Text(stringResource(R.string.import_action)) }
             }
             OutlinedButton(
                 onClick = onInstallSettingsPack,
@@ -1828,6 +1865,7 @@ private fun WorkflowEditor(
     var showRepeatDialog by remember { mutableStateOf(false) }
     var showConditionDialog by remember { mutableStateOf(false) }
     var showNodeConditionDialog by remember { mutableStateOf(false) }
+    var inspectedClickSelector by remember { mutableStateOf<NodeSelector?>(null) }
     var policyStepPath by remember { mutableStateOf<StepPath?>(null) }
     var editingStepPath by remember(workflow.id) { mutableStateOf(initialEditingStepPath) }
     var stepToDeletePath by remember { mutableStateOf<StepPath?>(null) }
@@ -1836,6 +1874,7 @@ private fun WorkflowEditor(
     var showAllValidationIssues by remember(workflow.id) { mutableStateOf(false) }
     val observedNodes by AutomationAccessibilityService.observedNodes.collectAsStateWithLifecycle()
     val pendingOverlayAction by AutomationAccessibilityService.pendingOverlayAction.collectAsStateWithLifecycle()
+    val inspectedSelector by AutomationAccessibilityService.inspectedSelector.collectAsStateWithLifecycle()
     val overlayStatus by AutomationAccessibilityService.overlayStatus.collectAsStateWithLifecycle()
     val defaultTimeoutMillis = defaultTimeoutText.toLongOrNull()
     val currentSteps = steps.stepsAt(currentListPath)
@@ -1894,6 +1933,12 @@ private fun WorkflowEditor(
                 }
             }
         }
+    }
+
+    LaunchedEffect(inspectedSelector) {
+        if (inspectedSelector == null) return@LaunchedEffect
+        inspectedClickSelector = AutomationAccessibilityService.consumeInspectedSelector()
+        showClickDialog = inspectedClickSelector != null
     }
 
     BackHandler(onBack = requestBack)
@@ -2102,7 +2147,13 @@ private fun WorkflowEditor(
                 OutlinedButton(onClick = { showLaunchDialog = true }, modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.launch_app))
                 }
-                Button(onClick = { showClickDialog = true }, modifier = Modifier.weight(1f)) {
+                Button(
+                    onClick = {
+                        inspectedClickSelector = null
+                        showClickDialog = true
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
                     Text(stringResource(R.string.click))
                 }
             }
@@ -2221,13 +2272,18 @@ private fun WorkflowEditor(
     if (showClickDialog) {
         ClickStepDialog(
             observedNodes = observedNodes,
-            onDismiss = { showClickDialog = false },
+            initialSelector = inspectedClickSelector,
+            onDismiss = {
+                inspectedClickSelector = null
+                showClickDialog = false
+            },
             onAdd = { selector ->
                 steps = steps.insertStep(
                     currentListPath,
                     currentSteps.size,
                     Step.Click(UUID.randomUUID().toString(), selector),
                 )
+                inspectedClickSelector = null
                 showClickDialog = false
             },
         )
@@ -2248,7 +2304,7 @@ private fun WorkflowEditor(
     if (showLongClickDialog) {
         ClickStepDialog(
             observedNodes = observedNodes,
-            title = "长按元素",
+            titleRes = R.string.long_click_element,
             onDismiss = { showLongClickDialog = false },
             onAdd = { selector ->
                 steps = steps.insertStep(
@@ -2403,8 +2459,8 @@ private fun WorkflowEditor(
             is Step.LongClick -> ClickStepDialog(
                 observedNodes = observedNodes,
                 initialSelector = step.selector,
-                title = "长按元素",
-                confirmLabel = "保存",
+                titleRes = R.string.long_click_element,
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { selector ->
                     steps = steps.replaceStep(path, step.copy(selector = selector))
@@ -2414,7 +2470,7 @@ private fun WorkflowEditor(
             is Step.Click -> ClickStepDialog(
                 observedNodes = observedNodes,
                 initialSelector = step.selector,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { selector ->
                     steps = steps.replaceStep(path, step.copy(selector = selector))
@@ -2880,6 +2936,7 @@ private fun InputTextDialog(
     onDismiss: () -> Unit,
     onAdd: (NodeSelector, String, String?, TextInputMethod) -> Unit,
 ) {
+    val context = LocalContext.current
     DisposableEffect(Unit) {
         onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
     }
@@ -2922,7 +2979,11 @@ private fun InputTextDialog(
                 }
                 selectedSelector?.let {
                     Text(
-                        "已选择：${it.viewId ?: it.text ?: it.contentDescription ?: it.className}",
+                        stringResource(
+                            R.string.selected_element,
+                            it.viewId ?: it.text ?: it.contentDescription ?: it.className.orEmpty(),
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
@@ -3392,7 +3453,11 @@ private fun ScrollStepDialog(
                 }
                 selectedSelector?.let { selector ->
                     Text(
-                        "已选择：${selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className}",
+                        stringResource(
+                            R.string.selected_element,
+                            selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className.orEmpty(),
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
@@ -3492,7 +3557,11 @@ private fun WaitNodeDialog(
                 }
                 selectedSelector?.let {
                     Text(
-                        "已选择：${it.viewId ?: it.text ?: it.contentDescription ?: it.className}",
+                        stringResource(
+                            R.string.selected_element,
+                            it.viewId ?: it.text ?: it.contentDescription ?: it.className.orEmpty(),
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
@@ -3758,7 +3827,11 @@ private fun NodeConditionDialog(
                 }
                 selectedSelector?.let { selector ->
                     Text(
-                        "已选择：${selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className}",
+                        stringResource(
+                            R.string.selected_element,
+                            selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className.orEmpty(),
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
@@ -3826,7 +3899,11 @@ private fun ReadNodeTextDialog(
                 }
                 selectedSelector?.let { selector ->
                     Text(
-                        "已选择：${selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className}",
+                        stringResource(
+                            R.string.selected_element,
+                            selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className.orEmpty(),
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
@@ -3897,17 +3974,28 @@ private fun SelectorMatchModeControls(
 
 @Composable
 private fun MatchIndexControl(matchIndex: Int, onChange: (Int) -> Unit) {
+    val previousMatchDescription = stringResource(R.string.previous_match)
+    val nextMatchDescription = stringResource(R.string.next_match)
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(stringResource(R.string.match_index, matchIndex + 1), modifier = Modifier.weight(1f))
-        TextButton(onClick = { onChange(matchIndex - 1) }, enabled = matchIndex > 0) {
+        TextButton(
+            onClick = { onChange(matchIndex - 1) },
+            enabled = matchIndex > 0,
+            modifier = Modifier.semantics {
+                contentDescription = previousMatchDescription
+            },
+        ) {
             Text("-")
         }
         TextButton(
             onClick = { onChange(matchIndex + 1) },
             enabled = matchIndex + 1 < NodeSelector.MAX_MATCH_COUNT,
+            modifier = Modifier.semantics {
+                contentDescription = nextMatchDescription
+            },
         ) { Text("+") }
     }
 }
@@ -4063,11 +4151,12 @@ private fun LaunchAppDialog(
 private fun ClickStepDialog(
     observedNodes: List<ObservedNode>,
     initialSelector: NodeSelector? = null,
-    title: String = "点击元素",
-    confirmLabel: String = "添加",
+    titleRes: Int = R.string.step_click_element,
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
     onAdd: (NodeSelector) -> Unit,
 ) {
+    val context = LocalContext.current
     DisposableEffect(Unit) {
         onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
     }
@@ -4085,12 +4174,35 @@ private fun ClickStepDialog(
     }
     var className by remember(initialSelector) { mutableStateOf(initialSelector?.className.orEmpty()) }
     var matchIndex by remember(initialSelector) { mutableStateOf(initialSelector?.matchIndex ?: 0) }
+    var useAncestor by remember(initialSelector) { mutableStateOf(initialSelector?.ancestor != null) }
+    var ancestorViewId by remember(initialSelector) { mutableStateOf(initialSelector?.ancestor?.viewId.orEmpty()) }
+    var ancestorText by remember(initialSelector) { mutableStateOf(initialSelector?.ancestor?.text.orEmpty()) }
+    var ancestorTextContains by remember(initialSelector) {
+        mutableStateOf(initialSelector?.ancestor?.textMatchMode == TextMatchMode.Contains)
+    }
+    var ancestorDescription by remember(initialSelector) {
+        mutableStateOf(initialSelector?.ancestor?.contentDescription.orEmpty())
+    }
+    var ancestorDescriptionContains by remember(initialSelector) {
+        mutableStateOf(initialSelector?.ancestor?.contentDescriptionMatchMode == TextMatchMode.Contains)
+    }
+    var ancestorClassName by remember(initialSelector) {
+        mutableStateOf(initialSelector?.ancestor?.className.orEmpty())
+    }
     var matchResult by remember { mutableStateOf<String?>(null) }
+    var matchSucceeded by remember { mutableStateOf(false) }
     val hasAttribute = listOf(viewId, text, description, className).any { it.isNotBlank() }
+    val hasAncestorAttribute = listOf(
+        ancestorViewId,
+        ancestorText,
+        ancestorDescription,
+        ancestorClassName,
+    ).any { it.isNotBlank() }
+    val selectorIsValid = hasAttribute && (!useAncestor || hasAncestorAttribute)
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(title) },
+        title = { Text(stringResource(titleRes)) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -4106,7 +4218,8 @@ private fun ClickStepDialog(
                         descriptionContains = false
                         className = selector.className.orEmpty()
                         matchIndex = selector.matchIndex
-                        matchResult = "已从截图中选择"
+                        matchResult = context.getString(R.string.selector_selected_from_screenshot)
+                        matchSucceeded = true
                     },
                     onSelectionError = { matchResult = it },
                 )
@@ -4114,7 +4227,7 @@ private fun ClickStepDialog(
                 Text(stringResource(R.string.recent_observed_elements), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 if (observedNodes.isEmpty()) {
                     Text(
-                        "打开一次目标应用，然后返回此处。可访问的元素会显示在这里。",
+                        stringResource(R.string.selector_observed_elements_empty),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
@@ -4135,10 +4248,11 @@ private fun ClickStepDialog(
                                 matchIndex = selector.matchIndex
                                 val count = service?.countMatches(selector) ?: 0
                                 matchResult = if (count == 1) {
-                                    "已自动选择唯一匹配项"
+                                    context.getString(R.string.selector_unique_auto_selected)
                                 } else {
-                                    "已选择稳定候选项，请在目标界面测试"
+                                    context.getString(R.string.selector_candidate_selected)
                                 }
+                                matchSucceeded = count == 1
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -4158,9 +4272,13 @@ private fun ClickStepDialog(
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(stringResource(R.string.element_attributes), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                NodeField(packageName, { packageName = it }, "包名", true)
-                NodeField(viewId, { viewId = it }, "资源 ID")
-                NodeField(text, { text = it }, "文本")
+                NodeField(
+                    packageName,
+                    { packageName = it },
+                    stringResource(R.string.selector_package_optional),
+                )
+                NodeField(viewId, { viewId = it }, stringResource(R.string.resource_id))
+                NodeField(text, { text = it }, stringResource(R.string.selector_text))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -4172,7 +4290,7 @@ private fun ClickStepDialog(
                         onCheckedChange = { textContains = it },
                     )
                 }
-                NodeField(description, { description = it }, "内容描述")
+                NodeField(description, { description = it }, stringResource(R.string.selector_content_description))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -4184,10 +4302,81 @@ private fun ClickStepDialog(
                         onCheckedChange = { descriptionContains = it },
                     )
                 }
-                NodeField(className, { className = it }, "类名")
+                NodeField(className, { className = it }, stringResource(R.string.class_name))
                 MatchIndexControl(matchIndex) { matchIndex = it }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(stringResource(R.string.limit_to_ancestor), modifier = Modifier.weight(1f))
+                    Switch(checked = useAncestor, onCheckedChange = { useAncestor = it })
+                }
+                if (useAncestor) {
+                    Text(
+                        stringResource(R.string.ancestor_attributes),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    NodeField(
+                        ancestorViewId,
+                        { ancestorViewId = it },
+                        stringResource(R.string.ancestor_resource_id),
+                    )
+                    NodeField(
+                        ancestorText,
+                        { ancestorText = it },
+                        stringResource(R.string.ancestor_text),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.text_contains), modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = ancestorTextContains,
+                            enabled = ancestorText.isNotBlank(),
+                            onCheckedChange = { ancestorTextContains = it },
+                        )
+                    }
+                    NodeField(
+                        ancestorDescription,
+                        { ancestorDescription = it },
+                        stringResource(R.string.ancestor_content_description),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.description_contains), modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = ancestorDescriptionContains,
+                            enabled = ancestorDescription.isNotBlank(),
+                            onCheckedChange = { ancestorDescriptionContains = it },
+                        )
+                    }
+                    NodeField(
+                        ancestorClassName,
+                        { ancestorClassName = it },
+                        stringResource(R.string.ancestor_class),
+                    )
+                }
+                if (!hasAttribute) {
+                    Text(
+                        stringResource(R.string.selector_attribute_required),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                } else if (useAncestor && !hasAncestorAttribute) {
+                    Text(
+                        stringResource(R.string.ancestor_attribute_required),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
                 OutlinedButton(
-                    enabled = packageName.isNotBlank() && hasAttribute &&
+                    enabled = selectorIsValid &&
                         AutomationAccessibilityService.instance != null,
                     onClick = {
                         val selector = nodeSelectorOrNull(
@@ -4199,23 +4388,36 @@ private fun ClickStepDialog(
                             descriptionContains,
                             className,
                             matchIndex,
+                            useAncestor,
+                            ancestorViewId,
+                            ancestorText,
+                            ancestorTextContains,
+                            ancestorDescription,
+                            ancestorDescriptionContains,
+                            ancestorClassName,
                         )
                         val count = selector?.let {
                             AutomationAccessibilityService.instance?.countMatches(it)
                         } ?: 0
                         matchResult = when (count) {
-                            0 -> "当前窗口中没有匹配元素"
-                            in 1..matchIndex -> "仅有 $count 个匹配项，无法选择第 ${matchIndex + 1} 个"
-                            1 -> "唯一匹配，选择器已就绪"
-                            else -> "$count 个匹配项中可选择第 ${matchIndex + 1} 个"
+                            0 -> context.getString(R.string.selector_no_matches)
+                            in 1..matchIndex -> context.getString(
+                                R.string.selector_index_unavailable,
+                                count,
+                                matchIndex + 1,
+                            )
+                            1 -> context.getString(R.string.selector_unique_ready)
+                            else -> context.getString(R.string.selector_match_available, count, matchIndex + 1)
                         }
+                        matchSucceeded = count > matchIndex
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.test_selector)) }
                 matchResult?.let { result ->
                     Text(
                         result,
-                        color = if (result.startsWith("唯一匹配")) Color(0xFF16815F) else Color(0xFFD04F3D),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = if (matchSucceeded) Color(0xFF16815F) else Color(0xFFD04F3D),
                         fontSize = 13.sp,
                     )
                 }
@@ -4223,7 +4425,7 @@ private fun ClickStepDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = packageName.isNotBlank() && hasAttribute,
+                enabled = selectorIsValid,
                 onClick = {
                     onAdd(
                         requireNotNull(
@@ -4236,11 +4438,18 @@ private fun ClickStepDialog(
                                 descriptionContains,
                                 className,
                                 matchIndex,
+                                useAncestor,
+                                ancestorViewId,
+                                ancestorText,
+                                ancestorTextContains,
+                                ancestorDescription,
+                                ancestorDescriptionContains,
+                                ancestorClassName,
                             ),
                         ),
                     )
                 },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
@@ -4264,6 +4473,10 @@ private fun ImageClickStepDialog(
     var captureSize by remember { mutableStateOf(IntSize.Zero) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragEnd by remember { mutableStateOf<Offset?>(null) }
+    var cropLeft by remember { mutableStateOf("") }
+    var cropTop by remember { mutableStateOf("") }
+    var cropRight by remember { mutableStateOf("") }
+    var cropBottom by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(captureState) {
@@ -4271,6 +4484,10 @@ private fun ImageClickStepDialog(
         if (packageName.isBlank()) packageName = state.nodes.firstOrNull()?.packageName.orEmpty()
         dragStart = null
         dragEnd = null
+        cropLeft = ""
+        cropTop = ""
+        cropRight = ""
+        cropBottom = ""
         error = null
     }
 
@@ -4339,6 +4556,30 @@ private fun ImageClickStepDialog(
                                             onDrag = { change, _ ->
                                                 change.consume()
                                                 dragEnd = change.position
+                                                val first = dragStart?.let { start ->
+                                                    mapFitCenterTapToScreen(
+                                                        start.x,
+                                                        start.y,
+                                                        captureSize.width,
+                                                        captureSize.height,
+                                                        state.bitmap.width,
+                                                        state.bitmap.height,
+                                                    )
+                                                }
+                                                val second = mapFitCenterTapToScreen(
+                                                    change.position.x,
+                                                    change.position.y,
+                                                    captureSize.width,
+                                                    captureSize.height,
+                                                    state.bitmap.width,
+                                                    state.bitmap.height,
+                                                )
+                                                if (first != null && second != null) {
+                                                    cropLeft = minOf(first.x, second.x).toString()
+                                                    cropTop = minOf(first.y, second.y).toString()
+                                                    cropRight = maxOf(first.x, second.x).toString()
+                                                    cropBottom = maxOf(first.y, second.y).toString()
+                                                }
                                             },
                                         )
                                     },
@@ -4360,27 +4601,43 @@ private fun ImageClickStepDialog(
                             }
                         }
                         Text(stringResource(R.string.image_click_crop_hint), fontSize = 12.sp)
+                        Text(stringResource(R.string.image_click_crop_bounds), fontWeight = FontWeight.SemiBold)
+                        NodeField(cropLeft, { cropLeft = it }, stringResource(R.string.crop_left), true)
+                        NodeField(cropTop, { cropTop = it }, stringResource(R.string.crop_top), true)
+                        NodeField(cropRight, { cropRight = it }, stringResource(R.string.crop_right), true)
+                        NodeField(cropBottom, { cropBottom = it }, stringResource(R.string.crop_bottom), true)
                     }
                     ScreenCaptureState.Idle -> initialStep?.let {
                         Text(stringResource(R.string.image_click_saved_template, it.templateWidth, it.templateHeight))
                     }
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+                error?.let {
+                    Text(
+                        it,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
                 enabled = packageName.isNotBlank() && (initialStep != null ||
-                    captureState is ScreenCaptureState.Ready && dragStart != null && dragEnd != null),
+                    captureState is ScreenCaptureState.Ready && cropBoundsOrNull(
+                        cropLeft,
+                        cropTop,
+                        cropRight,
+                        cropBottom,
+                    ) != null),
                 onClick = {
                     val state = captureState as? ScreenCaptureState.Ready
-                    val start = dragStart
-                    val end = dragEnd
-                    if (state == null || start == null || end == null) {
+                    val bounds = cropBoundsOrNull(cropLeft, cropTop, cropRight, cropBottom)
+                    if (state == null || bounds == null) {
                         initialStep?.let { onAdd(it.copy(packageName = packageName.trim())) }
                         return@TextButton
                     }
-                    val crop = cropTemplate(state.bitmap, captureSize, start, end)
+                    val crop = cropTemplate(state.bitmap, bounds)
                     if (crop == null) {
                         error = context.getString(
                             R.string.image_click_crop_too_small,
@@ -4412,6 +4669,29 @@ private fun ImageClickStepDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+internal data class ImageCropBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
+
+internal fun cropBoundsOrNull(left: String, top: String, right: String, bottom: String): ImageCropBounds? {
+    val bounds = ImageCropBounds(
+        left.toIntOrNull() ?: return null,
+        top.toIntOrNull() ?: return null,
+        right.toIntOrNull() ?: return null,
+        bottom.toIntOrNull() ?: return null,
+    )
+    return bounds.takeIf { it.right > it.left && it.bottom > it.top }
+}
+
+private fun cropTemplate(bitmap: Bitmap, bounds: ImageCropBounds): Bitmap? {
+    val left = bounds.left.coerceIn(0, bitmap.width - 1)
+    val top = bounds.top.coerceIn(0, bitmap.height - 1)
+    val right = bounds.right.coerceIn(left + 1, bitmap.width)
+    val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
+    val width = right - left
+    val height = bottom - top
+    if (width < Step.ImageClick.MIN_TEMPLATE_SIZE || height < Step.ImageClick.MIN_TEMPLATE_SIZE) return null
+    return Bitmap.createBitmap(bitmap, left, top, width, height)
 }
 
 private fun cropTemplate(bitmap: Bitmap, container: IntSize, start: Offset, end: Offset): Bitmap? {
@@ -4503,10 +4783,12 @@ private fun VisualSelectorCapture(
     when (val state = captureState) {
         ScreenCaptureState.Armed -> Text(
             stringResource(R.string.capture_waiting),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             color = MaterialTheme.colorScheme.primary,
         )
         is ScreenCaptureState.Error -> Text(
             state.message,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             color = MaterialTheme.colorScheme.error,
             fontSize = 12.sp,
         )
@@ -4563,8 +4845,38 @@ private fun nodeSelectorOrNull(
     descriptionContains: Boolean,
     className: String,
     matchIndex: Int,
+    useAncestor: Boolean,
+    ancestorViewId: String,
+    ancestorText: String,
+    ancestorTextContains: Boolean,
+    ancestorDescription: String,
+    ancestorDescriptionContains: Boolean,
+    ancestorClassName: String,
 ): NodeSelector? {
-    if (packageName.isBlank() || listOf(viewId, text, description, className).all { it.isBlank() }) return null
+    if (!selectorHasAttribute(viewId, text, description, className)) return null
+    val ancestor = if (useAncestor) {
+        if (!selectorHasAttribute(
+                ancestorViewId,
+                ancestorText,
+                ancestorDescription,
+                ancestorClassName,
+            )
+        ) return null
+        AncestorSelector(
+            viewId = ancestorViewId.trim().ifBlank { null },
+            text = ancestorText.trim().ifBlank { null },
+            textMatchMode = if (ancestorTextContains) TextMatchMode.Contains else TextMatchMode.Exact,
+            contentDescription = ancestorDescription.trim().ifBlank { null },
+            contentDescriptionMatchMode = if (ancestorDescriptionContains) {
+                TextMatchMode.Contains
+            } else {
+                TextMatchMode.Exact
+            },
+            className = ancestorClassName.trim().ifBlank { null },
+        )
+    } else {
+        null
+    }
     return NodeSelector(
         packageName = packageName.trim(),
         viewId = viewId.trim().ifBlank { null },
@@ -4578,8 +4890,16 @@ private fun nodeSelectorOrNull(
         },
         className = className.trim().ifBlank { null },
         matchIndex = matchIndex,
+        ancestor = ancestor,
     )
 }
+
+internal fun selectorHasAttribute(
+    viewId: String,
+    text: String,
+    description: String,
+    className: String,
+): Boolean = listOf(viewId, text, description, className).any(String::isNotBlank)
 
 @Composable
 private fun NodeField(

@@ -27,7 +27,7 @@ fun Workflow.selectorUses(): List<SelectorUse> = buildList {
 }
 
 fun Workflow.targetPackages(): Set<String> = buildSet {
-    addAll(selectorUses().map { it.selector.packageName })
+    addAll(selectorUses().map { it.selector.packageName }.filter(String::isNotBlank))
     addAll(launchPackages())
 }
 
