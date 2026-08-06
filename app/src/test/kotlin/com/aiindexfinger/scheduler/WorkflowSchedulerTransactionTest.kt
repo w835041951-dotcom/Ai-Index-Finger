@@ -44,6 +44,37 @@ class WorkflowSchedulerTransactionTest {
         assertEquals(listOf(previous), schedules)
     }
 
+    @Test
+    fun `storage failure still requests work cancellation`() {
+        var cancelRequested = false
+
+        val failure = runCatching {
+            cancelScheduledWork(
+                workflowId = "workflow",
+                removeSchedule = { throw ScheduleStorageException(IllegalStateException("corrupt")) },
+                cancelWork = { cancelRequested = true },
+            )
+        }.exceptionOrNull()
+
+        assertTrue(cancelRequested)
+        assertTrue(failure is ScheduleStorageException)
+    }
+
+    @Test
+    fun `successful cancellation returns updated schedules`() {
+        val remaining = listOf(WorkflowSchedule("other", "Other", 2_000L))
+        var cancelRequested = false
+
+        val result = cancelScheduledWork(
+            workflowId = "workflow",
+            removeSchedule = { remaining },
+            cancelWork = { cancelRequested = true },
+        )
+
+        assertTrue(cancelRequested)
+        assertEquals(remaining, result)
+    }
+
     private fun MutableList<WorkflowSchedule>.replace(schedule: WorkflowSchedule): List<WorkflowSchedule> {
         removeAll { it.workflowId == schedule.workflowId }
         add(schedule)

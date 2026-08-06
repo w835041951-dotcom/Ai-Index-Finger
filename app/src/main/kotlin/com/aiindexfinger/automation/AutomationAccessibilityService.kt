@@ -10,6 +10,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Rect
@@ -31,6 +32,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.annotation.RequiresApi
+import com.aiindexfinger.FloatingWorkflowEditorActivity
 import com.aiindexfinger.MainActivity
 import com.aiindexfinger.R
 import com.aiindexfinger.executor.AutomationDriver
@@ -81,6 +83,11 @@ internal fun targetPackageIsVisible(
     windowPackages: Iterable<String>,
 ): Boolean = activePackage == targetPackage || targetPackage in windowPackages
 
+internal fun accessibilityServiceFlags(existingFlags: Int): Int = existingFlags or
+    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+
 internal data class ScreenBounds(
     val left: Int,
     val top: Int,
@@ -96,9 +103,18 @@ internal fun matchIsInsideTargetWindow(
         match.centerY >= bounds.top && match.centerY < bounds.bottom
 }
 
+internal fun cropIsInsideTargetWindow(
+    crop: ImageCropBounds,
+    targetBounds: List<ScreenBounds>,
+): Boolean = targetBounds.any { bounds ->
+    crop.left >= bounds.left && crop.top >= bounds.top &&
+        crop.right <= bounds.right && crop.bottom <= bounds.bottom
+}
+
 class AutomationAccessibilityService : AccessibilityService(), AutomationDriver {
     private val workflowExecutor by lazy { WorkflowExecutor(this) }
     private val runHistoryStore by lazy { RunHistoryStore(this) }
+    private val overlayWindowManager by lazy { getSystemService(WINDOW_SERVICE) as WindowManager }
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var workflowJob: Job? = null
     private var observationSettleJob: Job? = null
@@ -113,6 +129,18 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var elementInspectorView: View? = null
     private var elementPickView: View? = null
     private var elementInspectionCapture: RecordingHierarchyCapture? = null
+    private var liveActionView: View? = null
+    private var liveCoordinatePickView: View? = null
+    private var liveImageCropView: View? = null
+    private var liveImageCropMessageView: TextView? = null
+    private var liveImageCaptureBitmap: Bitmap? = null
+    private var liveImageCaptureJob: Job? = null
+    private var liveActionLaunchJob: Job? = null
+    private var floatingEditorLaunchJob: Job? = null
+    private var liveImageTargetBounds: List<ScreenBounds> = emptyList()
+    private var liveActionTargetPackage: String? = null
+    private var liveActionStatusMessage: String? = null
+    private val liveActionSession = LiveActionSession()
     private var swipeCaptureView: View? = null
     private var swipeInFlight = false
     private var finishAfterSwipe = false
@@ -125,7 +153,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var recordingWorkflowId: String? = null
     private var recordingListPath: StepListPath? = null
     private val recordedClickSession = RecordedClickSession(MAX_RECORDED_CLICKS)
-    private val recordingTargetResolver = RecordingTargetResolver()
+    private val recordingTargetResolver = RecordingTargetResolver(
+        maxSnapshots = MAX_RECORDING_WINDOW_SNAPSHOTS,
+    )
     private val targetPreferences by lazy {
         getSharedPreferences(TARGET_PREFERENCES_NAME, MODE_PRIVATE)
     }
@@ -137,14 +167,19 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             PackageManager.MATCH_DEFAULT_ONLY,
         ).mapTo(mutableSetOf()) { it.activityInfo.packageName }
         serviceInfo = serviceInfo.apply {
-            flags = flags or
-                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            flags = accessibilityServiceFlags(flags)
+        }
+        val previousInstance = instanceOwner.claim(this)
+        if (previousInstance != null && previousInstance !== this) {
+            previousInstance.retireForReplacement()
+            resetVolatileSharedStateAfterReplacement()
         }
         mutableConnected.value = true
-        instance = this
         serviceScope.launch {
             workflowExecutor.state.collect { state ->
+                if (!isCurrentServiceInstance()) {
+                    return@collect
+                }
                 val stepId = when (state) {
                     is RunState.Running -> state.stepId
                     is RunState.Paused -> state.stepId
@@ -158,8 +193,20 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (!isCurrentServiceInstance()) return
         handleArmedScreenCapture(event)
-        val packageName = event?.packageName?.toString() ?: return
+        event ?: return
+        val packageName = event.packageName?.toString()
+            ?: event.source?.packageName?.toString()
+            ?: windows.firstOrNull { it.id == event.windowId }?.root?.packageName?.toString()
+            ?: rootInActiveWindow?.packageName?.toString()
+            ?: return
+        if (liveActionSession.isActive && packageName == liveActionTargetPackage &&
+            liveActionView?.isAttachedToWindow != true && liveCoordinatePickView == null &&
+            liveImageCropView == null && liveImageCaptureJob?.isActive != true
+        ) {
+            showLiveActionOverlay()
+        }
         if (recordedClickSession.isActive() && packageName == monitoredTargetPackage &&
             elementMonitorView?.isAttachedToWindow != true
         ) {
@@ -325,13 +372,11 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             }
         }
         if (!isEligibleExternalPackage(packageName, applicationContext.packageName, homePackages)) {
-            invalidateObservedNodes()
+            observationController.sourceUnavailable()
             return
         }
-        val root = rootInActiveWindow ?: return
-        val rootPackageName = root.packageName?.toString() ?: return
-        if (packageName != rootPackageName) {
-            invalidateObservedNodes()
+        if (packageWindowRoots(packageName, event.windowId).isEmpty()) {
+            observationController.sourceUnavailable()
             return
         }
         if (packageName != lastExternalAppPackage &&
@@ -346,6 +391,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 showRecordingOverlay()
             }
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
                 event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
             ) {
                 recordingTargetResolver.markHierarchyMutation(packageName, event.windowId, event.eventTime)
@@ -358,44 +404,86 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         observationSettleJob = serviceScope.launch {
             delay(OBSERVATION_SETTLE_MILLIS)
             if (!observationController.isObservationRequested) return@launch
-            val settledRoot = rootInActiveWindow ?: return@launch
-            if (settledRoot.packageName?.toString() != packageName) return@launch
-            val snapshot = settledRoot.depthFirstSequence()
-                .mapNotNull { it.toDescriptor() }
-                .filter { it.packageName == packageName }
-                .distinctBy { listOf(it.viewId, it.text, it.contentDescription, it.className) }
-                .take(MAX_OBSERVED_NODES)
-                .toList()
-            if (snapshot != observedNodes.value) observedNodes.value = snapshot
+            captureObservedNodes(packageName, event.windowId)
         }
     }
 
-    private fun invalidateObservedNodes() {
+    private fun captureObservedNodes(packageName: String, windowId: Int? = null) {
+        val settledRoots = packageWindowRoots(packageName, windowId)
+        if (settledRoots.isEmpty()) return
+        val snapshot = mergeObservedNodeWindows(
+            windows = settledRoots.map { root ->
+                root.depthFirstSequence()
+                    .mapNotNull { it.toDescriptor() }
+                    .filter { it.packageName == packageName }
+            },
+            limit = MAX_OBSERVED_NODES,
+        )
+        if (snapshot != observedNodes.value) observedNodes.value = snapshot
+    }
+
+    private fun cancelPendingObservationCapture() {
         observationSettleJob?.cancel()
         observationSettleJob = null
-        if (observedNodes.value.isNotEmpty()) observedNodes.value = emptyList()
     }
 
     override fun onInterrupt() {
+        val ownedSharedState = isCurrentServiceInstance()
         stopWorkflow()
-        stopElementMonitor()
-        clearScreenCapture()
+        stopElementMonitor(
+            preservePendingSelector = !ownedSharedState,
+            stopForegroundService = ownedSharedState,
+        )
+        stopLiveAction()
+        if (ownedSharedState) clearScreenCapture()
     }
 
     override fun onDestroy() {
-        stopElementMonitor()
-        pendingOverlayAction.value = null
-        if (instance === this) instance = null
+        val ownedSharedState = instanceOwner.release(this)
+        stopElementMonitor(
+            preservePendingSelector = true,
+            stopForegroundService = ownedSharedState,
+        )
+        stopLiveAction()
         serviceScope.cancel()
+        if (ownedSharedState) {
+            cancelRunningNotification()
+            currentStepId.value = null
+            debugPaused.value = false
+            runningWorkflowId.value = null
+            workflowStartedAtMillis.value = null
+            observationController.sourceDisconnected()
+            clearScreenCapture()
+            mutableConnected.value = false
+        }
+        super.onDestroy()
+    }
+
+    private fun isCurrentServiceInstance(): Boolean = instanceOwner.isCurrent(this)
+
+    private fun retireForReplacement() {
+        stopWorkflow()
+        stopElementMonitor(
+            preservePendingSelector = true,
+            stopForegroundService = false,
+        )
+        stopLiveAction()
+        floatingEditorLaunchJob?.cancel()
+        floatingEditorLaunchJob = null
+        cancelPendingObservationCapture()
+        serviceScope.cancel()
+    }
+
+    private fun resetVolatileSharedStateAfterReplacement() {
+        stopRecordingForeground()
         cancelRunningNotification()
         currentStepId.value = null
         debugPaused.value = false
         runningWorkflowId.value = null
         workflowStartedAtMillis.value = null
+        overlayStatus.value = null
         observationController.sourceDisconnected()
         clearScreenCapture()
-        mutableConnected.value = false
-        super.onDestroy()
     }
 
     fun startWorkflow(workflow: Workflow, debug: Boolean = false): Boolean {
@@ -421,10 +509,12 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 }
                 latestRun.value = RunOutcome(result, record)
             } finally {
-                runningWorkflowId.value = null
-                workflowStartedAtMillis.value = null
-                runningWorkflowName = null
-                cancelRunningNotification()
+                if (isCurrentServiceInstance()) {
+                    runningWorkflowId.value = null
+                    workflowStartedAtMillis.value = null
+                    runningWorkflowName = null
+                    cancelRunningNotification()
+                }
             }
         }
         return true
@@ -486,6 +576,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             overlayStatus.value = getString(R.string.element_monitor_no_target)
             return false
         }
+        stopLiveAction()
         stopElementInspector()
         stopElementMonitor()
         monitoredTargetPackage = targetPackage
@@ -521,6 +612,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             overlayStatus.value = getString(R.string.element_inspector_no_target)
             return false
         }
+        stopLiveAction()
         stopElementMonitor()
         stopElementInspector()
         monitoredTargetPackage = targetPackage
@@ -539,9 +631,442 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         }
     }
 
+    fun startLiveAction(workflowId: String, listPath: StepListPath): Boolean {
+        val targetPackage = lastExternalAppPackage
+            ?: targetPreferences.getString(LAST_EXTERNAL_PACKAGE_KEY, null)
+        val targetIntent = targetPackage?.let(packageManager::getLaunchIntentForPackage)
+        if (targetPackage == null || targetIntent == null) {
+            overlayStatus.value = liveActionString(R.string.live_action_no_target)
+            return false
+        }
+        stopElementMonitor()
+        stopLiveAction()
+        liveActionTargetPackage = targetPackage
+        liveActionStatusMessage = null
+        liveActionSession.start(workflowId, listPath)
+        return try {
+            startActivity(
+                targetIntent.apply {
+                    flags = targetAppLaunchFlags(flags)
+                },
+            )
+            liveActionLaunchJob = serviceScope.launch {
+                delay(LIVE_TARGET_LAUNCH_SETTLE_MILLIS)
+                liveActionLaunchJob = null
+                if (!liveActionSession.isActive || liveActionTargetPackage != targetPackage) return@launch
+                if (liveActionView?.isAttachedToWindow != true && liveCoordinatePickView == null &&
+                    liveImageCropView == null && liveImageCaptureJob?.isActive != true &&
+                    !showLiveActionOverlay()
+                ) {
+                    overlayStatus.value = liveActionString(R.string.live_action_start_failed)
+                    stopLiveAction()
+                    returnToEditor()
+                }
+            }
+            true
+        } catch (_: RuntimeException) {
+            stopLiveAction()
+            overlayStatus.value = liveActionString(R.string.live_action_start_failed)
+            false
+        }
+    }
+
+    fun startFloatingWorkflowEditor(workflowId: String? = null): Boolean {
+        val targetPackage = lastExternalAppPackage
+            ?: targetPreferences.getString(LAST_EXTERNAL_PACKAGE_KEY, null)
+        val targetIntent = targetPackage?.let(packageManager::getLaunchIntentForPackage)
+        if (targetPackage == null || targetIntent == null) {
+            overlayStatus.value = liveActionString(R.string.floating_editor_no_target)
+            return false
+        }
+        floatingEditorLaunchJob?.cancel()
+        return try {
+            startActivity(targetIntent.apply { flags = targetAppLaunchFlags(flags) })
+            floatingEditorLaunchJob = serviceScope.launch {
+                delay(LIVE_TARGET_LAUNCH_SETTLE_MILLIS)
+                floatingEditorLaunchJob = null
+                if (!isCurrentServiceInstance()) return@launch
+                captureObservedNodes(targetPackage)
+                startActivity(
+                    FloatingWorkflowEditorActivity.createIntent(
+                        this@AutomationAccessibilityService,
+                        workflowId,
+                    ),
+                )
+            }
+            true
+        } catch (_: RuntimeException) {
+            overlayStatus.value = liveActionString(R.string.floating_editor_start_failed)
+            false
+        }
+    }
+
+    private fun liveActionContext(): Context {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return this
+        val appLocales = getSystemService(android.app.LocaleManager::class.java).applicationLocales
+        if (appLocales.isEmpty) return this
+        val configuration = android.content.res.Configuration(resources.configuration).apply {
+            setLocales(appLocales)
+        }
+        return createConfigurationContext(configuration)
+    }
+
+    private fun liveActionString(resourceId: Int, vararg formatArgs: Any): String =
+        liveActionContext().getString(resourceId, *formatArgs)
+
+    private fun showLiveActionOverlay(): Boolean {
+        liveActionView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        val candidate = liveActionSession.selectedCandidate
+        val details = TextView(this).apply {
+            text = liveActionStatusMessage ?: when (candidate) {
+                is LiveActionCandidate.Coordinate -> liveActionString(
+                    R.string.live_action_coordinate_selected,
+                    candidate.x,
+                    candidate.y,
+                )
+                is LiveActionCandidate.Image -> liveActionString(
+                    R.string.live_action_image_selected,
+                    candidate.templateWidth,
+                    candidate.templateHeight,
+                )
+                null -> liveActionString(R.string.live_action_ready, liveActionTargetPackage.orEmpty())
+            }
+            setPadding(24, 16, 24, 12)
+        }
+        val coordinateButton = Button(this).apply {
+            text = liveActionString(R.string.live_action_coordinate)
+            contentDescription = liveActionString(R.string.live_action_coordinate_description)
+            setOnClickListener { startLiveCoordinatePicker() }
+        }
+        val imageButton = Button(this).apply {
+            text = liveActionString(R.string.live_action_image)
+            contentDescription = liveActionString(R.string.live_action_image_description)
+            isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+            setOnClickListener { startLiveImageCapture() }
+        }
+        val confirmButton = Button(this).apply {
+            text = liveActionString(R.string.live_action_add)
+            contentDescription = liveActionString(R.string.live_action_add_description)
+            isEnabled = candidate != null
+            setOnClickListener { confirmLiveAction() }
+        }
+        val cancelButton = Button(this).apply {
+            text = liveActionString(R.string.cancel)
+            setOnClickListener { stopLiveAction(returnToEditor = true) }
+        }
+        val modeActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(
+                coordinateButton,
+                LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(
+                imageButton,
+                LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
+        val decisionActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(
+                confirmButton,
+                LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(
+                cancelButton,
+                LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFFF7F7F7.toInt())
+            elevation = 12f
+            addView(details)
+            addView(modeActions)
+            addView(decisionActions)
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.TOP }
+        return runCatching {
+            overlayWindowManager.addView(panel, params)
+            liveActionView = panel
+            overlayStatus.value = null
+        }.isSuccess
+    }
+
+    private fun startLiveCoordinatePicker() {
+        if (!liveActionSession.isActive || liveCoordinatePickView != null || liveImageCropView != null ||
+            liveImageCaptureJob?.isActive == true
+        ) {
+            return
+        }
+        cancelLiveActionLaunch()
+        liveActionStatusMessage = null
+        liveActionView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        liveActionView = null
+        var selectionTouchStarted = false
+        val picker = TextView(this).apply {
+            text = liveActionString(R.string.live_action_coordinate_instruction)
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0x33000000)
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        selectionTouchStarted = true
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (!selectionTouchStarted) return@setOnTouchListener true
+                        selectionTouchStarted = false
+                        val x = event.rawX.toInt()
+                        val y = event.rawY.toInt()
+                        val targetPackage = liveActionTargetPackage
+                        val isInsideTarget = targetPackage != null && targetPackageWindowBounds(targetPackage).any {
+                            x >= it.left && x < it.right && y >= it.top && y < it.bottom
+                        }
+                        if (isInsideTarget) {
+                            liveActionSession.select(LiveActionCandidate.Coordinate(x, y))
+                            liveActionStatusMessage = null
+                        } else {
+                            liveActionStatusMessage = liveActionString(R.string.live_action_coordinate_outside_target)
+                        }
+                        stopLiveCoordinatePicker()
+                        showLiveActionOverlay()
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        selectionTouchStarted = false
+                        stopLiveCoordinatePicker()
+                        showLiveActionOverlay()
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        )
+        runCatching {
+            overlayWindowManager.addView(picker, params)
+            liveCoordinatePickView = picker
+        }.onFailure {
+            showLiveActionOverlay()
+            overlayStatus.value = liveActionString(R.string.live_action_start_failed)
+        }
+    }
+
+    private fun startLiveImageCapture() {
+        if (!liveActionSession.isActive || liveCoordinatePickView != null || liveImageCropView != null ||
+            liveImageCaptureJob?.isActive == true
+        ) {
+            return
+        }
+        cancelLiveActionLaunch()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            liveActionStatusMessage = liveActionString(R.string.live_action_image_requires_android_11)
+            showLiveActionOverlay()
+            return
+        }
+        val targetPackage = liveActionTargetPackage ?: return
+        if (!isTargetPackageVisible(targetPackage)) {
+            liveActionStatusMessage = liveActionString(R.string.live_action_target_not_visible)
+            showLiveActionOverlay()
+            return
+        }
+        liveActionStatusMessage = null
+        liveActionView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        liveActionView = null
+        liveImageCaptureJob?.cancel()
+        liveImageCaptureJob = serviceScope.launch {
+            delay(LIVE_CAPTURE_OVERLAY_HIDE_MILLIS)
+            if (!liveActionSession.isActive || liveActionTargetPackage != targetPackage) return@launch
+            if (!isTargetPackageVisible(targetPackage)) {
+                liveActionStatusMessage = liveActionString(R.string.live_action_target_not_visible)
+                showLiveActionOverlay()
+                return@launch
+            }
+            val bitmap = captureBitmapOnce()
+            if (!liveActionSession.isActive || liveActionTargetPackage != targetPackage) {
+                bitmap?.recycle()
+                return@launch
+            }
+            if (bitmap == null) {
+                liveActionStatusMessage = liveActionString(R.string.live_action_capture_failed)
+                showLiveActionOverlay()
+                return@launch
+            }
+            val targetBounds = targetPackageWindowBounds(targetPackage)
+            if (targetBounds.isEmpty()) {
+                bitmap.recycle()
+                liveActionStatusMessage = liveActionString(R.string.live_action_target_not_visible)
+                showLiveActionOverlay()
+                return@launch
+            }
+            liveImageCaptureBitmap = bitmap
+            liveImageTargetBounds = targetBounds
+            if (!showLiveImageCropOverlay(bitmap)) {
+                stopLiveImageCrop()
+                liveActionStatusMessage = liveActionString(R.string.live_action_start_failed)
+                showLiveActionOverlay()
+            }
+        }
+    }
+
+    private fun showLiveImageCropOverlay(bitmap: Bitmap): Boolean {
+        val message = TextView(this).apply {
+            text = liveActionString(R.string.live_action_image_crop_instruction)
+            setPadding(24, 16, 24, 12)
+        }
+        val cancelButton = Button(this).apply {
+            text = liveActionString(R.string.cancel)
+            setOnClickListener {
+                stopLiveImageCrop()
+                showLiveActionOverlay()
+            }
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0xFFF7F7F7.toInt())
+            addView(
+                message,
+                LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            addView(cancelButton)
+        }
+        val cropView = LiveImageCropView(this, bitmap, ::selectLiveImageCrop).apply {
+            contentDescription = liveActionString(R.string.live_action_image_crop_description)
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(header)
+            addView(
+                cropView,
+                LinearLayout.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f,
+                ),
+            )
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        )
+        return runCatching {
+            overlayWindowManager.addView(panel, params)
+            liveImageCropView = panel
+            liveImageCropMessageView = message
+        }.isSuccess
+    }
+
+    private fun selectLiveImageCrop(bounds: ImageCropBounds) {
+        val bitmap = liveImageCaptureBitmap ?: return
+        if (!cropIsInsideTargetWindow(bounds, liveImageTargetBounds)) {
+            liveImageCropMessageView?.text = liveActionString(R.string.live_action_image_outside_target)
+            return
+        }
+        val crop = cropTemplate(bitmap, bounds)
+        if (crop == null) {
+            liveImageCropMessageView?.text = liveActionString(
+                R.string.image_click_crop_too_small,
+                Step.ImageClick.MIN_TEMPLATE_SIZE,
+            )
+            return
+        }
+        val encoded = try {
+            encodeTemplatePng(crop)
+        } finally {
+            if (crop !== bitmap) crop.recycle()
+        }
+        if (encoded == null) {
+            liveImageCropMessageView?.text = liveActionString(R.string.image_click_template_too_large)
+            return
+        }
+        val targetPackage = liveActionTargetPackage ?: return
+        liveActionSession.select(
+            LiveActionCandidate.Image(
+                packageName = targetPackage,
+                templatePngBase64 = encoded.base64,
+                templateWidth = encoded.width,
+                templateHeight = encoded.height,
+            ),
+        )
+        liveActionStatusMessage = null
+        stopLiveImageCrop()
+        showLiveActionOverlay()
+    }
+
+    private fun stopLiveImageCrop() {
+        liveImageCropView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        liveImageCropView = null
+        liveImageCropMessageView = null
+        liveImageCaptureBitmap?.recycle()
+        liveImageCaptureBitmap = null
+        liveImageTargetBounds = emptyList()
+    }
+
+    private fun stopLiveCoordinatePicker() {
+        liveCoordinatePickView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        liveCoordinatePickView = null
+    }
+
+    private fun confirmLiveAction() {
+        val confirmed = liveActionSession.confirm() ?: return
+        pendingOverlayAction.value = PendingOverlayAction.LiveAction(
+            workflowId = confirmed.destination.workflowId,
+            listPath = confirmed.destination.listPath,
+            candidate = confirmed.candidate,
+        )
+        stopLiveAction(returnToEditor = true)
+    }
+
+    private fun cancelLiveActionLaunch() {
+        liveActionLaunchJob?.cancel()
+        liveActionLaunchJob = null
+    }
+
+    private fun stopLiveAction(returnToEditor: Boolean = false) {
+        cancelLiveActionLaunch()
+        liveImageCaptureJob?.cancel()
+        liveImageCaptureJob = null
+        stopLiveImageCrop()
+        stopLiveCoordinatePicker()
+        liveActionView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        liveActionView = null
+        liveActionTargetPackage = null
+        liveActionStatusMessage = null
+        liveActionSession.cancel()
+        if (returnToEditor) returnToEditor()
+    }
+
     private fun showElementInspectorOverlay(inspection: ElementInspection? = null): Boolean {
         elementInspectorView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         val details = TextView(this).apply {
             text = inspection?.let(::formatElementInspection)
@@ -590,7 +1115,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             android.graphics.PixelFormat.TRANSLUCENT,
         ).apply { gravity = Gravity.TOP }
         return runCatching {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(panel, params)
+            overlayWindowManager.addView(panel, params)
             elementInspectorView = panel
             overlayStatus.value = null
         }.isSuccess
@@ -598,15 +1123,19 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     private fun armElementPicker() {
         val targetPackage = monitoredTargetPackage ?: return
-        val root = windows.firstOrNull { it.root?.packageName?.toString() == targetPackage }?.root
-        val capture = root?.toRecordingHierarchyNodes(MAX_RECORDING_SNAPSHOT_NODES)
-        if (capture == null || capture.nodes.isEmpty()) {
+        val capture = mergeRecordingHierarchyCaptures(
+            captures = packageWindowRoots(targetPackage).map { root ->
+                root.toRecordingHierarchyNodes(MAX_RECORDING_SNAPSHOT_NODES)
+            },
+            limit = MAX_RECORDING_SNAPSHOT_NODES,
+        )
+        if (capture.nodes.isEmpty()) {
             showElementInspectorMessage(getString(R.string.element_inspector_hierarchy_unavailable))
             return
         }
         elementInspectionCapture = capture
         elementInspectorView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         elementInspectorView = null
         val picker = TextView(this).apply {
@@ -638,7 +1167,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             android.graphics.PixelFormat.TRANSLUCENT,
         )
         runCatching {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(picker, params)
+            overlayWindowManager.addView(picker, params)
             elementPickView = picker
         }.onFailure {
             elementInspectionCapture = null
@@ -691,7 +1220,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     private fun stopElementPickOverlay() {
         elementPickView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         elementPickView = null
         elementInspectionCapture = null
@@ -703,7 +1232,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     ) {
         stopElementPickOverlay()
         elementInspectorView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         elementInspectorView = null
         monitoredTargetPackage = null
@@ -713,9 +1242,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     private fun showRecordingOverlay(): Boolean {
         elementMonitorView?.let { staleView ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(staleView) }
+            runCatching { overlayWindowManager.removeView(staleView) }
         }
-        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        val windowManager = overlayWindowManager
         val details = TextView(this).apply {
             text = getString(
                 R.string.click_recording_choose_recent_app,
@@ -896,14 +1425,14 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             android.graphics.PixelFormat.TRANSLUCENT,
         )
         runCatching {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(captureView, params)
+            overlayWindowManager.addView(captureView, params)
             swipeCaptureView = captureView
         }
     }
 
     private fun stopSwipeCapture() {
         swipeCaptureView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         swipeCaptureView = null
     }
@@ -962,24 +1491,27 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             android.graphics.PixelFormat.TRANSLUCENT,
         ).apply { gravity = Gravity.CENTER }
         runCatching {
-            (getSystemService(WINDOW_SERVICE) as WindowManager).addView(picker, params)
+            overlayWindowManager.addView(picker, params)
             appPickerView = picker
         }
     }
 
     private fun stopRecordingAppPicker() {
         appPickerView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         appPickerView = null
     }
 
-    fun stopElementMonitor() {
-        stopElementInspector()
+    fun stopElementMonitor(
+        preservePendingSelector: Boolean = false,
+        stopForegroundService: Boolean = true,
+    ) {
+        stopElementInspector(preservePendingSelector = preservePendingSelector)
         stopSwipeCapture()
         stopRecordingAppPicker()
         elementMonitorView?.let { view ->
-            runCatching { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(view) }
+            runCatching { overlayWindowManager.removeView(view) }
         }
         elementMonitorView = null
         monitoredTargetPackage = null
@@ -989,7 +1521,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         recordingSnapshotJob = null
         recordingTargetResolver.clear()
         recordedClickSession.cancel()
-        stopRecordingForeground()
+        if (stopForegroundService) stopRecordingForeground()
         swipeInFlight = false
         finishAfterSwipe = false
     }
@@ -1051,23 +1583,22 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     private fun captureRecordingSnapshot(packageName: String, windowId: Int?) {
         if (monitoredTargetPackage != packageName || elementMonitorView == null) return
-        val matchingWindow = windows.firstOrNull { window ->
-            window.root?.packageName?.toString() == packageName &&
-                (windowId == null || window.id == windowId)
-        } ?: windows.firstOrNull { it.root?.packageName?.toString() == packageName }
-        val root = matchingWindow?.root ?: return
-        val hierarchy = root.toRecordingHierarchyNodes(MAX_RECORDING_SNAPSHOT_NODES)
-        val nodes = hierarchy.nodes
-        if (nodes.isEmpty()) return
-        recordingTargetResolver.update(
-            RecordingHierarchySnapshot(
-                packageName = packageName,
-                windowId = matchingWindow.id,
-                eventTimeMillis = android.os.SystemClock.uptimeMillis(),
-                nodes = nodes,
-                complete = hierarchy.complete,
-            ),
-        )
+        val roots = packageWindowRoots(packageName, windowId)
+        val targetRoots = if (windowId == null) roots else roots.take(1)
+        targetRoots.forEach { root ->
+            val hierarchy = root.toRecordingHierarchyNodes(MAX_RECORDING_SNAPSHOT_NODES)
+            if (hierarchy.nodes.isNotEmpty()) {
+                recordingTargetResolver.update(
+                    RecordingHierarchySnapshot(
+                        packageName = packageName,
+                        windowId = root.windowId,
+                        eventTimeMillis = android.os.SystemClock.uptimeMillis(),
+                        nodes = hierarchy.nodes,
+                        complete = hierarchy.complete,
+                    ),
+                )
+            }
+        }
     }
 
     private fun finishElementRecording() {
@@ -1145,7 +1676,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                         } finally {
                             screenshot.hardwareBuffer.close()
                         }
-                        if (requestId != screenCaptureRequestId || screenCaptureState.value !is ScreenCaptureState.Armed) {
+                        if (!isCurrentServiceInstance() || requestId != screenCaptureRequestId ||
+                            screenCaptureState.value !is ScreenCaptureState.Armed
+                        ) {
                             bitmap?.recycle()
                             return
                         }
@@ -1162,7 +1695,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                     }
 
                     override fun onFailure(errorCode: Int) {
-                        if (requestId != screenCaptureRequestId || screenCaptureState.value !is ScreenCaptureState.Armed) {
+                        if (!isCurrentServiceInstance() || requestId != screenCaptureRequestId ||
+                            screenCaptureState.value !is ScreenCaptureState.Armed
+                        ) {
                             return
                         }
                         screenCaptureTimeoutJob?.cancel()
@@ -1222,9 +1757,10 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
 
     private fun returnToEditor() {
         startActivity(
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-            },
+            FloatingWorkflowEditorActivity.returnIntent(this)
+                ?: Intent(this, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                },
         )
     }
 
@@ -1465,6 +2001,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                     template.toLumaImage(),
                     step.minimumScorePermille,
                     step.ambiguityMarginPermille,
+                    step.scaleTolerancePermille,
                     checkCancellation = { matchingContext.ensureActive() },
                 )
             }) {
@@ -1684,15 +2221,35 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         if (selectorUsesActiveWindow(selector.packageName)) {
             rootInActiveWindow?.let { sequenceOf(it) } ?: emptySequence()
         } else {
-            windows.asSequence()
-                .filter { it.root?.packageName?.toString() == selector.packageName }
-                .mapNotNull { it.root }
+            packageWindowRoots(selector.packageName).asSequence()
         }
 
+    private fun packageWindowRoots(
+        packageName: String,
+        preferredWindowId: Int? = null,
+    ): List<AccessibilityNodeInfo> {
+        val interactiveWindows = windows
+        val roots = linkedMapOf<Int, AccessibilityNodeInfo>()
+        fun addRoot(root: AccessibilityNodeInfo?) {
+            if (root?.packageName?.toString() == packageName) roots.putIfAbsent(root.windowId, root)
+        }
+        if (preferredWindowId != null) {
+            addRoot(interactiveWindows.firstOrNull { it.id == preferredWindowId }?.root)
+        }
+        addRoot(rootInActiveWindow)
+        interactiveWindows.forEach { addRoot(it.root) }
+        return roots.values.toList()
+    }
+
     private fun AccessibilityNodeInfo.depthFirstSequence(): Sequence<AccessibilityNodeInfo> = sequence {
-        yield(this@depthFirstSequence)
-        for (index in 0 until childCount) {
-            getChild(index)?.let { child -> yieldAll(child.depthFirstSequence()) }
+        val pending = ArrayDeque<AccessibilityNodeInfo>()
+        pending.addLast(this@depthFirstSequence)
+        while (pending.isNotEmpty()) {
+            val node = pending.removeLast()
+            yield(node)
+            for (index in node.childCount - 1 downTo 0) {
+                node.getChild(index)?.let(pending::addLast)
+            }
         }
     }
 
@@ -1700,28 +2257,21 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         limit: Int,
     ): RecordingHierarchyCapture {
         val result = mutableListOf<RecordingHierarchyNode>()
-        var truncated = false
-        fun collect(node: AccessibilityNodeInfo, parentIndex: Int?) {
-            if (result.size >= limit) {
-                truncated = true
-                return
-            }
+        val pending = ArrayDeque<Pair<AccessibilityNodeInfo, Int?>>()
+        pending.addLast(this to null)
+        while (pending.isNotEmpty() && result.size < limit) {
+            val (node, parentIndex) = pending.removeLast()
             val descriptor = node.toDescriptor()
             val currentIndex = if (descriptor != null) {
                 result.size.also { result += RecordingHierarchyNode(descriptor, parentIndex) }
             } else {
                 parentIndex
             }
-            for (index in 0 until node.childCount) {
-                node.getChild(index)?.let { collect(it, currentIndex) }
-                if (result.size >= limit) {
-                    if (index < node.childCount - 1) truncated = true
-                    return
-                }
+            for (index in node.childCount - 1 downTo 0) {
+                node.getChild(index)?.let { child -> pending.addLast(child to currentIndex) }
             }
         }
-        collect(this, null)
-        return RecordingHierarchyCapture(result, complete = !truncated)
+        return RecordingHierarchyCapture(result, complete = pending.isEmpty())
     }
 
     private fun AccessibilityNodeInfo.matches(selector: NodeSelector): Boolean {
@@ -1783,19 +2333,22 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     }
 
     companion object {
-        private const val MAX_OBSERVED_NODES = 200
+        private const val MAX_OBSERVED_NODES = 1_000
         private const val MAX_CAPTURE_NODES = 1_000
         private const val OBSERVATION_SETTLE_MILLIS = 300L
         private const val SCREEN_CAPTURE_SETTLE_MILLIS = 450L
         private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
         private const val MAX_TEMPLATE_PNG_BYTES = 96 * 1024
         private const val MAX_RECORDED_CLICKS = 1_000
-        private const val MAX_RECORDING_SNAPSHOT_NODES = 500
+        private const val MAX_RECORDING_SNAPSHOT_NODES = 1_000
+        private const val MAX_RECORDING_WINDOW_SNAPSHOTS = 8
         private const val RECORDING_SNAPSHOT_SETTLE_MILLIS = 120L
         private const val LONG_CLICK_CLICK_SUPPRESSION_MILLIS = 350L
         private const val SCROLL_DUPLICATE_SUPPRESSION_MILLIS = 250L
         private const val SWIPE_SCROLL_SUPPRESSION_PADDING_MILLIS = 300L
         private const val MIN_RECORDED_SWIPE_DISTANCE_PX = 24.0
+        private const val LIVE_CAPTURE_OVERLAY_HIDE_MILLIS = 200L
+        private const val LIVE_TARGET_LAUNCH_SETTLE_MILLIS = 450L
         private const val TARGET_PREFERENCES_NAME = "automation_target"
         private const val LAST_EXTERNAL_PACKAGE_KEY = "last_external_package"
         private const val RUNNING_CHANNEL_ID = "workflow_execution"
@@ -1811,20 +2364,24 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         val overlayStatus = MutableStateFlow<String?>(null)
         private val inspectedSelectorHandoff = InspectedSelectorHandoff()
         val inspectedSelector = inspectedSelectorHandoff.selector
-        private val observationController = AccessibilityObservationController {
-            instance?.observationSettleJob?.cancel()
-            instance?.observationSettleJob = null
-            observedNodes.value = emptyList()
-        }
+        private val observationController = AccessibilityObservationController(
+            onObservationEnded = {
+                instance?.cancelPendingObservationCapture()
+                observedNodes.value = emptyList()
+            },
+            onSourceUnavailable = {
+                instance?.cancelPendingObservationCapture()
+            },
+        )
         val currentStepId = MutableStateFlow<String?>(null)
         val debugPaused = MutableStateFlow(false)
         val runningWorkflowId = MutableStateFlow<String?>(null)
         val workflowStartedAtMillis = MutableStateFlow<Long?>(null)
         val latestRun = MutableStateFlow<RunOutcome?>(null)
 
-        @Volatile
-        var instance: AutomationAccessibilityService? = null
-            private set
+        private val instanceOwner = CurrentInstanceOwner<AutomationAccessibilityService>()
+        val instance: AutomationAccessibilityService?
+            get() = instanceOwner.get()
 
         internal fun acquireObservationLease(): AutoCloseable =
             observationController.acquire()
@@ -2036,6 +2593,12 @@ sealed interface PendingOverlayAction {
         val actions: List<RecordedAction>,
         val issues: List<RecordingIssue>,
     ) : PendingOverlayAction
+
+    data class LiveAction(
+        val workflowId: String,
+        val listPath: StepListPath,
+        val candidate: LiveActionCandidate,
+    ) : PendingOverlayAction
 }
 
 sealed interface ScreenCaptureState {
@@ -2062,3 +2625,34 @@ data class ObservedNode(
     val longClickable: Boolean = false,
     val scrollable: Boolean = false,
 )
+
+internal fun Sequence<ObservedNode>.distinctObservedNodes(): Sequence<ObservedNode> = distinctBy {
+    it.snapshotIdentity()
+}
+
+internal fun mergeObservedNodeWindows(
+    windows: List<Sequence<ObservedNode>>,
+    limit: Int,
+): List<ObservedNode> {
+    require(limit >= 0) { "Node limit cannot be negative" }
+    val iterators = windows.mapIndexed { windowIndex, nodes -> windowIndex to nodes.iterator() }.toMutableList()
+    val identities = mutableSetOf<Pair<Int, List<String?>>>()
+    val result = mutableListOf<ObservedNode>()
+    while (iterators.isNotEmpty() && result.size < limit) {
+        var index = 0
+        while (index < iterators.size && result.size < limit) {
+            val (windowIndex, iterator) = iterators[index]
+            if (!iterator.hasNext()) {
+                iterators.removeAt(index)
+                continue
+            }
+            val node = iterator.next()
+            if (identities.add(windowIndex to node.snapshotIdentity())) result += node
+            index += 1
+        }
+    }
+    return result
+}
+
+private fun ObservedNode.snapshotIdentity(): List<String?> =
+    listOf(viewId, text, contentDescription, className, bounds)

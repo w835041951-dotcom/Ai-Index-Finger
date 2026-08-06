@@ -1,6 +1,7 @@
 package com.aiindexfinger.automation
 
 internal class AccessibilityObservationController(
+    private val onSourceUnavailable: () -> Unit = {},
     private val onObservationEnded: () -> Unit,
 ) {
     private var activeLeaseCount = 0
@@ -22,5 +23,9 @@ internal class AccessibilityObservationController(
 
     fun sourceDisconnected() {
         onObservationEnded()
+    }
+
+    fun sourceUnavailable() {
+        onSourceUnavailable()
     }
 }

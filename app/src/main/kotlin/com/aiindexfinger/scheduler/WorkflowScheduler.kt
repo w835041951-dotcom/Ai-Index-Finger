@@ -87,9 +87,11 @@ class WorkflowScheduler(
     }
 
     fun cancel(workflowId: String): List<WorkflowSchedule> = synchronized(SCHEDULER_LOCK) {
-        val schedules = store.remove(workflowId)
-        workManager.cancelUniqueWork(workName(workflowId))
-        schedules
+        cancelScheduledWork(
+            workflowId = workflowId,
+            removeSchedule = store::remove,
+            cancelWork = { workManager.cancelUniqueWork(workName(workflowId)) },
+        )
     }
 
     fun load(workflowIds: Set<String>): List<WorkflowSchedule> = synchronized(SCHEDULER_LOCK) {
@@ -141,4 +143,26 @@ internal inline fun persistScheduledWork(
         throw error
     }
     return schedules
+}
+
+internal fun cancelScheduledWork(
+    workflowId: String,
+    removeSchedule: (String) -> List<WorkflowSchedule>,
+    cancelWork: () -> Unit,
+): List<WorkflowSchedule> {
+    var schedules: List<WorkflowSchedule>? = null
+    var storageFailure: Exception? = null
+    try {
+        schedules = removeSchedule(workflowId)
+    } catch (error: Exception) {
+        storageFailure = error
+    }
+    try {
+        cancelWork()
+    } catch (error: Exception) {
+        if (storageFailure == null) throw error
+        storageFailure.addSuppressed(error)
+    }
+    storageFailure?.let { throw it }
+    return requireNotNull(schedules)
 }

@@ -1,6 +1,6 @@
 package com.aiindexfinger.model
 
-private val variablePlaceholder = Regex("\\$\\{([^{}]+)}")
+private val variablePlaceholder = Regex("\\$\\{([^{}]+)\\}")
 
 fun String.templateVariables(): Set<String> = variablePlaceholder.findAll(this)
     .map { it.groupValues[1] }

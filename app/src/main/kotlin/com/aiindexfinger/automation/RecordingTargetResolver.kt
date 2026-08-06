@@ -6,6 +6,7 @@ import com.aiindexfinger.model.RecordedClickFallbackCause
 data class RecordingHierarchyNode(
     val node: ObservedNode,
     val parentIndex: Int?,
+    val windowIndex: Int = 0,
 )
 
 data class RecordingHierarchyCapture(
@@ -91,10 +92,16 @@ internal class RecordingTargetResolver(
             ?: return resolveWithoutSnapshot(source, RecordedClickFallbackCause.SourceNotUnique)
         val targetIndex = capableAncestorIndex(snapshot, sourceIndex, capability) ?: sourceIndex
         val target = snapshot.nodes[targetIndex].node
-        if (!snapshot.complete) {
+        val packageSnapshots = latestEligibleSnapshots(packageName, eventTimeMillis)
+        val packageHierarchyIncomplete = packageSnapshots.any { candidate ->
+            !candidate.complete || mutationBarriers[candidate.packageName to candidate.windowId]?.let { mutationTime ->
+                mutationTime <= eventTimeMillis && mutationTime >= candidate.eventTimeMillis
+            } == true
+        }
+        if (packageHierarchyIncomplete) {
             return ResolvedRecordingNode(target, null, RecordedClickFallbackCause.HierarchyIncomplete)
         }
-        val selector = uniqueSelector(snapshot, target)
+        val selector = uniqueSelector(packageSnapshots, target)
         return ResolvedRecordingNode(
             node = target,
             selector = selector,
@@ -113,6 +120,19 @@ internal class RecordingTargetResolver(
         source: ObservedNode,
         fallbackCause: RecordedClickFallbackCause,
     ): ResolvedRecordingNode = ResolvedRecordingNode(source, null, fallbackCause)
+
+    private fun latestEligibleSnapshots(
+        packageName: String,
+        eventTimeMillis: Long,
+    ): List<RecordingHierarchySnapshot> = snapshots
+        .filter {
+            it.packageName == packageName &&
+                it.eventTimeMillis <= eventTimeMillis &&
+                eventTimeMillis - it.eventTimeMillis <= snapshotTtlMillis
+        }
+        .groupBy { it.windowId }
+        .values
+        .mapNotNull { windowSnapshots -> windowSnapshots.maxByOrNull { it.eventTimeMillis } }
 
     private fun uniqueSourceIndex(snapshot: RecordingHierarchySnapshot, source: ObservedNode): Int? {
         val matchers = buildList<(ObservedNode) -> Boolean> {
@@ -149,9 +169,12 @@ internal class RecordingTargetResolver(
         return null
     }
 
-    private fun uniqueSelector(snapshot: RecordingHierarchySnapshot, node: ObservedNode): NodeSelector? =
+    private fun uniqueSelector(
+        snapshots: List<RecordingHierarchySnapshot>,
+        node: ObservedNode,
+    ): NodeSelector? =
         SelectorRecommendations.candidates(node).firstOrNull { selector ->
-            snapshot.nodes.count { selector.matches(it.node) } == 1
+            snapshots.sumOf { snapshot -> snapshot.nodes.count { selector.matches(it.node) } } == 1
         }
 
     private fun NodeSelector.matches(node: ObservedNode): Boolean =

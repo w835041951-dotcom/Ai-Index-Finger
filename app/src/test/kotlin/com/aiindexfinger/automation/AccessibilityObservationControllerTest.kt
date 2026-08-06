@@ -70,4 +70,26 @@ class AccessibilityObservationControllerTest {
         assertFalse(controller.isObservationRequested)
         assertEquals(2, clearCount)
     }
+
+    @Test
+    fun unavailableSourcePausesCaptureWithoutClearingObservedData() {
+        var clearCount = 0
+        var pauseCount = 0
+        val controller = AccessibilityObservationController(
+            onObservationEnded = { clearCount += 1 },
+            onSourceUnavailable = { pauseCount += 1 },
+        )
+        val lease = controller.acquire()
+
+        controller.sourceUnavailable()
+
+        assertTrue(controller.isObservationRequested)
+        assertEquals(1, pauseCount)
+        assertEquals(0, clearCount)
+
+        lease.close()
+
+        assertFalse(controller.isObservationRequested)
+        assertEquals(1, clearCount)
+    }
 }

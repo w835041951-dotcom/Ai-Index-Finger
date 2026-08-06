@@ -20,6 +20,27 @@ class ScreenCaptureTargetingTest {
     }
 
     @Test
+    fun `image crop must remain entirely inside one target app window`() {
+        val targetBounds = listOf(
+            ScreenBounds(0, 100, 500, 1_000),
+            ScreenBounds(500, 100, 1_000, 1_000),
+        )
+
+        assertEquals(
+            true,
+            cropIsInsideTargetWindow(ImageCropBounds(10, 110, 490, 990), targetBounds),
+        )
+        assertEquals(
+            false,
+            cropIsInsideTargetWindow(ImageCropBounds(490, 110, 510, 200), targetBounds),
+        )
+        assertEquals(
+            false,
+            cropIsInsideTargetWindow(ImageCropBounds(10, 90, 100, 200), targetBounds),
+        )
+    }
+
+    @Test
     fun `accepts target package from an interactive window when active root is stale`() {
         assertEquals(
             true,

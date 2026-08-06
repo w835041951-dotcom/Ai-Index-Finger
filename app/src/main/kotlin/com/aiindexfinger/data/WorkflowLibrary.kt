@@ -29,6 +29,17 @@ data class WorkflowLibrary(
         )
     }
 
+    fun withWorkflow(workflow: Workflow): WorkflowLibrary = copy(
+        workflows = workflows.filterNot { it.id == workflow.id } + workflow,
+    ).normalized()
+
+    fun withWorkflowIfUnchanged(expected: Workflow?, workflow: Workflow): WorkflowLibrary {
+        require(expected == null || expected.id == workflow.id) { "Expected workflow ID must match candidate" }
+        val current = workflows.firstOrNull { it.id == workflow.id }
+        if (current != expected) throw WorkflowEditConflictException(workflow.id)
+        return withWorkflow(workflow)
+    }
+
     fun withFolder(folder: WorkflowFolder): WorkflowLibrary {
         val normalizedName = normalizeFolderName(folder.name)
         require(folders.none { it.id != folder.id && it.name.equals(normalizedName, ignoreCase = true) }) {
@@ -68,6 +79,9 @@ data class WorkflowLibrary(
         }
     }
 }
+
+class WorkflowEditConflictException(val workflowId: String) :
+    IllegalStateException("Workflow '$workflowId' changed after editing started")
 
 sealed interface WorkflowFolderSelection {
     data object All : WorkflowFolderSelection

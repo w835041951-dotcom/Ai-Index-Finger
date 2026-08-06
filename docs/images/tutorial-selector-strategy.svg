@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc">
+  <title id="title">元素定位策略优先级</title>
+  <desc id="desc">从稳定的唯一元素选择器，到祖先约束、匹配序号、截图点击，最后是坐标点击。</desc>
+  <rect width="1200" height="600" fill="#f4f1ea"/>
+  <text x="70" y="68" font-family="Segoe UI, sans-serif" font-size="34" font-weight="700" fill="#17252a">定位策略：从稳定到脆弱</text>
+  <text x="70" y="103" font-family="Segoe UI, sans-serif" font-size="17" fill="#4b5b5f">每一步都先使用“测试选择器”确认当前页面的匹配数量</text>
+  <g font-family="Segoe UI, sans-serif">
+    <g transform="translate(85 155)"><rect width="1030" height="68" rx="8" fill="#1f6f78"/><text x="35" y="43" font-size="23" fill="#fff" font-weight="700">1</text><text x="90" y="31" font-size="20" fill="#fff" font-weight="700">唯一元素选择器</text><text x="90" y="53" font-size="14" fill="#d8eff1">包名 + 资源 ID / 文本 / 内容描述 / 类名</text><text x="960" y="42" text-anchor="end" font-size="16" fill="#e8c766">首选</text></g>
+    <g transform="translate(135 242)"><rect width="930" height="68" rx="8" fill="#367f72"/><text x="35" y="43" font-size="23" fill="#fff" font-weight="700">2</text><text x="90" y="31" font-size="20" fill="#fff" font-weight="700">祖先约束</text><text x="90" y="53" font-size="14" fill="#e1f0ed">同名按钮很多时，限定它所在的稳定父级区域</text><text x="860" y="42" text-anchor="end" font-size="16" fill="#fff">推荐</text></g>
+    <g transform="translate(185 329)"><rect width="830" height="68" rx="8" fill="#db9b2b"/><text x="35" y="43" font-size="23" fill="#17252a" font-weight="700">3</text><text x="90" y="31" font-size="20" fill="#17252a" font-weight="700">匹配序号</text><text x="90" y="53" font-size="14" fill="#513708">页面顺序稳定时选择第 N 个匹配项</text><text x="760" y="42" text-anchor="end" font-size="16" fill="#513708">谨慎</text></g>
+    <g transform="translate(235 416)"><rect width="730" height="68" rx="8" fill="#d15b3f"/><text x="35" y="43" font-size="23" fill="#fff" font-weight="700">4</text><text x="90" y="31" font-size="20" fill="#fff" font-weight="700">截图点击</text><text x="90" y="53" font-size="14" fill="#ffe6df">无可访问元素时按图像模板定位，需 Android 11+</text><text x="660" y="42" text-anchor="end" font-size="16" fill="#fff">后备</text></g>
+    <g transform="translate(285 503)"><rect width="630" height="58" rx="8" fill="#657b83"/><text x="35" y="38" font-size="23" fill="#fff" font-weight="700">5</text><text x="90" y="36" font-size="20" fill="#fff" font-weight="700">固定坐标</text><text x="560" y="36" text-anchor="end" font-size="16" fill="#fff">最后选择</text></g>
+  </g>
+</svg>

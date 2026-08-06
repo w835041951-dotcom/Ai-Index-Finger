@@ -162,6 +162,7 @@ private fun Step.comparisonConfiguration(): Any = when (this) {
         templateHeight,
         minimumScorePermille,
         ambiguityMarginPermille,
+        scaleTolerancePermille,
         timeoutMillis,
         failurePolicy,
     )

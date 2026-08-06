@@ -4,12 +4,81 @@ import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
 import java.util.Locale
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkflowLibraryTest {
+    @Test
+    fun upsertWorkflowPreservesOtherWorkflowsAndFolderAssignments() {
+        val original = WorkflowLibrary(
+            workflows = listOf(
+                Workflow(id = "one", name = "One", steps = emptyList()),
+                Workflow(id = "two", name = "Two", steps = emptyList()),
+            ),
+            folders = listOf(WorkflowFolder("folder", "Folder")),
+            workflowFolderIds = mapOf("one" to "folder", "two" to "folder"),
+        )
+
+        val updated = original.withWorkflow(Workflow(id = "one", name = "Updated", steps = emptyList()))
+
+        assertEquals(listOf("two", "one"), updated.workflows.map { it.id })
+        assertEquals("Updated", updated.workflows.last().name)
+        assertEquals(mapOf("one" to "folder", "two" to "folder"), updated.workflowFolderIds)
+    }
+
+    @Test
+    fun addingWorkflowDoesNotChangeExistingLibraryMetadata() {
+        val original = WorkflowLibrary(
+            workflows = listOf(Workflow(id = "one", name = "One", steps = emptyList())),
+            folders = listOf(WorkflowFolder("folder", "Folder")),
+            workflowFolderIds = mapOf("one" to "folder"),
+        )
+
+        val updated = original.withWorkflow(Workflow(id = "new", name = "New", steps = emptyList()))
+
+        assertEquals(listOf("one", "new"), updated.workflows.map { it.id })
+        assertEquals(original.folders, updated.folders)
+        assertEquals(original.workflowFolderIds, updated.workflowFolderIds)
+    }
+
+    @Test
+    fun unchangedBaselineCanBeReplaced() {
+        val baseline = Workflow(id = "one", name = "One", steps = emptyList())
+        val library = WorkflowLibrary(workflows = listOf(baseline))
+
+        val updated = library.withWorkflowIfUnchanged(
+            baseline,
+            baseline.copy(name = "Updated"),
+        )
+
+        assertEquals("Updated", updated.workflows.single().name)
+    }
+
+    @Test
+    fun staleBaselineCannotOverwriteNewerWorkflow() {
+        val baseline = Workflow(id = "one", name = "One", steps = emptyList())
+        val newer = baseline.copy(name = "Floating update")
+        val library = WorkflowLibrary(workflows = listOf(newer))
+
+        assertThrows(WorkflowEditConflictException::class.java) {
+            library.withWorkflowIfUnchanged(baseline, baseline.copy(name = "Regular update"))
+        }
+        assertEquals(newer, library.workflows.single())
+    }
+
+    @Test
+    fun newWorkflowCannotReplaceCollidingId() {
+        val existing = Workflow(id = "one", name = "Existing", steps = emptyList())
+        val library = WorkflowLibrary(workflows = listOf(existing))
+
+        assertThrows(WorkflowEditConflictException::class.java) {
+            library.withWorkflowIfUnchanged(null, existing.copy(name = "New"))
+        }
+    }
+
     @Test
     fun folderNamesAreTrimmedAndUniqueIgnoringCase() {
         val library = library().withFolder(WorkflowFolder("first", " Personal "))

@@ -347,6 +347,30 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `template compared with variable executes the true branch`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "template-variable-condition",
+            name = "Template variable condition",
+            steps = listOf(
+                Step.SetVariable("set-id", "orderId", Value.Literal("42")),
+                Step.SetVariable("set-expected", "expected", Value.Literal("Order-42")),
+                Step.IfElse(
+                    id = "if-template-variable",
+                    condition = Condition.Equals(
+                        Value.Template("Order-${'$'}{orderId}"),
+                        Value.Variable("expected"),
+                    ),
+                    whenTrue = listOf(Step.Click("click", selector)),
+                ),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.clickCount)
+    }
+
+    @Test
     fun `rejects a second concurrent run`() = runTest {
         val gate = CompletableDeferred<Unit>()
         val executor = WorkflowExecutor(FakeDriver(clickGate = gate))

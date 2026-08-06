@@ -2,9 +2,13 @@ package com.aiindexfinger.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 data class Workflow(
+    @EncodeDefault
     val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
     val id: String,
     val name: String,
@@ -20,7 +24,7 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 17
+        const val CURRENT_SCHEMA_VERSION = 18
     }
 }
 
@@ -95,6 +99,7 @@ sealed interface Step {
         val templateHeight: Int,
         val minimumScorePermille: Int = 920,
         val ambiguityMarginPermille: Int = 25,
+        val scaleTolerancePermille: Int = 0,
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step {
@@ -107,12 +112,16 @@ sealed interface Step {
             }
             require(minimumScorePermille in 0..1_000) { "Image match score must be between 0 and 1000" }
             require(ambiguityMarginPermille in 0..1_000) { "Image ambiguity margin must be between 0 and 1000" }
+            require(scaleTolerancePermille in SUPPORTED_SCALE_TOLERANCES) {
+                "Image scale tolerance must be 0, 50, or 100"
+            }
         }
 
         companion object {
             const val MIN_TEMPLATE_SIZE = 12
             const val MAX_TEMPLATE_SIZE = 256
             const val MAX_TEMPLATE_BASE64_LENGTH = 128 * 1024
+            val SUPPORTED_SCALE_TOLERANCES = setOf(0, 50, 100)
         }
     }
 

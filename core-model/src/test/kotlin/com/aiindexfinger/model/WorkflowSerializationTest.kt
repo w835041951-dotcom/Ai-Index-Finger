@@ -4,9 +4,20 @@ import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class WorkflowSerializationTest {
     private val json = Json { prettyPrint = true }
+
+    @Test
+    fun `current schema version is always encoded`() {
+        val encoded = json.encodeToString(
+            Workflow.serializer(),
+            Workflow(id = "schema", name = "Schema", steps = emptyList()),
+        )
+
+        assertTrue(encoded.contains("\"schemaVersion\": ${Workflow.CURRENT_SCHEMA_VERSION}"))
+    }
 
     @Test
     fun `round trips supported device actions`() {
@@ -171,7 +182,7 @@ class WorkflowSerializationTest {
     }
 
     @Test
-    fun `round trips image click and decodes schema 13 workflows`() {
+    fun `round trips image click and defaults schema 17 scale tolerance`() {
         val imageClick = Step.ImageClick(
             id = "image",
             packageName = "com.example.target",
@@ -180,17 +191,20 @@ class WorkflowSerializationTest {
             templateHeight = 18,
             minimumScorePermille = 940,
             ambiguityMarginPermille = 30,
+            scaleTolerancePermille = 100,
             timeoutMillis = 4_000,
             failurePolicy = FailurePolicy.Continue,
         )
         val workflow = Workflow(id = "image-workflow", name = "Image", steps = listOf(imageClick))
-        val legacyJson = """{"schemaVersion":13,"id":"legacy","name":"Legacy","steps":[]}"""
+        val legacyJson = """{"schemaVersion":17,"id":"legacy","name":"Legacy","steps":[{"type":"image_click","id":"image","packageName":"com.example","templatePngBase64":"aGVsbG8=","templateWidth":24,"templateHeight":24,"minimumScorePermille":920,"ambiguityMarginPermille":25,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
         assertEquals(
             workflow,
             json.decodeFromString(Workflow.serializer(), json.encodeToString(Workflow.serializer(), workflow)),
         )
-        assertEquals(13, json.decodeFromString(Workflow.serializer(), legacyJson).schemaVersion)
+        val legacy = json.decodeFromString(Workflow.serializer(), legacyJson)
+        assertEquals(17, legacy.schemaVersion)
+        assertEquals(0, (legacy.steps.single() as Step.ImageClick).scaleTolerancePermille)
     }
 
     @Test
@@ -200,6 +214,9 @@ class WorkflowSerializationTest {
         }
         assertFailsWith<IllegalArgumentException> {
             Step.ImageClick("image", "com.example", "x".repeat(Step.ImageClick.MAX_TEMPLATE_BASE64_LENGTH + 1), 24, 24)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, scaleTolerancePermille = 25)
         }
     }
 }

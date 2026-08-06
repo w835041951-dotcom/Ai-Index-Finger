@@ -27,8 +27,11 @@ fun inspectElementAt(
     x: Int,
     y: Int,
 ): ElementInspection? {
-    val hitIndex = hierarchy.nodes.indices
+    val containingIndexes = hierarchy.nodes.indices
         .filter { hierarchy.nodes[it].node.contains(x, y) }
+    val topWindowIndex = containingIndexes.minOfOrNull { hierarchy.nodes[it].windowIndex } ?: return null
+    val hitIndex = containingIndexes
+        .filter { hierarchy.nodes[it].windowIndex == topWindowIndex }
         .maxWithOrNull(
             compareBy<Int> { hierarchy.nodes.depthOf(it) }
                 .thenByDescending { hierarchy.nodes[it].node.area() },
@@ -73,6 +76,40 @@ fun inspectElementAt(
         selectorMatchCount = best?.second ?: 0,
         ancestorCandidates = emptyList(),
     )
+}
+
+internal fun mergeRecordingHierarchyCaptures(
+    captures: List<RecordingHierarchyCapture>,
+    limit: Int,
+): RecordingHierarchyCapture {
+    require(limit >= 0) { "Node limit cannot be negative" }
+    val nextIndexes = IntArray(captures.size)
+    val remappedIndexes = captures.map { mutableMapOf<Int, Int>() }
+    val result = mutableListOf<RecordingHierarchyNode>()
+    var hierarchyValid = true
+    while (result.size < limit) {
+        var foundNode = false
+        captures.forEachIndexed { captureIndex, capture ->
+            if (result.size >= limit) return@forEachIndexed
+            val sourceIndex = nextIndexes[captureIndex]
+            val sourceNode = capture.nodes.getOrNull(sourceIndex) ?: return@forEachIndexed
+            foundNode = true
+            val parentIndex = sourceNode.parentIndex?.let { parent ->
+                remappedIndexes[captureIndex][parent].also {
+                    if (it == null) hierarchyValid = false
+                }
+            }
+            val resultIndex = result.size
+            result += sourceNode.copy(parentIndex = parentIndex, windowIndex = captureIndex)
+            remappedIndexes[captureIndex][sourceIndex] = resultIndex
+            nextIndexes[captureIndex] = sourceIndex + 1
+        }
+        if (!foundNode) break
+    }
+    val complete = hierarchyValid && captures.indices.all { index ->
+        captures[index].complete && nextIndexes[index] == captures[index].nodes.size
+    }
+    return RecordingHierarchyCapture(result, complete)
 }
 
 private fun List<RecordingHierarchyNode>.ancestorCandidates(

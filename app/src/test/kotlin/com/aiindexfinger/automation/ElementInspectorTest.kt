@@ -111,6 +111,70 @@ class ElementInspectorTest {
         ))
     }
 
+    @Test
+    fun `merged hierarchy finds controls in a second window`() {
+        val page = node(viewId = "com.example:id/page", bounds = "0 0 300 300", clickable = true)
+        val dialog = node(viewId = "com.example:id/confirm", bounds = "100 100 200 200", clickable = true)
+        val hierarchy = mergeRecordingHierarchyCaptures(
+            captures = listOf(
+                RecordingHierarchyCapture(listOf(RecordingHierarchyNode(dialog, null)), complete = true),
+                RecordingHierarchyCapture(listOf(RecordingHierarchyNode(page, null)), complete = true),
+            ),
+            limit = 10,
+        )
+
+        val inspection = inspectElementAt(hierarchy, 150, 150)!!
+
+        assertEquals(dialog, inspection.node)
+        assertEquals("com.example:id/confirm", inspection.selector?.viewId)
+    }
+
+    @Test
+    fun `merged hierarchy preserves parent links and global ambiguity`() {
+        val firstParent = node(text = "First", bounds = "0 0 100 100")
+        val firstButton = node(text = "Delete", bounds = "0 0 100 100", clickable = true)
+        val secondButton = firstButton.copy(bounds = "100 0 200 100")
+        val hierarchy = mergeRecordingHierarchyCaptures(
+            captures = listOf(
+                RecordingHierarchyCapture(
+                    listOf(
+                        RecordingHierarchyNode(firstParent, null),
+                        RecordingHierarchyNode(firstButton, 0),
+                    ),
+                    complete = true,
+                ),
+                RecordingHierarchyCapture(
+                    listOf(RecordingHierarchyNode(secondButton, null)),
+                    complete = true,
+                ),
+            ),
+            limit = 10,
+        )
+
+        val inspection = inspectElementAt(hierarchy, 50, 50)!!
+
+        assertEquals("First", inspection.selector?.ancestor?.text)
+        assertEquals(ElementSelectorReliability.Unique, inspection.selectorReliability)
+    }
+
+    @Test
+    fun `truncated merged hierarchy never claims uniqueness`() {
+        val first = node(viewId = "com.example:id/action", bounds = "0 0 100 100", clickable = true)
+        val second = first.copy(bounds = "100 0 200 100")
+        val hierarchy = mergeRecordingHierarchyCaptures(
+            captures = listOf(
+                RecordingHierarchyCapture(listOf(RecordingHierarchyNode(first, null)), complete = true),
+                RecordingHierarchyCapture(listOf(RecordingHierarchyNode(second, null)), complete = true),
+            ),
+            limit = 1,
+        )
+
+        val inspection = inspectElementAt(hierarchy, 50, 50)!!
+
+        assertEquals(ElementSelectorReliability.HierarchyIncomplete, inspection.selectorReliability)
+        assertEquals(false, inspection.canUseSelector)
+    }
+
     private fun node(
         viewId: String? = null,
         text: String? = null,

@@ -50,6 +50,14 @@ class ImageTemplateMatcherTest {
     }
 
     @Test
+    fun `equal spatially distinct matches remain ambiguous with zero margin`() {
+        val template = pattern(12, 12)
+        val screen = canvas(48, 40, listOf(3 to 4, 29 to 20), template)
+
+        assertEquals(TemplateMatchResult.Ambiguous, matchTemplate(screen, template, 920, 0))
+    }
+
+    @Test
     fun `score remains bounded for noisy screen`() {
         val template = pattern(12, 12)
         val noisy = LumaImage(24, 24, ByteArray(24 * 24) { ((it * 37) % 255).toByte() })
@@ -57,6 +65,45 @@ class ImageTemplateMatcherTest {
         val result = matchTemplate(noisy, template, 990, 10)
 
         assertTrue(result is TemplateMatchResult.NoMatch || result is TemplateMatchResult.Ambiguous)
+    }
+
+    @Test
+    fun `scale tolerance finds a target enlarged by ten percent`() {
+        val template = pattern(20, 20)
+        val enlarged = scaleLumaImage(template, 1_100)
+        val screen = canvas(64, 56, listOf(17 to 13), enlarged)
+
+        assertEquals(
+            TemplateMatchResult.NoMatch,
+            matchTemplate(screen, template, 1_000, 25),
+        )
+        assertEquals(
+            TemplateMatchResult.Unique(28, 24, 1_000),
+            matchTemplate(screen, template, 1_000, 25, 100),
+        )
+    }
+
+    @Test
+    fun `scale variants at one location are treated as one match`() {
+        val template = pattern(20, 20)
+        val screen = canvas(64, 56, listOf(17 to 13), scaleLumaImage(template, 1_100))
+
+        assertTrue(matchTemplate(screen, template, 900, 100, 100) is TemplateMatchResult.Unique)
+    }
+
+    @Test
+    fun `targets at different scales and positions remain ambiguous`() {
+        val template = pattern(20, 20)
+        val enlarged = scaleLumaImage(template, 1_100)
+        val pixels = canvas(80, 64, listOf(3 to 3), template).pixels.copyOf()
+        for (y in 0 until enlarged.height) {
+            for (x in 0 until enlarged.width) {
+                pixels[(30 + y) * 80 + 48 + x] = enlarged[x, y].toByte()
+            }
+        }
+        val screen = LumaImage(80, 64, pixels)
+
+        assertEquals(TemplateMatchResult.Ambiguous, matchTemplate(screen, template, 950, 25, 100))
     }
 
     @Test(expected = CancellationException::class)

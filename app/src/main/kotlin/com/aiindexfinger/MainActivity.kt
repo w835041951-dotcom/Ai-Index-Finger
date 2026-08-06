@@ -7,7 +7,6 @@ import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
@@ -23,6 +22,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -96,6 +96,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.aiindexfinger.automation.AutomationAccessibilityService
 import com.aiindexfinger.automation.LaunchableAppCatalog
+import com.aiindexfinger.automation.applyLiveActionHandoff
+import com.aiindexfinger.automation.cropBoundsOrNull
+import com.aiindexfinger.automation.cropTemplate
+import com.aiindexfinger.automation.encodeTemplatePng
 import com.aiindexfinger.automation.filterLaunchableApps
 import com.aiindexfinger.automation.ObservedNode
 import com.aiindexfinger.automation.SelectorRecommendations
@@ -210,8 +214,6 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Date
 import java.util.UUID
-import java.io.ByteArrayOutputStream
-import java.util.Base64
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -259,6 +261,7 @@ class MainActivity : ComponentActivity() {
                         scheduledWorkflowEvent = scheduledWorkflowEvent,
                         onScheduledWorkflowEventConsumed = scheduledWorkflowEvents::consume,
                         onSave = workflowPersistence::saveLibrary,
+                        onCommitWorkflow = workflowPersistence::commitWorkflow,
                         onCommitImport = workflowPersistence::commitLibrary,
                         onListVersions = workflowPersistence::listVersions,
                         onRollback = workflowPersistence::rollback,
@@ -364,6 +367,7 @@ private fun WorkflowApp(
     scheduledWorkflowEvent: ScheduledWorkflowEvent?,
     onScheduledWorkflowEventConsumed: (Long) -> Unit,
     onSave: (WorkflowLibrary) -> Unit,
+    onCommitWorkflow: suspend (Workflow?, Workflow) -> WorkflowLibrary,
     onCommitImport: suspend (WorkflowLibrary) -> Unit,
         onListVersions: suspend (String) -> List<WorkflowVersion>,
         onRollback: suspend (String, String) -> Workflow,
@@ -378,6 +382,13 @@ private fun WorkflowApp(
     onAccessibilityDisclosureAcknowledged: () -> Unit,
 ) {
     var library by remember { mutableStateOf(initialLibrary) }
+    val canonicalLibrary by (LocalContext.current.applicationContext as AiIndexFingerApplication)
+        .library.collectAsStateWithLifecycle()
+    LaunchedEffect(canonicalLibrary) {
+        canonicalLibrary?.let { latest ->
+            if (latest != library) library = latest
+        }
+    }
     val workflows = library.workflows
     val persist: (WorkflowLibrary) -> Unit = { updated ->
         val normalized = updated.normalized()
@@ -394,6 +405,12 @@ private fun WorkflowApp(
     var workflowComparison by remember { mutableStateOf<Pair<Workflow, Workflow>?>(null) }
         var versionHistory by remember { mutableStateOf<Pair<Workflow, List<WorkflowVersion>>?>(null) }
     var runMessage by remember { mutableStateOf(initialRunMessage) }
+    var editorSaveError by remember { mutableStateOf<String?>(null) }
+    var editorSaveInProgress by remember { mutableStateOf(false) }
+    LaunchedEffect(editingWorkflow?.id) {
+        editorSaveError = null
+        editorSaveInProgress = false
+    }
     LaunchedEffect(workflowPersistenceFailure?.sequence) {
         workflowPersistenceFailure?.let { failure ->
             runMessage = failure.message
@@ -583,7 +600,10 @@ private fun WorkflowApp(
     } else if (editingWorkflow != null) {
         WorkflowEditor(
             workflow = requireNotNull(editingWorkflow),
+            persistedBaseline = workflows.firstOrNull { it.id == requireNotNull(editingWorkflow).id },
             initialEditingStepPath = initialEditingStepPath,
+            saveInProgress = editorSaveInProgress,
+            saveErrorMessage = editorSaveError,
             onTest = { workflow ->
                 val service = AutomationAccessibilityService.instance
                 val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
@@ -613,25 +633,38 @@ private fun WorkflowApp(
                 editingWorkflow = null
                 initialEditingStepPath = null
             },
-            onSave = { workflow ->
-                if (!workflow.isReadyToRun()) {
-                    runCatching { onCancelSchedule(workflow.id) }
-                        .onSuccess {
-                            schedules = it
-                            val updated = workflows.filterNot { current -> current.id == workflow.id } + workflow
-                            persist(library.copy(workflows = updated))
+            onSave = { expected, workflow ->
+                if (!editorSaveInProgress) {
+                    editorSaveInProgress = true
+                    editorSaveError = null
+                    coroutineScope.launch {
+                        runCatching {
+                            onCommitWorkflow(expected, workflow)
+                        }.onSuccess { updatedLibrary ->
+                            library = updatedLibrary
+                            if (!workflow.isReadyToRun()) {
+                                runCatching { onCancelSchedule(workflow.id) }
+                                    .onSuccess { schedules = it }
+                                    .onFailure { error ->
+                                        if (error !is ScheduleStorageException) throw error
+                                        runMessage = context.getString(
+                                            R.string.workflow_saved_schedule_cleanup_failed,
+                                        )
+                                    }
+                            }
                             editingWorkflow = null
                             initialEditingStepPath = null
+                        }.onFailure { error ->
+                            editorSaveError = context.getString(
+                                if (error is com.aiindexfinger.data.WorkflowEditConflictException) {
+                                    R.string.workflow_edit_conflict
+                                } else {
+                                    R.string.save_failed
+                                },
+                            )
                         }
-                        .onFailure { error ->
-                            if (error !is ScheduleStorageException) throw error
-                            runMessage = context.getString(R.string.schedule_storage_corrupt)
-                        }
-                } else {
-                    val updated = workflows.filterNot { it.id == workflow.id } + workflow
-                    persist(library.copy(workflows = updated))
-                    editingWorkflow = null
-                    initialEditingStepPath = null
+                        editorSaveInProgress = false
+                    }
                 }
             },
         )
@@ -1050,6 +1083,7 @@ internal fun WorkflowHome(
     val workflowStartedAtMillis by AutomationAccessibilityService.workflowStartedAtMillis
         .collectAsStateWithLifecycle()
     val observedNodes by AutomationAccessibilityService.observedNodes.collectAsStateWithLifecycle()
+    val overlayStatus by AutomationAccessibilityService.overlayStatus.collectAsStateWithLifecycle()
     var workflowToDelete by remember { mutableStateOf<Workflow?>(null) }
     var confirmClearHistory by remember { mutableStateOf(false) }
     var showNodeInspector by remember { mutableStateOf(false) }
@@ -1131,6 +1165,14 @@ internal fun WorkflowHome(
                 onOpenSettings = onOpenAccessibilitySettings,
                 onReviewDisclosure = onReviewAccessibilityDisclosure,
             )
+            OutlinedButton(
+                enabled = serviceConnected,
+                onClick = { AutomationAccessibilityService.instance?.startFloatingWorkflowEditor() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.floating_editor_open)) }
+            overlayStatus?.let { message ->
+                Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+            }
             if (runningWorkflowId != null) {
                 val currentWorkflow = workflows.firstOrNull { it.id == runningWorkflowId }
                 val currentStep = currentStepId?.let { currentWorkflow?.steps?.findById(it) }
@@ -1834,14 +1876,19 @@ private fun NodeProperty(label: String, value: String?) {
 }
 
 @Composable
-private fun WorkflowEditor(
+internal fun WorkflowEditor(
     workflow: Workflow,
+    persistedBaseline: Workflow? = workflow,
     initialEditingStepPath: StepPath? = null,
+    floatingEditorMode: Boolean = false,
+    saveInProgress: Boolean = false,
+    saveErrorMessage: String? = null,
     onTest: (Workflow) -> Unit,
     onBack: () -> Unit,
-    onSave: (Workflow) -> Unit,
+    onSave: (expected: Workflow?, candidate: Workflow) -> Unit,
 ) {
     val context = LocalContext.current
+    val saveBaseline = remember(workflow.id) { persistedBaseline }
     var name by remember(workflow.id) { mutableStateOf(workflow.name) }
     var defaultTimeoutText by remember(workflow.id) {
         mutableStateOf(workflow.defaultStepTimeoutMillis.toString())
@@ -1902,7 +1949,7 @@ private fun WorkflowEditor(
         }
     }
 
-    LaunchedEffect(pendingOverlayAction) {
+    LaunchedEffect(pendingOverlayAction, workflow.id) {
         val action = pendingOverlayAction ?: return@LaunchedEffect
         when (action) {
             is PendingOverlayAction.RecordedClicks -> {
@@ -1929,6 +1976,13 @@ private fun WorkflowEditor(
                         )
                     }
                     unrecognizedClickCount = action.issues.size
+                    AutomationAccessibilityService.consumePendingOverlayAction(action)
+                }
+            }
+            is PendingOverlayAction.LiveAction -> {
+                val result = applyLiveActionHandoff(steps, workflow.id, action, ::newId)
+                if (result.appended) steps = result.steps
+                if (result.consume) {
                     AutomationAccessibilityService.consumePendingOverlayAction(action)
                 }
             }
@@ -1970,7 +2024,13 @@ private fun WorkflowEditor(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     val canSave = name.isNotBlank() &&
-                        defaultTimeoutMillis != null && defaultTimeoutMillis > 0
+                        defaultTimeoutMillis != null && defaultTimeoutMillis > 0 && !saveInProgress
+                    saveErrorMessage?.let { message ->
+                        Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    }
+                    if (saveInProgress) {
+                        Text(stringResource(R.string.floating_editor_saving), fontSize = 12.sp)
+                    }
                     Button(
                         enabled = canSave,
                         onClick = {
@@ -1991,6 +2051,7 @@ private fun WorkflowEditor(
                             enabled = canSave,
                             onClick = {
                                 onSave(
+                                    saveBaseline,
                                     workflow.copy(
                                         schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
                                         name = name.trim(),
@@ -2006,6 +2067,7 @@ private fun WorkflowEditor(
                             enabled = canSave && validationIssues.isEmpty(),
                             onClick = {
                                 onSave(
+                                    saveBaseline,
                                     workflow.copy(
                                         schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
                                         name = name.trim(),
@@ -2039,7 +2101,7 @@ private fun WorkflowEditor(
                 onValueChange = { name = it },
                 label = { Text(stringResource(R.string.workflow_name)) },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag(WORKFLOW_NAME_INPUT_TAG),
             )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
@@ -2141,7 +2203,12 @@ private fun WorkflowEditor(
                 HorizontalDivider()
             }
             Spacer(Modifier.height(20.dp))
-            Text(stringResource(R.string.add_action), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(
+                stringResource(R.string.add_action),
+                modifier = Modifier.testTag(WORKFLOW_EDITOR_ALL_ACTIONS_TAG),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(onClick = { showLaunchDialog = true }, modifier = Modifier.weight(1f)) {
@@ -2161,6 +2228,29 @@ private fun WorkflowEditor(
                 onClick = { showImageClickDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.image_click)) }
+            if (!floatingEditorMode) {
+                OutlinedButton(
+                    enabled = AutomationAccessibilityService.instance != null && !hasUnsavedChanges,
+                    onClick = {
+                        AutomationAccessibilityService.instance?.startFloatingWorkflowEditor(workflow.id)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.floating_editor_open)) }
+                if (hasUnsavedChanges) {
+                    Text(
+                        stringResource(R.string.floating_editor_save_first),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+            OutlinedButton(
+                enabled = AutomationAccessibilityService.instance != null,
+                onClick = {
+                    AutomationAccessibilityService.instance?.startLiveAction(workflow.id, currentListPath)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.live_action_quick_add)) }
             OutlinedButton(
                 enabled = AutomationAccessibilityService.instance != null,
                 onClick = {
@@ -2245,7 +2335,6 @@ private fun WorkflowEditor(
                 }
             }
             OutlinedButton(
-                enabled = observedNodes.isNotEmpty(),
                 onClick = { showReadNodeTextDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.read_element_attribute)) }
@@ -2262,7 +2351,7 @@ private fun WorkflowEditor(
                 ) { Text(stringResource(R.string.variable_condition)) }
             }
             OutlinedButton(
-                enabled = currentSteps.isNotEmpty() && observedNodes.isNotEmpty(),
+                enabled = currentSteps.isNotEmpty(),
                 onClick = { showNodeConditionDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.element_exists_condition)) }
@@ -2319,11 +2408,11 @@ private fun WorkflowEditor(
     if (showLaunchDialog) {
         LaunchAppDialog(
             onDismiss = { showLaunchDialog = false },
-            onAdd = { packageName ->
+            onAdd = { packageName, intentAction ->
                 steps = steps.insertStep(
                     currentListPath,
                     currentSteps.size,
-                    Step.LaunchApp(UUID.randomUUID().toString(), packageName),
+                    Step.LaunchApp(UUID.randomUUID().toString(), packageName, intentAction),
                 )
                 showLaunchDialog = false
             },
@@ -2332,6 +2421,7 @@ private fun WorkflowEditor(
     if (showInputDialog) {
         InputTextDialog(
             observedNodes = observedNodes,
+            confirmLabel = stringResource(R.string.add),
             onDismiss = { showInputDialog = false },
             onAdd = { selector, text, variableName, inputMethod ->
                 steps = steps.insertStep(
@@ -2372,6 +2462,7 @@ private fun WorkflowEditor(
     if (showScrollDialog) {
         ScrollStepDialog(
             observedNodes = observedNodes,
+            confirmLabel = stringResource(R.string.add),
             onDismiss = { showScrollDialog = false },
             onAdd = { selector, direction ->
                 steps = steps.insertStep(
@@ -2385,9 +2476,10 @@ private fun WorkflowEditor(
     }
     if (showWaitDialog) {
         NumberDialog(
-            title = "等待",
-            label = "持续时间（毫秒）",
+            title = stringResource(R.string.wait_action),
+            label = stringResource(R.string.duration_millis),
             initialValue = "1000",
+            confirmLabel = stringResource(R.string.add),
             onDismiss = { showWaitDialog = false },
             onAdd = { duration ->
                 steps = steps.insertStep(
@@ -2449,10 +2541,14 @@ private fun WorkflowEditor(
         when (val step = runCatching { steps.stepAt(path) }.getOrNull()) {
             is Step.LaunchApp -> LaunchAppDialog(
                 initialPackageName = step.packageName,
+                initialIntentAction = step.intentAction,
                 confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
-                onAdd = { packageName ->
-                    steps = steps.replaceStep(path, step.copy(packageName = packageName))
+                onAdd = { packageName, intentAction ->
+                    steps = steps.replaceStep(
+                        path,
+                        step.copy(packageName = packageName, intentAction = intentAction),
+                    )
                     editingStepPath = null
                 },
             )
@@ -2490,7 +2586,7 @@ private fun WorkflowEditor(
             )
             is Step.ImageClick -> ImageClickStepDialog(
                 initialStep = step,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { replacement ->
                     steps = steps.replaceStep(path, replacement.copy(id = step.id))
@@ -2500,7 +2596,7 @@ private fun WorkflowEditor(
             is Step.InputText -> InputTextDialog(
                 observedNodes = observedNodes,
                 initialStep = step,
-                confirmLabel = "保存",
+                confirmLabel = stringResource(R.string.save),
                 onDismiss = { editingStepPath = null },
                 onAdd = { selector, text, variableName, inputMethod ->
                     steps = steps.replaceStep(
@@ -2530,10 +2626,10 @@ private fun WorkflowEditor(
                 },
             )
             is Step.Delay -> NumberDialog(
-                title = "编辑等待",
-                label = "持续时间（毫秒）",
+                title = stringResource(R.string.edit_wait),
+                label = stringResource(R.string.duration_millis),
                 initialValue = step.durationMillis.toString(),
-                confirmLabel = "保存",
+                confirmLabel = stringResource(R.string.save),
                 onDismiss = { editingStepPath = null },
                 onAdd = { duration ->
                     steps = steps.replaceStep(path, step.copy(durationMillis = duration))
@@ -2550,31 +2646,19 @@ private fun WorkflowEditor(
             )
             is Step.IfElse -> {
                 when (val condition = step.condition) {
-                    is Condition.Equals -> {
-                        val variable = condition.left as? Value.Variable
-                        val expected = condition.right as? Value.Literal
-                        if (variable != null && expected != null) {
-                            ConditionSettingsDialog(
-                                initialVariableName = variable.name,
-                                initialExpectedValue = expected.value,
-                                initialOperator = condition.operator,
-                                onDismiss = { editingStepPath = null },
-                                onSave = { variableName, expectedValue, operator ->
-                                    steps = steps.replaceStep(
-                                        path,
-                                        step.copy(
-                                            condition = Condition.Equals(
-                                                Value.Variable(variableName),
-                                                Value.Literal(expectedValue),
-                                                operator,
-                                            ),
-                                        ),
-                                    )
-                                    editingStepPath = null
-                                },
+                    is Condition.Equals -> ConditionSettingsDialog(
+                        initialLeft = condition.left,
+                        initialRight = condition.right,
+                        initialOperator = condition.operator,
+                        onDismiss = { editingStepPath = null },
+                        onSave = { left, right, operator ->
+                            steps = steps.replaceStep(
+                                path,
+                                step.copy(condition = Condition.Equals(left, right, operator)),
                             )
-                        }
-                    }
+                            editingStepPath = null
+                        },
+                    )
                     is Condition.NodeExists -> NodeConditionDialog(
                         observedNodes = observedNodes,
                         initialSelector = condition.selector,
@@ -2619,7 +2703,7 @@ private fun WorkflowEditor(
             is Step.SetVariable -> SetVariableDialog(
                 initialName = step.name,
                 initialValue = step.value,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { variableName, value ->
                     steps = steps.replaceStep(path, step.copy(name = variableName, value = value))
@@ -2637,7 +2721,7 @@ private fun WorkflowEditor(
             is Step.Scroll -> ScrollStepDialog(
                 observedNodes = observedNodes,
                 initialStep = step,
-                confirmLabel = "保存",
+                confirmLabel = stringResource(R.string.save),
                 onDismiss = { editingStepPath = null },
                 onAdd = { selector, direction ->
                     steps = steps.replaceStep(path, step.copy(selector = selector, direction = direction))
@@ -2647,7 +2731,7 @@ private fun WorkflowEditor(
             is Step.WaitForNode -> WaitNodeDialog(
                 observedNodes = observedNodes,
                 initialStep = step,
-                confirmLabel = "保存",
+                confirmLabelRes = R.string.save,
                 onDismiss = { editingStepPath = null },
                 onAdd = { selector, timeout, mustExist ->
                     steps = steps.replaceStep(
@@ -2666,8 +2750,8 @@ private fun WorkflowEditor(
     }
     if (showRepeatDialog) {
         WrapStepDialog(
-            title = "重复步骤",
-            valueLabel = "重复次数",
+            title = stringResource(R.string.repeat_steps),
+            valueLabel = stringResource(R.string.repeat_count),
             initialValue = "2",
             steps = currentSteps,
             onDismiss = { showRepeatDialog = false },
@@ -2686,18 +2770,14 @@ private fun WorkflowEditor(
         ConditionDialog(
             steps = currentSteps,
             onDismiss = { showConditionDialog = false },
-            onAdd = { index, variableName, expectedValue, operator ->
+            onAdd = { index, left, right, operator ->
                 val path = StepPath(currentListPath, index)
                 val nestedStep = steps.stepAt(path)
                 steps = steps.replaceStep(
                     path,
                     Step.IfElse(
                         id = newId(),
-                        condition = Condition.Equals(
-                            Value.Variable(variableName),
-                            Value.Literal(expectedValue),
-                            operator,
-                        ),
+                        condition = Condition.Equals(left, right, operator),
                         whenTrue = listOf(nestedStep),
                     ),
                 )
@@ -2825,7 +2905,14 @@ private fun RepeatSettingsDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.repeat_settings)) },
-        text = { NodeField(countText, { countText = it }, "重复次数（1-${Step.Repeat.MAX_REPEAT_COUNT}）", true) },
+        text = {
+            NodeField(
+                countText,
+                { countText = it },
+                stringResource(R.string.repeat_count_range, Step.Repeat.MAX_REPEAT_COUNT),
+                true,
+            )
+        },
         confirmButton = {
             TextButton(
                 enabled = count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT,
@@ -2838,29 +2925,49 @@ private fun RepeatSettingsDialog(
 
 @Composable
 private fun ConditionSettingsDialog(
-    initialVariableName: String,
-    initialExpectedValue: String,
+    initialLeft: Value,
+    initialRight: Value,
     initialOperator: ComparisonOperator,
     onDismiss: () -> Unit,
-    onSave: (String, String, ComparisonOperator) -> Unit,
+    onSave: (Value, Value, ComparisonOperator) -> Unit,
 ) {
-    var variableName by remember(initialVariableName) { mutableStateOf(initialVariableName) }
-    var expectedValue by remember(initialExpectedValue) { mutableStateOf(initialExpectedValue) }
+    var leftMode by remember(initialLeft) { mutableStateOf(variableValueMode(initialLeft)) }
+    var leftText by remember(initialLeft) { mutableStateOf(variableValueText(initialLeft)) }
+    var rightMode by remember(initialRight) { mutableStateOf(variableValueMode(initialRight)) }
+    var rightText by remember(initialRight) { mutableStateOf(variableValueText(initialRight)) }
     var operator by remember(initialOperator) { mutableStateOf(initialOperator) }
+    val left = variableValueOrNull(leftMode, leftText)
+    val right = variableValueOrNull(rightMode, rightText)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.condition_settings)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                NodeField(variableName, { variableName = it }, "变量名", true)
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                VariableValueEditor(
+                    title = stringResource(R.string.comparison_left_value),
+                    mode = leftMode,
+                    text = leftText,
+                    onModeChange = { leftMode = it },
+                    onTextChange = { leftText = it },
+                )
+                Text(stringResource(R.string.comparison_operator), fontWeight = FontWeight.SemiBold)
                 ComparisonOperatorSelector(operator) { operator = it }
-                NodeField(expectedValue, { expectedValue = it }, "预期值")
+                VariableValueEditor(
+                    title = stringResource(R.string.comparison_right_value),
+                    mode = rightMode,
+                    text = rightText,
+                    onModeChange = { rightMode = it },
+                    onTextChange = { rightText = it },
+                )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = variableName.isNotBlank(),
-                onClick = { onSave(variableName.trim(), expectedValue, operator) },
+                enabled = left != null && right != null,
+                onClick = { onSave(requireNotNull(left), requireNotNull(right), operator) },
             ) { Text(stringResource(R.string.save)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
@@ -2893,7 +3000,7 @@ private fun FailurePolicyDialog(
                 NodeField(
                     timeoutText,
                     { timeoutText = it },
-                    "超时毫秒数（留空使用 $defaultTimeoutMillis）",
+                    stringResource(R.string.step_timeout_override, defaultTimeoutMillis),
                 )
                 Text(stringResource(R.string.on_failure), fontWeight = FontWeight.SemiBold)
                 Button(
@@ -2909,8 +3016,18 @@ private fun FailurePolicyDialog(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.continue_next_step)) }
                 Text(stringResource(R.string.retry), fontWeight = FontWeight.SemiBold)
-                NodeField(retryAttempts, { retryAttempts = it }, "重试次数（1-10）", true)
-                NodeField(retryDelay, { retryDelay = it }, "重试间隔（毫秒）", true)
+                NodeField(
+                    retryAttempts,
+                    { retryAttempts = it },
+                    stringResource(R.string.retry_attempts),
+                    true,
+                )
+                NodeField(
+                    retryDelay,
+                    { retryDelay = it },
+                    stringResource(R.string.retry_delay_millis),
+                    true,
+                )
                 OutlinedButton(
                     enabled = timeoutValid && attempts != null && attempts in 1..10 && delay != null && delay >= 0,
                     onClick = {
@@ -2932,21 +3049,20 @@ private fun FailurePolicyDialog(
 private fun InputTextDialog(
     observedNodes: List<ObservedNode>,
     initialStep: Step.InputText? = null,
-    confirmLabel: String = "添加",
+    confirmLabel: String,
     onDismiss: () -> Unit,
     onAdd: (NodeSelector, String, String?, TextInputMethod) -> Unit,
 ) {
-    val context = LocalContext.current
-    DisposableEffect(Unit) {
-        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
+    var selectorDraft by remember(initialStep) {
+        mutableStateOf(initialStep?.selector?.toDraft() ?: NodeSelectorDraft())
     }
-    var selectedSelector by remember(initialStep) { mutableStateOf(initialStep?.selector) }
     var inputText by remember(initialStep) { mutableStateOf(initialStep?.text.orEmpty()) }
     var useVariable by remember(initialStep) { mutableStateOf(initialStep?.variableName != null) }
     var variableName by remember(initialStep) { mutableStateOf(initialStep?.variableName.orEmpty()) }
     var inputMethod by remember(initialStep) {
         mutableStateOf(initialStep?.inputMethod ?: TextInputMethod.SetText)
     }
+    val selectedSelector = selectorDraft.toSelectorOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.input_text)) },
@@ -2955,47 +3071,31 @@ private fun InputTextDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                VisualSelectorCapture(
-                    onSelectorSelected = { selector -> selectedSelector = selector },
+                NodeSelectorEditor(
+                    draft = selectorDraft,
+                    onDraftChange = { selectorDraft = it },
+                    recentNodes = observedNodes,
+                    recentTitle = stringResource(R.string.select_recent_text_field),
+                    emptyMessage = stringResource(R.string.input_target_hint),
                 )
-                HorizontalDivider()
-                Text(stringResource(R.string.select_recent_text_field), fontWeight = FontWeight.SemiBold)
-                if (observedNodes.isEmpty()) {
-                    Text(
-                        "打开目标应用并进入输入界面，然后返回此处。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
-                    OutlinedButton(
-                        onClick = { selectedSelector = node.toSelector() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            node.text ?: node.contentDescription ?: node.viewId ?: node.className.orEmpty(),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
-                selectedSelector?.let {
-                    Text(
-                        stringResource(
-                            R.string.selected_element,
-                            it.viewId ?: it.text ?: it.contentDescription ?: it.className.orEmpty(),
-                        ),
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                SelectorMatchModeControls(selectedSelector) { selectedSelector = it }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (useVariable) "使用变量值" else "使用固定文本")
                         Text(
-                            if (useVariable) "在此步骤运行时解析变量值" else "将此文本保存在工作流中",
+                            stringResource(
+                                if (useVariable) R.string.input_use_variable else R.string.input_use_fixed_text,
+                            ),
+                        )
+                        Text(
+                            stringResource(
+                                if (useVariable) {
+                                    R.string.input_variable_description
+                                } else {
+                                    R.string.input_fixed_text_description
+                                },
+                            ),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                         )
@@ -3003,7 +3103,7 @@ private fun InputTextDialog(
                     Switch(checked = useVariable, onCheckedChange = { useVariable = it })
                 }
                 if (useVariable) {
-                    NodeField(variableName, { variableName = it }, "变量名", true)
+                    NodeField(variableName, { variableName = it }, stringResource(R.string.variable_name), true)
                 } else {
                     OutlinedTextField(
                         value = inputText,
@@ -3017,12 +3117,20 @@ private fun InputTextDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (inputMethod == TextInputMethod.Paste) "通过剪贴板粘贴" else "直接设置文本")
+                        Text(
+                            stringResource(
+                                if (inputMethod == TextInputMethod.Paste) {
+                                    R.string.input_method_paste
+                                } else {
+                                    R.string.input_method_set_text
+                                },
+                            ),
+                        )
                         Text(
                             if (inputMethod == TextInputMethod.Paste) {
-                                "临时使用剪贴板，若内容未被再次更改则自动恢复"
+                                stringResource(R.string.input_method_paste_description)
                             } else {
-                                "使用无障碍服务的设置文本操作"
+                                stringResource(R.string.input_method_set_text_description)
                             },
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
@@ -3043,8 +3151,11 @@ private fun InputTextDialog(
                 onClick = {
                     onAdd(
                         requireNotNull(selectedSelector),
-                        if (useVariable) "" else inputText,
-                        variableName.trim().takeIf { useVariable },
+                        inputText,
+                        preserveUnchangedOrTrim(
+                            variableName,
+                            initialStep?.variableName.orEmpty(),
+                        ).takeIf { useVariable },
                         inputMethod,
                     )
                 },
@@ -3112,6 +3223,218 @@ private fun SwipeDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+@Composable
+private fun NodeSelectorEditor(
+    draft: NodeSelectorDraft,
+    onDraftChange: (NodeSelectorDraft) -> Unit,
+    recentNodes: List<ObservedNode>,
+    recentTitle: String,
+    emptyMessage: String,
+) {
+    var selectionError by remember { mutableStateOf<String?>(null) }
+    DisposableEffect(Unit) {
+        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
+    }
+    VisualSelectorCapture(
+        onSelectorSelected = { selector ->
+            selectionError = null
+            onDraftChange(selector.toDraft())
+        },
+        onSelectionError = { selectionError = it },
+    )
+    selectionError?.let { message ->
+        Text(
+            message,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+        )
+    }
+    HorizontalDivider()
+    Text(recentTitle, fontWeight = FontWeight.SemiBold)
+    if (recentNodes.isEmpty()) {
+        Text(emptyMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    recentNodes.observedControlCandidates().forEach { node ->
+        OutlinedButton(
+            onClick = { onDraftChange(node.toSelector().toDraft()) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(node.displayName(), modifier = Modifier.fillMaxWidth()) }
+    }
+    if (draft.hasTargetAttribute) {
+        Text(
+            stringResource(
+                R.string.selected_element,
+                draft.viewId.ifBlank {
+                    draft.text.ifBlank {
+                        draft.contentDescription.ifBlank { draft.className }
+                    }
+                },
+            ),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+    HorizontalDivider()
+    Text(stringResource(R.string.element_attributes), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    NodeField(
+        draft.packageName,
+        { onDraftChange(draft.copy(packageName = it)) },
+        stringResource(R.string.selector_package_optional),
+    )
+    NodeField(
+        draft.viewId,
+        { onDraftChange(draft.copy(viewId = it)) },
+        stringResource(R.string.resource_id),
+    )
+    NodeField(
+        draft.text,
+        { onDraftChange(draft.copy(text = it)) },
+        stringResource(R.string.selector_text),
+    )
+    SelectorToggleRow(
+        label = stringResource(R.string.text_contains),
+        checked = draft.textMatchMode == TextMatchMode.Contains,
+        enabled = draft.text.isNotBlank(),
+        onCheckedChange = { contains ->
+            onDraftChange(
+                draft.copy(
+                    textMatchMode = if (contains) TextMatchMode.Contains else TextMatchMode.Exact,
+                ),
+            )
+        },
+    )
+    NodeField(
+        draft.contentDescription,
+        { onDraftChange(draft.copy(contentDescription = it)) },
+        stringResource(R.string.selector_content_description),
+    )
+    SelectorToggleRow(
+        label = stringResource(R.string.description_contains),
+        checked = draft.contentDescriptionMatchMode == TextMatchMode.Contains,
+        enabled = draft.contentDescription.isNotBlank(),
+        onCheckedChange = { contains ->
+            onDraftChange(
+                draft.copy(
+                    contentDescriptionMatchMode = if (contains) {
+                        TextMatchMode.Contains
+                    } else {
+                        TextMatchMode.Exact
+                    },
+                ),
+            )
+        },
+    )
+    NodeField(
+        draft.className,
+        { onDraftChange(draft.copy(className = it)) },
+        stringResource(R.string.class_name),
+    )
+    MatchIndexControl(draft.matchIndex) { onDraftChange(draft.copy(matchIndex = it)) }
+    SelectorToggleRow(
+        label = stringResource(R.string.limit_to_ancestor),
+        checked = draft.useAncestor,
+        onCheckedChange = { onDraftChange(draft.copy(useAncestor = it)) },
+    )
+    if (draft.useAncestor) {
+        Text(
+            stringResource(R.string.ancestor_attributes),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        NodeField(
+            draft.ancestorViewId,
+            { onDraftChange(draft.copy(ancestorViewId = it)) },
+            stringResource(R.string.ancestor_resource_id),
+        )
+        NodeField(
+            draft.ancestorText,
+            { onDraftChange(draft.copy(ancestorText = it)) },
+            stringResource(R.string.ancestor_text),
+        )
+        SelectorToggleRow(
+            label = stringResource(R.string.text_contains),
+            checked = draft.ancestorTextMatchMode == TextMatchMode.Contains,
+            enabled = draft.ancestorText.isNotBlank(),
+            onCheckedChange = { contains ->
+                onDraftChange(
+                    draft.copy(
+                        ancestorTextMatchMode = if (contains) {
+                            TextMatchMode.Contains
+                        } else {
+                            TextMatchMode.Exact
+                        },
+                    ),
+                )
+            },
+        )
+        NodeField(
+            draft.ancestorContentDescription,
+            { onDraftChange(draft.copy(ancestorContentDescription = it)) },
+            stringResource(R.string.ancestor_content_description),
+        )
+        SelectorToggleRow(
+            label = stringResource(R.string.description_contains),
+            checked = draft.ancestorContentDescriptionMatchMode == TextMatchMode.Contains,
+            enabled = draft.ancestorContentDescription.isNotBlank(),
+            onCheckedChange = { contains ->
+                onDraftChange(
+                    draft.copy(
+                        ancestorContentDescriptionMatchMode = if (contains) {
+                            TextMatchMode.Contains
+                        } else {
+                            TextMatchMode.Exact
+                        },
+                    ),
+                )
+            },
+        )
+        NodeField(
+            draft.ancestorClassName,
+            { onDraftChange(draft.copy(ancestorClassName = it)) },
+            stringResource(R.string.ancestor_class),
+        )
+    }
+    if (!draft.hasTargetAttribute) {
+        Text(
+            stringResource(R.string.selector_attribute_required),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+        )
+    } else if (draft.useAncestor && !draft.hasAncestorAttribute) {
+        Text(
+            stringResource(R.string.ancestor_attribute_required),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+@Composable
+private fun SelectorToggleRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, modifier = Modifier.weight(1f))
+        Switch(checked = checked, enabled = enabled, onCheckedChange = null)
+    }
 }
 
 @Composable
@@ -3422,15 +3745,18 @@ private fun mapCaptureOffset(
 private fun ScrollStepDialog(
     observedNodes: List<ObservedNode>,
     initialStep: Step.Scroll? = null,
-    confirmLabel: String = "添加",
+    confirmLabel: String,
     onDismiss: () -> Unit,
     onAdd: (NodeSelector, ScrollDirection) -> Unit,
 ) {
-    var selectedSelector by remember(initialStep) { mutableStateOf(initialStep?.selector) }
+    var selectorDraft by remember(initialStep) {
+        mutableStateOf(initialStep?.selector?.toDraft() ?: NodeSelectorDraft())
+    }
     var direction by remember(initialStep) {
         mutableStateOf(initialStep?.direction ?: ScrollDirection.Forward)
     }
     val scrollableNodes = observedNodes.filter { it.scrollable }
+    val selectedSelector = selectorDraft.toSelectorOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.scroll_element)) },
@@ -3439,37 +3765,35 @@ private fun ScrollStepDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (scrollableNodes.isEmpty()) {
-                    Text(
-                        "目标界面中未观察到可滚动元素。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                scrollableNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
-                    OutlinedButton(
-                        onClick = { selectedSelector = node.toSelector() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text(node.displayName(), modifier = Modifier.fillMaxWidth()) }
-                }
-                selectedSelector?.let { selector ->
-                    Text(
-                        stringResource(
-                            R.string.selected_element,
-                            selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className.orEmpty(),
-                        ),
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                SelectorMatchModeControls(selectedSelector) { selectedSelector = it }
+                NodeSelectorEditor(
+                    draft = selectorDraft,
+                    onDraftChange = { selectorDraft = it },
+                    recentNodes = scrollableNodes,
+                    recentTitle = stringResource(R.string.select_recent_element),
+                    emptyMessage = stringResource(R.string.no_scrollable_elements),
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (direction == ScrollDirection.Forward) "向后滚动" else "向前滚动")
                         Text(
-                            if (direction == ScrollDirection.Forward) "移向后续内容" else "移向之前的内容",
+                            stringResource(
+                                if (direction == ScrollDirection.Forward) {
+                                    R.string.scroll_backward
+                                } else {
+                                    R.string.scroll_forward
+                                },
+                            ),
+                        )
+                        Text(
+                            stringResource(
+                                if (direction == ScrollDirection.Forward) {
+                                    R.string.scroll_toward_later_content
+                                } else {
+                                    R.string.scroll_toward_earlier_content
+                                },
+                            ),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                         )
@@ -3498,7 +3822,7 @@ private fun NumberDialog(
     title: String,
     label: String,
     initialValue: String,
-    confirmLabel: String = "添加",
+    confirmLabel: String,
     onDismiss: () -> Unit,
     onAdd: (Long) -> Unit,
 ) {
@@ -3522,16 +3846,20 @@ private fun NumberDialog(
 private fun WaitNodeDialog(
     observedNodes: List<ObservedNode>,
     initialStep: Step.WaitForNode? = null,
-    confirmLabel: String = "添加",
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
-    onAdd: (NodeSelector, Long, Boolean) -> Unit,
+    onAdd: (NodeSelector, Long?, Boolean) -> Unit,
 ) {
-    var selectedSelector by remember(initialStep) { mutableStateOf(initialStep?.selector) }
+    var selectorDraft by remember(initialStep) {
+        mutableStateOf(initialStep?.selector?.toDraft() ?: NodeSelectorDraft())
+    }
     var mustExist by remember(initialStep) { mutableStateOf(initialStep?.mustExist ?: true) }
     var timeout by remember(initialStep) {
-        mutableStateOf(initialStep?.timeoutMillis?.toString() ?: "10000")
+        mutableStateOf(initialStep?.timeoutMillis?.toString().orEmpty())
     }
     val timeoutValue = timeout.toLongOrNull()
+    val timeoutValid = timeout.isBlank() || timeoutValue != null && timeoutValue > 0
+    val selectedSelector = selectorDraft.toSelectorOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.wait_for_element)) },
@@ -3540,56 +3868,56 @@ private fun WaitNodeDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(stringResource(R.string.select_recent_element), fontWeight = FontWeight.SemiBold)
-                if (observedNodes.isEmpty()) {
-                    Text(
-                        "打开一次目标应用，然后返回此处。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
-                    OutlinedButton(
-                        onClick = { selectedSelector = node.toSelector() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(node.displayName(), modifier = Modifier.fillMaxWidth())
-                    }
-                }
-                selectedSelector?.let {
-                    Text(
-                        stringResource(
-                            R.string.selected_element,
-                            it.viewId ?: it.text ?: it.contentDescription ?: it.className.orEmpty(),
-                        ),
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                SelectorMatchModeControls(selectedSelector) { selectedSelector = it }
+                NodeSelectorEditor(
+                    draft = selectorDraft,
+                    onDraftChange = { selectorDraft = it },
+                    recentNodes = observedNodes,
+                    recentTitle = stringResource(R.string.select_recent_element),
+                    emptyMessage = stringResource(R.string.open_target_app_then_return),
+                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (mustExist) "等待元素出现" else "等待元素消失")
                         Text(
-                            if (mustExist) "出现匹配项后继续" else "没有匹配项后继续",
+                            stringResource(
+                                if (mustExist) R.string.wait_element_appear else R.string.wait_element_disappear,
+                            ),
+                        )
+                        Text(
+                            stringResource(
+                                if (mustExist) {
+                                    R.string.wait_element_appear_description
+                                } else {
+                                    R.string.wait_element_disappear_description
+                                },
+                            ),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                         )
                     }
                     Switch(checked = mustExist, onCheckedChange = { mustExist = it })
                 }
-                NodeField(timeout, { timeout = it }, "超时时间（毫秒）", true)
+                NodeField(
+                    timeout,
+                    { timeout = it },
+                    stringResource(R.string.wait_timeout_override),
+                )
+                Text(
+                    stringResource(R.string.wait_timeout_inherit_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = selectedSelector != null && timeoutValue != null && timeoutValue > 0,
+                enabled = selectedSelector != null && timeoutValid,
                 onClick = {
-                    onAdd(requireNotNull(selectedSelector), requireNotNull(timeoutValue), mustExist)
+                    onAdd(requireNotNull(selectedSelector), timeoutValue, mustExist)
                 },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
@@ -3599,57 +3927,102 @@ private fun WaitNodeDialog(
 private fun SetVariableDialog(
     initialName: String = "",
     initialValue: Value = Value.Literal(""),
-    confirmLabel: String = "添加",
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
     onAdd: (String, Value) -> Unit,
 ) {
     var variableName by remember(initialName) { mutableStateOf(initialName) }
-    var useTemplate by remember(initialValue) { mutableStateOf(initialValue !is Value.Literal) }
-    var value by remember(initialValue) {
-        mutableStateOf(
-            when (initialValue) {
-                is Value.Literal -> initialValue.value
-                is Value.Template -> initialValue.template
-                is Value.Variable -> "${'$'}{${initialValue.name}}"
-            },
-        )
-    }
+    var valueMode by remember(initialValue) { mutableStateOf(variableValueMode(initialValue)) }
+    var value by remember(initialValue) { mutableStateOf(variableValueText(initialValue)) }
+    val resolvedValue = variableValueOrNull(valueMode, value)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.set_variable)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                NodeField(variableName, { variableName = it }, "变量名", true)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(if (useTemplate) "变量模板" else "固定值")
-                        Text(
-                            if (useTemplate) "使用 ${'$'}{orderId} 之类的占位符" else "保存此固定值",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Switch(checked = useTemplate, onCheckedChange = { useTemplate = it })
-                }
-                NodeField(value, { value = it }, if (useTemplate) "模板" else "值")
+                NodeField(variableName, { variableName = it }, stringResource(R.string.variable_name), true)
+                VariableValueEditor(
+                    title = stringResource(R.string.variable_value_source),
+                    mode = valueMode,
+                    text = value,
+                    onModeChange = { valueMode = it },
+                    onTextChange = { value = it },
+                )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = variableName.isNotBlank(),
+                enabled = variableName.isNotBlank() && resolvedValue != null,
                 onClick = {
-                    onAdd(
-                        variableName.trim(),
-                        if (useTemplate) Value.Template(value) else Value.Literal(value),
-                    )
+                    onAdd(variableName.trim(), requireNotNull(resolvedValue))
                 },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+@Composable
+private fun VariableValueEditor(
+    title: String,
+    mode: VariableValueMode,
+    text: String,
+    onModeChange: (VariableValueMode) -> Unit,
+    onTextChange: (String) -> Unit,
+) {
+    Text(title, fontWeight = FontWeight.SemiBold)
+    VariableValueMode.entries.forEach { option ->
+        if (mode == option) {
+            Button(
+                onClick = { onModeChange(option) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(option.labelRes)) }
+        } else {
+            OutlinedButton(
+                onClick = { onModeChange(option) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(option.labelRes)) }
+        }
+    }
+    NodeField(
+        text,
+        onTextChange,
+        stringResource(mode.fieldLabelRes),
+        mode == VariableValueMode.Variable,
+    )
+    Text(
+        stringResource(mode.hintRes),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+    )
+}
+
+internal enum class VariableValueMode(
+    val labelRes: Int,
+    val fieldLabelRes: Int,
+    val hintRes: Int,
+) {
+    Literal(R.string.variable_value_literal, R.string.value_label, R.string.variable_value_literal_hint),
+    Variable(R.string.variable_value_reference, R.string.source_variable_name, R.string.variable_value_reference_hint),
+    Template(R.string.variable_value_template, R.string.template_label, R.string.variable_value_template_hint),
+}
+
+internal fun variableValueMode(value: Value): VariableValueMode = when (value) {
+    is Value.Literal -> VariableValueMode.Literal
+    is Value.Variable -> VariableValueMode.Variable
+    is Value.Template -> VariableValueMode.Template
+}
+
+internal fun variableValueText(value: Value): String = when (value) {
+    is Value.Literal -> value.value
+    is Value.Variable -> value.name
+    is Value.Template -> value.template
+}
+
+internal fun variableValueOrNull(mode: VariableValueMode, text: String): Value? = when (mode) {
+    VariableValueMode.Literal -> Value.Literal(text)
+    VariableValueMode.Variable -> text.trim().takeIf(String::isNotEmpty)?.let(Value::Variable)
+    VariableValueMode.Template -> Value.Template(text)
 }
 
 @Composable
@@ -3696,12 +4069,16 @@ private fun WrapStepDialog(
 private fun ConditionDialog(
     steps: List<Step>,
     onDismiss: () -> Unit,
-    onAdd: (Int, String, String, ComparisonOperator) -> Unit,
+    onAdd: (Int, Value, Value, ComparisonOperator) -> Unit,
 ) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-    var variableName by remember { mutableStateOf("") }
-    var expectedValue by remember { mutableStateOf("") }
+    var leftMode by remember { mutableStateOf(VariableValueMode.Variable) }
+    var leftText by remember { mutableStateOf("") }
+    var rightMode by remember { mutableStateOf(VariableValueMode.Literal) }
+    var rightText by remember { mutableStateOf("") }
     var operator by remember { mutableStateOf(ComparisonOperator.Equals) }
+    val left = variableValueOrNull(leftMode, leftText)
+    val right = variableValueOrNull(rightMode, rightText)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.if_variable_matches)) },
@@ -3710,9 +4087,22 @@ private fun ConditionDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                NodeField(variableName, { variableName = it }, "变量名", true)
+                VariableValueEditor(
+                    title = stringResource(R.string.comparison_left_value),
+                    mode = leftMode,
+                    text = leftText,
+                    onModeChange = { leftMode = it },
+                    onTextChange = { leftText = it },
+                )
+                Text(stringResource(R.string.comparison_operator), fontWeight = FontWeight.SemiBold)
                 ComparisonOperatorSelector(operator) { operator = it }
-                NodeField(expectedValue, { expectedValue = it }, "预期值")
+                VariableValueEditor(
+                    title = stringResource(R.string.comparison_right_value),
+                    mode = rightMode,
+                    text = rightText,
+                    onModeChange = { rightMode = it },
+                    onTextChange = { rightText = it },
+                )
                 Text(stringResource(R.string.run_step_when_true), fontWeight = FontWeight.SemiBold)
                 steps.forEachIndexed { index, step ->
                     OutlinedButton(
@@ -3724,9 +4114,9 @@ private fun ConditionDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = selectedIndex != null && variableName.isNotBlank(),
+                enabled = selectedIndex != null && left != null && right != null,
                 onClick = {
-                    onAdd(requireNotNull(selectedIndex), variableName.trim(), expectedValue, operator)
+                    onAdd(requireNotNull(selectedIndex), requireNotNull(left), requireNotNull(right), operator)
                 },
             ) { Text(stringResource(R.string.wrap_step)) }
         },
@@ -3808,8 +4198,11 @@ private fun NodeConditionDialog(
     onDismiss: () -> Unit,
     onSave: (Int?, NodeSelector) -> Unit,
 ) {
-    var selectedSelector by remember(initialSelector) { mutableStateOf(initialSelector) }
+    var selectorDraft by remember(initialSelector) {
+        mutableStateOf(initialSelector?.toDraft() ?: NodeSelectorDraft())
+    }
     var selectedStepIndex by remember { mutableStateOf<Int?>(null) }
+    val selectedSelector = selectorDraft.toSelectorOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.if_element_exists)) },
@@ -3818,24 +4211,13 @@ private fun NodeConditionDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(stringResource(R.string.select_element), fontWeight = FontWeight.SemiBold)
-                observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
-                    OutlinedButton(
-                        onClick = { selectedSelector = node.toSelector() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text(node.displayName(), modifier = Modifier.fillMaxWidth()) }
-                }
-                selectedSelector?.let { selector ->
-                    Text(
-                        stringResource(
-                            R.string.selected_element,
-                            selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className.orEmpty(),
-                        ),
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                SelectorMatchModeControls(selectedSelector) { selectedSelector = it }
+                NodeSelectorEditor(
+                    draft = selectorDraft,
+                    onDraftChange = { selectorDraft = it },
+                    recentNodes = observedNodes,
+                    recentTitle = stringResource(R.string.select_element),
+                    emptyMessage = stringResource(R.string.open_target_app_then_return),
+                )
                 steps?.let { availableSteps ->
                     Text(stringResource(R.string.run_step_when_element_exists), fontWeight = FontWeight.SemiBold)
                     availableSteps.forEachIndexed { index, step ->
@@ -3851,7 +4233,9 @@ private fun NodeConditionDialog(
             TextButton(
                 enabled = selectedSelector != null && (steps == null || selectedStepIndex != null),
                 onClick = { onSave(selectedStepIndex, requireNotNull(selectedSelector)) },
-            ) { Text(if (steps == null) "保存" else "包装") }
+            ) {
+                Text(stringResource(if (steps == null) R.string.save else R.string.wrap_step))
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
@@ -3866,9 +4250,12 @@ private fun ReadNodeTextDialog(
     onDismiss: () -> Unit,
     onSave: (NodeSelector, String, NodeAttribute) -> Unit,
 ) {
-    var selectedSelector by remember(initialSelector) { mutableStateOf(initialSelector) }
+    var selectorDraft by remember(initialSelector) {
+        mutableStateOf(initialSelector?.toDraft() ?: NodeSelectorDraft())
+    }
     var variableName by remember(initialVariableName) { mutableStateOf(initialVariableName) }
     var attribute by remember(initialAttribute) { mutableStateOf(initialAttribute) }
+    val selectedSelector = selectorDraft.toSelectorOrNull()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.read_element_attribute)) },
@@ -3877,7 +4264,7 @@ private fun ReadNodeTextDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                NodeField(variableName, { variableName = it }, "保存到变量", true)
+                NodeField(variableName, { variableName = it }, stringResource(R.string.save_to_variable), true)
                 Text(stringResource(R.string.attribute), fontWeight = FontWeight.SemiBold)
                 NodeAttribute.entries.forEach { option ->
                     Row(
@@ -3890,86 +4277,29 @@ private fun ReadNodeTextDialog(
                         Text(option.displayName())
                     }
                 }
-                Text(stringResource(R.string.select_element), fontWeight = FontWeight.SemiBold)
-                observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
-                    OutlinedButton(
-                        onClick = { selectedSelector = node.toSelector() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text(node.displayName(), modifier = Modifier.fillMaxWidth()) }
-                }
-                selectedSelector?.let { selector ->
-                    Text(
-                        stringResource(
-                            R.string.selected_element,
-                            selector.viewId ?: selector.text ?: selector.contentDescription ?: selector.className.orEmpty(),
-                        ),
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                SelectorMatchModeControls(selectedSelector) { selectedSelector = it }
+                NodeSelectorEditor(
+                    draft = selectorDraft,
+                    onDraftChange = { selectorDraft = it },
+                    recentNodes = observedNodes,
+                    recentTitle = stringResource(R.string.select_element),
+                    emptyMessage = stringResource(R.string.open_target_app_then_return),
+                )
             }
         },
         confirmButton = {
             TextButton(
                 enabled = selectedSelector != null && variableName.isNotBlank(),
-                onClick = { onSave(requireNotNull(selectedSelector), variableName.trim(), attribute) },
+                onClick = {
+                    onSave(
+                        requireNotNull(selectedSelector),
+                        preserveUnchangedOrTrim(variableName, initialVariableName),
+                        attribute,
+                    )
+                },
             ) { Text(stringResource(R.string.save)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
-}
-
-@Composable
-private fun SelectorMatchModeControls(
-    selector: NodeSelector?,
-    onChange: (NodeSelector) -> Unit,
-) {
-    selector?.text?.let {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(stringResource(R.string.text_contains), modifier = Modifier.weight(1f))
-            Switch(
-                checked = selector.textMatchMode == TextMatchMode.Contains,
-                onCheckedChange = { contains ->
-                    onChange(
-                        selector.copy(
-                            textMatchMode = if (contains) TextMatchMode.Contains else TextMatchMode.Exact,
-                        ),
-                    )
-                },
-            )
-        }
-    }
-    selector?.contentDescription?.let {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(stringResource(R.string.description_contains), modifier = Modifier.weight(1f))
-            Switch(
-                checked = selector.contentDescriptionMatchMode == TextMatchMode.Contains,
-                onCheckedChange = { contains ->
-                    onChange(
-                        selector.copy(
-                            contentDescriptionMatchMode = if (contains) {
-                                TextMatchMode.Contains
-                            } else {
-                                TextMatchMode.Exact
-                            },
-                        ),
-                    )
-                },
-            )
-        }
-    }
-    selector?.let { current ->
-        MatchIndexControl(current.matchIndex) { matchIndex ->
-            onChange(current.copy(matchIndex = matchIndex))
-        }
-    }
 }
 
 @Composable
@@ -4030,13 +4360,15 @@ private fun newId(): String = UUID.randomUUID().toString()
 @Composable
 private fun LaunchAppDialog(
     initialPackageName: String = "",
+    initialIntentAction: String? = null,
     confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
-    onAdd: (String) -> Unit,
+    onAdd: (String, String?) -> Unit,
 ) {
     val context = LocalContext.current
     val launchableApps = remember { LaunchableAppCatalog(context).load() }
     var packageName by remember(initialPackageName) { mutableStateOf(initialPackageName) }
+    var intentAction by remember(initialIntentAction) { mutableStateOf(initialIntentAction.orEmpty()) }
     var appQuery by remember { mutableStateOf("") }
     val matchingApps = filterLaunchableApps(launchableApps, appQuery)
     AlertDialog(
@@ -4133,12 +4465,23 @@ private fun LaunchAppDialog(
                         fontSize = 13.sp,
                     )
                 }
+                HorizontalDivider()
+                NodeField(
+                    intentAction,
+                    { intentAction = it },
+                    stringResource(R.string.launch_intent_action),
+                )
+                Text(
+                    stringResource(R.string.launch_intent_action_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
             }
         },
         confirmButton = {
             TextButton(
                 enabled = packageName.isNotBlank(),
-                onClick = { onAdd(packageName.trim()) },
+                onClick = { onAdd(packageName.trim(), normalizedOptionalText(intentAction)) },
             ) { Text(stringResource(confirmLabelRes)) }
         },
         dismissButton = {
@@ -4146,6 +4489,11 @@ private fun LaunchAppDialog(
         },
     )
 }
+
+internal fun normalizedOptionalText(value: String): String? = value.trim().ifBlank { null }
+
+internal fun preserveUnchangedOrTrim(value: String, original: String): String =
+    if (value == original) original else value.trim()
 
 @Composable
 private fun ClickStepDialog(
@@ -4231,7 +4579,7 @@ private fun ClickStepDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
-                    observedNodes.take(MAX_VISIBLE_OBSERVED_NODES).forEach { node ->
+                    observedNodes.observedControlCandidates().forEach { node ->
                         OutlinedButton(
                             onClick = {
                                 val service = AutomationAccessibilityService.instance
@@ -4460,7 +4808,7 @@ private fun ClickStepDialog(
 @Composable
 private fun ImageClickStepDialog(
     initialStep: Step.ImageClick? = null,
-    confirmLabel: String = "添加",
+    confirmLabelRes: Int = R.string.add,
     onDismiss: () -> Unit,
     onAdd: (Step.ImageClick) -> Unit,
 ) {
@@ -4477,7 +4825,18 @@ private fun ImageClickStepDialog(
     var cropTop by remember { mutableStateOf("") }
     var cropRight by remember { mutableStateOf("") }
     var cropBottom by remember { mutableStateOf("") }
+    var minimumScorePercent by remember(initialStep) {
+        mutableStateOf(imageMatchPercentText(initialStep?.minimumScorePermille ?: 920))
+    }
+    var ambiguityMarginPercent by remember(initialStep) {
+        mutableStateOf(imageMatchPercentText(initialStep?.ambiguityMarginPermille ?: 25))
+    }
+    var scaleTolerancePermille by remember(initialStep) {
+        mutableStateOf(initialStep?.scaleTolerancePermille ?: 0)
+    }
     var error by remember { mutableStateOf<String?>(null) }
+    val minimumScorePermille = imageMatchPercentToPermille(minimumScorePercent)
+    val ambiguityMarginPermille = imageMatchPercentToPermille(ambiguityMarginPercent)
 
     LaunchedEffect(captureState) {
         val state = captureState as? ScreenCaptureState.Ready ?: return@LaunchedEffect
@@ -4505,6 +4864,63 @@ private fun ImageClickStepDialog(
                     fontSize = 12.sp,
                 )
                 NodeField(packageName, { packageName = it }, stringResource(R.string.image_click_package), true)
+                HorizontalDivider()
+                Text(stringResource(R.string.image_click_matching_settings), fontWeight = FontWeight.SemiBold)
+                NodeField(
+                    minimumScorePercent,
+                    { minimumScorePercent = it },
+                    stringResource(R.string.image_click_minimum_similarity),
+                    true,
+                )
+                Text(
+                    stringResource(R.string.image_click_minimum_similarity_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                NodeField(
+                    ambiguityMarginPercent,
+                    { ambiguityMarginPercent = it },
+                    stringResource(R.string.image_click_uniqueness_margin),
+                    true,
+                )
+                Text(
+                    stringResource(R.string.image_click_uniqueness_margin_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                Text(stringResource(R.string.image_click_scale_tolerance), fontWeight = FontWeight.SemiBold)
+                listOf(
+                    0 to R.string.image_click_scale_exact,
+                    50 to R.string.image_click_scale_five_percent,
+                    100 to R.string.image_click_scale_ten_percent,
+                ).forEach { (value, labelRes) ->
+                    val selected = scaleTolerancePermille == value
+                    if (selected) {
+                        Button(
+                            onClick = { scaleTolerancePermille = value },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(stringResource(labelRes)) }
+                    } else {
+                        OutlinedButton(
+                            onClick = { scaleTolerancePermille = value },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(stringResource(labelRes)) }
+                    }
+                }
+                Text(
+                    stringResource(R.string.image_click_scale_tolerance_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                if (minimumScorePermille == null || ambiguityMarginPermille == null) {
+                    Text(
+                        stringResource(R.string.image_click_percentage_error),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
+                HorizontalDivider()
                 OutlinedButton(
                     onClick = {
                         AutomationAccessibilityService.instance?.capturePreviousApp()
@@ -4623,7 +5039,8 @@ private fun ImageClickStepDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = packageName.isNotBlank() && (initialStep != null ||
+                enabled = packageName.isNotBlank() && minimumScorePermille != null &&
+                    ambiguityMarginPermille != null && (initialStep != null ||
                     captureState is ScreenCaptureState.Ready && cropBoundsOrNull(
                         cropLeft,
                         cropTop,
@@ -4634,7 +5051,16 @@ private fun ImageClickStepDialog(
                     val state = captureState as? ScreenCaptureState.Ready
                     val bounds = cropBoundsOrNull(cropLeft, cropTop, cropRight, cropBottom)
                     if (state == null || bounds == null) {
-                        initialStep?.let { onAdd(it.copy(packageName = packageName.trim())) }
+                        initialStep?.let {
+                            onAdd(
+                                it.copy(
+                                    packageName = packageName.trim(),
+                                    minimumScorePermille = requireNotNull(minimumScorePermille),
+                                    ambiguityMarginPermille = requireNotNull(ambiguityMarginPermille),
+                                    scaleTolerancePermille = scaleTolerancePermille,
+                                ),
+                            )
+                        }
                         return@TextButton
                     }
                     val crop = cropTemplate(state.bitmap, bounds)
@@ -4645,7 +5071,7 @@ private fun ImageClickStepDialog(
                         )
                     } else {
                         val encoded = encodeTemplatePng(crop)
-                        crop.recycle()
+                        if (crop !== state.bitmap) crop.recycle()
                         if (encoded == null) {
                             error = context.getString(R.string.image_click_template_too_large)
                         } else {
@@ -4656,8 +5082,9 @@ private fun ImageClickStepDialog(
                                     templatePngBase64 = encoded.base64,
                                     templateWidth = encoded.width,
                                     templateHeight = encoded.height,
-                                    minimumScorePermille = initialStep?.minimumScorePermille ?: 920,
-                                    ambiguityMarginPermille = initialStep?.ambiguityMarginPermille ?: 25,
+                                    minimumScorePermille = requireNotNull(minimumScorePermille),
+                                    ambiguityMarginPermille = requireNotNull(ambiguityMarginPermille),
+                                    scaleTolerancePermille = scaleTolerancePermille,
                                     timeoutMillis = initialStep?.timeoutMillis,
                                     failurePolicy = initialStep?.failurePolicy ?: FailurePolicy.Stop,
                                 ),
@@ -4665,79 +5092,22 @@ private fun ImageClickStepDialog(
                         }
                     }
                 },
-            ) { Text(confirmLabel) }
+            ) { Text(stringResource(confirmLabelRes)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
-internal data class ImageCropBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
+internal fun imageMatchPercentText(permille: Int): String = "${permille / 10}.${permille % 10}"
 
-internal fun cropBoundsOrNull(left: String, top: String, right: String, bottom: String): ImageCropBounds? {
-    val bounds = ImageCropBounds(
-        left.toIntOrNull() ?: return null,
-        top.toIntOrNull() ?: return null,
-        right.toIntOrNull() ?: return null,
-        bottom.toIntOrNull() ?: return null,
-    )
-    return bounds.takeIf { it.right > it.left && it.bottom > it.top }
+internal fun imageMatchPercentToPermille(value: String): Int? {
+    val match = IMAGE_MATCH_PERCENT_PATTERN.matchEntire(value.trim()) ?: return null
+    val whole = match.groupValues[1].toInt()
+    val decimal = match.groupValues[2].ifEmpty { "0" }.toInt()
+    return (whole * 10 + decimal).takeIf { it in 0..1_000 }
 }
 
-private fun cropTemplate(bitmap: Bitmap, bounds: ImageCropBounds): Bitmap? {
-    val left = bounds.left.coerceIn(0, bitmap.width - 1)
-    val top = bounds.top.coerceIn(0, bitmap.height - 1)
-    val right = bounds.right.coerceIn(left + 1, bitmap.width)
-    val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
-    val width = right - left
-    val height = bottom - top
-    if (width < Step.ImageClick.MIN_TEMPLATE_SIZE || height < Step.ImageClick.MIN_TEMPLATE_SIZE) return null
-    return Bitmap.createBitmap(bitmap, left, top, width, height)
-}
-
-private fun cropTemplate(bitmap: Bitmap, container: IntSize, start: Offset, end: Offset): Bitmap? {
-    val first = mapFitCenterTapToScreen(
-        start.x, start.y, container.width, container.height, bitmap.width, bitmap.height,
-    ) ?: return null
-    val second = mapFitCenterTapToScreen(
-        end.x, end.y, container.width, container.height, bitmap.width, bitmap.height,
-    ) ?: return null
-    val left = minOf(first.x, second.x)
-    val top = minOf(first.y, second.y)
-    val width = abs(first.x - second.x)
-    val height = abs(first.y - second.y)
-    if (width < Step.ImageClick.MIN_TEMPLATE_SIZE || height < Step.ImageClick.MIN_TEMPLATE_SIZE) return null
-    return Bitmap.createBitmap(bitmap, left, top, width, height)
-}
-
-private fun encodeTemplatePng(source: Bitmap): EncodedTemplate? {
-    val scale = minOf(
-        1f,
-        Step.ImageClick.MAX_TEMPLATE_SIZE.toFloat() / maxOf(source.width, source.height),
-    )
-    val width = (source.width * scale).toInt().coerceAtLeast(Step.ImageClick.MIN_TEMPLATE_SIZE)
-    val height = (source.height * scale).toInt().coerceAtLeast(Step.ImageClick.MIN_TEMPLATE_SIZE)
-    val scaled = if (width == source.width && height == source.height) {
-        source
-    } else {
-        Bitmap.createScaledBitmap(source, width, height, true)
-    }
-    return try {
-        val output = ByteArrayOutputStream()
-        if (!scaled.compress(Bitmap.CompressFormat.PNG, 100, output)) return null
-        val bytes = output.toByteArray()
-        if (bytes.size > IMAGE_TEMPLATE_MAX_PNG_BYTES) null else EncodedTemplate(
-            Base64.getEncoder().encodeToString(bytes),
-            width,
-            height,
-        )
-    } finally {
-        if (scaled !== source) scaled.recycle()
-    }
-}
-
-private data class EncodedTemplate(val base64: String, val width: Int, val height: Int)
-
-private const val IMAGE_TEMPLATE_MAX_PNG_BYTES = 96 * 1024
+private val IMAGE_MATCH_PERCENT_PATTERN = Regex("(0|[1-9]\\d?|100)(?:\\.(\\d))?")
 
 @Composable
 private fun VisualSelectorCapture(
@@ -4957,15 +5327,24 @@ private fun StepRow(
                 )
             }
             Text(
-                "失败时：${step.failurePolicy.label()}",
+                stringResource(R.string.step_failure_summary, step.failurePolicy.label()),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             Text(
-                step.timeoutMillis?.let { "超时：$it 毫秒" } ?: "超时：使用工作流默认值",
+                step.timeoutMillis?.let {
+                    stringResource(R.string.step_timeout_override_summary, it)
+                } ?: stringResource(R.string.step_timeout_inherit_summary),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
+            (step as? Step.LaunchApp)?.intentAction?.let { action ->
+                Text(
+                    stringResource(R.string.launch_intent_action_summary, action),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
         }
         Column {
             if (onOpenRepeat != null) {
@@ -4982,16 +5361,37 @@ private fun StepRow(
                 }
             }
             Row {
-                TextButton(onClick = onMoveUp, enabled = canMoveUp) { Text(stringResource(R.string.move_up)) }
-                TextButton(onClick = onMoveDown, enabled = canMoveDown) { Text(stringResource(R.string.move_down)) }
+                TextButton(
+                    onClick = onMoveUp,
+                    enabled = canMoveUp,
+                    modifier = Modifier.testTag(stepOperationTag(step.id, "up")),
+                ) { Text(stringResource(R.string.move_up)) }
+                TextButton(
+                    onClick = onMoveDown,
+                    enabled = canMoveDown,
+                    modifier = Modifier.testTag(stepOperationTag(step.id, "down")),
+                ) { Text(stringResource(R.string.move_down)) }
             }
             Row {
-                TextButton(onClick = onEdit, enabled = canEdit) { Text(stringResource(R.string.edit)) }
-                TextButton(onClick = onEditPolicy) { Text(stringResource(R.string.settings_title)) }
+                TextButton(
+                    onClick = onEdit,
+                    enabled = canEdit,
+                    modifier = Modifier.testTag(stepOperationTag(step.id, "edit")),
+                ) { Text(stringResource(R.string.edit)) }
+                TextButton(
+                    onClick = onEditPolicy,
+                    modifier = Modifier.testTag(stepOperationTag(step.id, "settings")),
+                ) { Text(stringResource(R.string.settings_title)) }
             }
             Row {
-                TextButton(onClick = onDuplicate) { Text(stringResource(R.string.duplicate)) }
-                TextButton(onClick = onDelete) { Text(stringResource(R.string.delete)) }
+                TextButton(
+                    onClick = onDuplicate,
+                    modifier = Modifier.testTag(stepOperationTag(step.id, "duplicate")),
+                ) { Text(stringResource(R.string.duplicate)) }
+                TextButton(
+                    onClick = onDelete,
+                    modifier = Modifier.testTag(stepOperationTag(step.id, "delete")),
+                ) { Text(stringResource(R.string.delete)) }
             }
         }
     }
@@ -5010,10 +5410,7 @@ private fun Step.isActionEditable(): Boolean = when (this) {
     is Step.LongClick, is Step.ReadNodeText, is Step.Repeat, is Step.SetVariable, is Step.Swipe,
     is Step.WaitForNode -> true
     is Step.Scroll, is Step.Tap -> true
-    is Step.IfElse -> when (val current = condition) {
-        is Condition.NodeExists -> true
-        is Condition.Equals -> current.left is Value.Variable && current.right is Value.Literal
-    }
+    is Step.IfElse -> true
 }
 
 @Composable
@@ -5170,12 +5567,19 @@ private fun PermissionStatus(
         )
         Column(Modifier.weight(1f)) {
             Text(
-                if (connected) "自动化服务已就绪" else "自动化服务未开启",
+                stringResource(
+                    if (connected) R.string.automation_service_ready else R.string.automation_service_disabled,
+                ),
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                if (connected) "可以查找元素并执行操作"
-                else "请先启用服务，再测试或运行工作流",
+                stringResource(
+                    if (connected) {
+                        R.string.automation_service_ready_description
+                    } else {
+                        R.string.automation_service_disabled_description
+                    },
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
@@ -5224,7 +5628,11 @@ private fun WorkflowRow(
         Column(Modifier.weight(1f)) {
             Text(workflow.name, fontWeight = FontWeight.SemiBold)
             Text(
-                "${workflow.effectiveState().displayName()} · ${workflow.steps.size} 个步骤",
+                stringResource(
+                    R.string.workflow_row_summary,
+                    workflow.effectiveState().displayName(),
+                    workflow.steps.size,
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
             )
@@ -5251,7 +5659,7 @@ private fun WorkflowRow(
                     onClick = if (isRunning) onStop else onRun,
                     enabled = isRunning || isReady,
                 ) {
-                    Text(if (isRunning) "停止" else "运行")
+                    Text(stringResource(if (isRunning) R.string.stop else R.string.run_action))
                 }
             }
             Row {
@@ -5279,12 +5687,16 @@ private fun WorkflowRow(
                 onClick = if (schedule == null) onSchedule else onCancelSchedule,
                 enabled = !isRunning && (schedule != null || isReady),
                 modifier = Modifier.align(Alignment.End),
-            ) { Text(if (schedule == null) "计划" else "取消计划") }
+            ) {
+                Text(stringResource(if (schedule == null) R.string.schedule else R.string.cancel_schedule))
+            }
         }
     }
 }
 
 internal const val FOLDER_MANAGE_TAG = "folder-manage"
+internal const val WORKFLOW_EDITOR_ALL_ACTIONS_TAG = "workflow-editor-all-actions"
+internal const val WORKFLOW_NAME_INPUT_TAG = "workflow-name-input"
 internal const val SETTINGS_PACK_INSTALL_TAG = "settings-pack-install"
 internal const val FOLDER_CREATE_TAG = "folder-create"
 internal const val FOLDER_NAME_INPUT_TAG = "folder-name-input"
@@ -5298,6 +5710,7 @@ internal fun folderRenameTag(folderId: String) = "folder-rename-$folderId"
 internal fun folderDeleteTag(folderId: String) = "folder-delete-$folderId"
 internal fun folderMoveWorkflowTag(workflowId: String) = "folder-move-workflow-$workflowId"
 internal fun folderDestinationTag(folderId: String) = "folder-destination-$folderId"
+internal fun stepOperationTag(stepId: String, operation: String) = "step-$stepId-$operation"
 
 @Composable
 private fun ScheduleRecurrence.localizedLabel(): String = stringResource(
@@ -5534,7 +5947,7 @@ private fun Workflow.exportFileName(): String {
 }
 
 @Composable
-private fun PreflightReportDialog(
+internal fun PreflightReportDialog(
     workflow: Workflow,
     report: WorkflowPreflightReport,
     onDismiss: () -> Unit,
@@ -6391,7 +6804,7 @@ private fun AppearanceMode.localizedName(): String = stringResource(
 )
 
 @Composable
-private fun AiIndexFingerTheme(
+internal fun AiIndexFingerTheme(
     appearanceMode: AppearanceMode,
     content: @Composable () -> Unit,
 ) {
@@ -6426,4 +6839,17 @@ internal fun AppearanceMode.usesDarkTheme(systemInDarkTheme: Boolean): Boolean =
     AppearanceMode.Dark -> true
 }
 
-private const val MAX_VISIBLE_OBSERVED_NODES = 8
+internal fun List<ObservedNode>.observedControlCandidates(
+    limit: Int = MAX_VISIBLE_OBSERVED_NODES,
+): List<ObservedNode> = withIndex()
+    .sortedWith(
+        compareByDescending<IndexedValue<ObservedNode>> {
+            it.value.clickable || it.value.longClickable || it.value.scrollable
+        }.thenByDescending {
+            it.value.viewId != null || it.value.text != null || it.value.contentDescription != null
+        }.thenBy { it.index },
+    )
+    .take(limit)
+    .map { it.value }
+
+private const val MAX_VISIBLE_OBSERVED_NODES = 100

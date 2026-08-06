@@ -17,6 +17,7 @@ import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.effectiveState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkflowTransferCodecTest {
@@ -30,6 +31,14 @@ class WorkflowTransferCodecTest {
 
         assertEquals(workflow, WorkflowTransferCodec.decode(WorkflowTransferCodec.encode(workflow)))
         assertEquals(listOf(workflow), WorkflowTransferCodec.decodeMany(WorkflowTransferCodec.encode(workflow)))
+    }
+
+    @Test
+    fun currentSchemaVersionIsExplicitInSingleAndBundleExports() {
+        val workflow = Workflow(id = "schema", name = "Schema", steps = emptyList())
+
+        assertTrue(WorkflowTransferCodec.encode(workflow).contains("\"schemaVersion\": 18"))
+        assertTrue(WorkflowTransferCodec.encodeBundle(listOf(workflow)).contains("\"schemaVersion\": 18"))
     }
 
     @Test

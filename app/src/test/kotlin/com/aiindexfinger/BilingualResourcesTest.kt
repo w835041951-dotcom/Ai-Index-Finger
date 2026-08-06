@@ -11,6 +11,24 @@ import org.w3c.dom.Element
 
 class BilingualResourcesTest {
     @Test
+    fun `manifest advertises exactly the supported product locales`() {
+        val androidNamespace = "http://schemas.android.com/apk/res/android"
+        val manifest = document(File("src/main/AndroidManifest.xml"))
+        val application = manifest.getElementsByTagName("application").item(0) as Element
+
+        assertEquals("@xml/locales_config", application.getAttributeNS(androidNamespace, "localeConfig"))
+
+        val localeConfig = document(File("src/main/res/xml/locales_config.xml"))
+        val locales = localeConfig.getElementsByTagName("locale")
+        val names = buildSet {
+            repeat(locales.length) { index ->
+                add((locales.item(index) as Element).getAttributeNS(androidNamespace, "name"))
+            }
+        }
+        assertEquals(setOf("en", "zh-CN"), names)
+    }
+
+    @Test
     fun `english and simplified chinese string keys match`() {
         val defaultStrings = strings(File("src/main/res/values/strings.xml"))
         val chineseStrings = strings(File("src/main/res/values-zh-rCN/strings.xml"))
@@ -93,7 +111,7 @@ class BilingualResourcesTest {
     }
 
     private fun strings(file: File): Map<String, String> {
-        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
+        val document = document(file)
         val strings = document.getElementsByTagName("string")
         return buildMap {
             repeat(strings.length) { index ->
@@ -102,6 +120,10 @@ class BilingualResourcesTest {
             }
         }
     }
+
+    private fun document(file: File) = DocumentBuilderFactory.newInstance().apply {
+        isNamespaceAware = true
+    }.newDocumentBuilder().parse(file)
 
     private fun placeholders(value: String): List<String> =
         Regex("%(?:\\d+\\$)?[a-zA-Z]").findAll(value).map { it.value }.toList()

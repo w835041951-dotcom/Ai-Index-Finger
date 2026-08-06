@@ -166,6 +166,44 @@ class RecordingTargetResolverTest {
     }
 
     @Test
+    fun selectorDuplicatedInAnotherWindowIsNotClaimedUnique() {
+        val resolver = RecordingTargetResolver(maxSnapshots = 4)
+        val source = node(viewId = "com.example:id/action")
+        resolver.update(snapshot(900, listOf(RecordingHierarchyNode(source, null)), windowId = 7))
+        resolver.update(
+            snapshot(
+                910,
+                listOf(RecordingHierarchyNode(source.copy(bounds = "100 0 200 100"), null)),
+                windowId = 8,
+            ),
+        )
+
+        val resolved = resolver.resolve(source, "com.example", 7, 1_000)!!
+
+        assertNull(resolved.selector)
+        assertEquals(RecordedClickFallbackCause.SelectorNotUnique, resolved.fallbackCause)
+    }
+
+    @Test
+    fun incompleteOtherWindowPreventsGlobalUniquenessClaim() {
+        val resolver = RecordingTargetResolver(maxSnapshots = 4)
+        val source = node(viewId = "com.example:id/action")
+        resolver.update(snapshot(900, listOf(RecordingHierarchyNode(source, null)), windowId = 7))
+        resolver.update(
+            snapshot(
+                910,
+                listOf(RecordingHierarchyNode(node(viewId = "com.example:id/other"), null)),
+                windowId = 8,
+            ).copy(complete = false),
+        )
+
+        val resolved = resolver.resolve(source, "com.example", 7, 1_000)!!
+
+        assertNull(resolved.selector)
+        assertEquals(RecordedClickFallbackCause.HierarchyIncomplete, resolved.fallbackCause)
+    }
+
+    @Test
     fun expiredOrWrongWindowSnapshotIsIgnored() {
         val resolver = RecordingTargetResolver(snapshotTtlMillis = 100)
         val source = node(viewId = "com.example:id/action")
@@ -190,9 +228,10 @@ class RecordingTargetResolverTest {
     private fun snapshot(
         eventTimeMillis: Long,
         nodes: List<RecordingHierarchyNode>,
+        windowId: Int = 7,
     ) = RecordingHierarchySnapshot(
         packageName = "com.example",
-        windowId = 7,
+        windowId = windowId,
         eventTimeMillis = eventTimeMillis,
         nodes = nodes,
     )

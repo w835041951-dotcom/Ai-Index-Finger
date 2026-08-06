@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">从新建工作流到运行的六个阶段</title>
+  <desc id="desc">首页、新建、添加步骤、保存草稿、检查测试、设为就绪并运行。</desc>
+  <rect width="1200" height="520" fill="#f4f1ea"/>
+  <text x="70" y="74" font-family="Segoe UI, sans-serif" font-size="34" font-weight="700" fill="#17252a">从想法到可靠运行</text>
+  <text x="70" y="110" font-family="Segoe UI, sans-serif" font-size="18" fill="#4b5b5f">Create → Build → Validate → Run</text>
+  <g font-family="Segoe UI, sans-serif">
+    <g transform="translate(70 160)"><rect width="150" height="190" rx="8" fill="#ffffff" stroke="#1f6f78" stroke-width="3"/><circle cx="75" cy="52" r="25" fill="#1f6f78"/><text x="75" y="60" text-anchor="middle" font-size="24" fill="#fff">1</text><text x="75" y="108" text-anchor="middle" font-size="21" font-weight="700" fill="#17252a">首页</text><text x="75" y="140" text-anchor="middle" font-size="15" fill="#4b5b5f">我的工作流</text><text x="75" y="164" text-anchor="middle" font-size="14" fill="#1f6f78">Home</text></g>
+    <path d="M225 255h38" stroke="#d15b3f" stroke-width="5"/><path d="m263 245 16 10-16 10" fill="#d15b3f"/>
+    <g transform="translate(285 160)"><rect width="150" height="190" rx="8" fill="#ffffff" stroke="#d15b3f" stroke-width="3"/><circle cx="75" cy="52" r="25" fill="#d15b3f"/><text x="75" y="60" text-anchor="middle" font-size="24" fill="#fff">2</text><text x="75" y="108" text-anchor="middle" font-size="21" font-weight="700" fill="#17252a">新建</text><text x="75" y="140" text-anchor="middle" font-size="15" fill="#4b5b5f">空白 / 示例</text><text x="75" y="164" text-anchor="middle" font-size="14" fill="#d15b3f">New workflow</text></g>
+    <path d="M440 255h38" stroke="#d15b3f" stroke-width="5"/><path d="m478 245 16 10-16 10" fill="#d15b3f"/>
+    <g transform="translate(500 160)"><rect width="150" height="190" rx="8" fill="#ffffff" stroke="#db9b2b" stroke-width="3"/><circle cx="75" cy="52" r="25" fill="#db9b2b"/><text x="75" y="60" text-anchor="middle" font-size="24" fill="#17252a">3</text><text x="75" y="108" text-anchor="middle" font-size="21" font-weight="700" fill="#17252a">添加步骤</text><text x="75" y="140" text-anchor="middle" font-size="15" fill="#4b5b5f">操作 + 逻辑</text><text x="75" y="164" text-anchor="middle" font-size="14" fill="#8c5b08">Add steps</text></g>
+    <path d="M655 255h38" stroke="#d15b3f" stroke-width="5"/><path d="m693 245 16 10-16 10" fill="#d15b3f"/>
+    <g transform="translate(715 160)"><rect width="150" height="190" rx="8" fill="#ffffff" stroke="#657b83" stroke-width="3"/><circle cx="75" cy="52" r="25" fill="#657b83"/><text x="75" y="60" text-anchor="middle" font-size="24" fill="#fff">4</text><text x="75" y="108" text-anchor="middle" font-size="21" font-weight="700" fill="#17252a">保存草稿</text><text x="75" y="140" text-anchor="middle" font-size="15" fill="#4b5b5f">允许未完成</text><text x="75" y="164" text-anchor="middle" font-size="14" fill="#657b83">Save draft</text></g>
+    <path d="M870 255h38" stroke="#d15b3f" stroke-width="5"/><path d="m908 245 16 10-16 10" fill="#d15b3f"/>
+    <g transform="translate(930 160)"><rect width="200" height="190" rx="8" fill="#17252a"/><circle cx="100" cy="52" r="25" fill="#e8c766"/><text x="100" y="60" text-anchor="middle" font-size="24" fill="#17252a">5</text><text x="100" y="108" text-anchor="middle" font-size="21" font-weight="700" fill="#fff">检查 → 就绪</text><text x="100" y="140" text-anchor="middle" font-size="15" fill="#d7e4e6">测试后运行</text><text x="100" y="164" text-anchor="middle" font-size="14" fill="#e8c766">Check → Ready → Run</text></g>
+  </g>
+  <rect x="70" y="405" width="1060" height="54" rx="6" fill="#e5ded0"/>
+  <text x="600" y="439" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="18" fill="#17252a">草稿保存进度；就绪表示结构和配置已通过校验；运行仍需用户主动触发</text>
+</svg>
