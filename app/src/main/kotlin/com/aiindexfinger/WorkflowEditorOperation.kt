@@ -24,3 +24,14 @@ internal enum class WorkflowEditorOperation {
 
 internal val ALL_WORKFLOW_EDITOR_OPERATIONS: Set<WorkflowEditorOperation> =
     WorkflowEditorOperation.entries.toSet()
+
+internal fun WorkflowEditorOperation.isAvailable(
+    hasSteps: Boolean,
+    serviceConnected: Boolean,
+): Boolean = when (this) {
+    WorkflowEditorOperation.RecordedClick -> serviceConnected
+    WorkflowEditorOperation.Repeat,
+    WorkflowEditorOperation.VariableCondition,
+    WorkflowEditorOperation.NodeCondition -> hasSteps
+    else -> true
+}

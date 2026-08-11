@@ -4,6 +4,7 @@ import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
+import com.aiindexfinger.scheduler.ScheduleNotificationReadiness
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -28,7 +29,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.Denied,
+            notificationStatus = ScheduleNotificationReadiness.RuntimePermissionRequired,
             isLaunchable = { packageName, _ -> packageName == "com.example" },
             countMatches = { 2 },
         )
@@ -37,7 +38,7 @@ class WorkflowPreflightTest {
         assertTrue(report.validationIssues.isEmpty())
         assertEquals(2, report.validation.definedStepCount)
         assertTrue(report.validation.definedVariables.isEmpty())
-        assertEquals(NotificationPreflightStatus.Denied, report.notificationStatus)
+        assertEquals(ScheduleNotificationReadiness.RuntimePermissionRequired, report.notificationStatus)
         assertTrue(report.launchTargets.single().isLaunchable)
         assertEquals(2, report.selectors.single().matchCount)
         assertEquals(true, report.selectors.single().requiredMatchAvailable)
@@ -56,7 +57,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = false,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> false },
             countMatches = {
                 probeCount += 1
@@ -84,7 +85,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> true },
             countMatches = { probeCount++; 1 },
         )
@@ -109,7 +110,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> true },
             countMatches = { probeCount++; 1 },
         )
@@ -140,7 +141,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> true },
             countMatches = { probeCount++; 1 },
         )
@@ -164,7 +165,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.Granted,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> false },
             countMatches = { 1 },
         )
@@ -174,7 +175,7 @@ class WorkflowPreflightTest {
     }
 
     @Test
-    fun recoveryActionsOnlyIncludeRequiredAutomationSetup() {
+    fun recoveryActionsIncludeEachRequiredSystemSetup() {
         val workflow = Workflow(
             id = "ready",
             name = "Ready",
@@ -185,20 +186,23 @@ class WorkflowPreflightTest {
         val blocked = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = false,
-            notificationStatus = NotificationPreflightStatus.Denied,
+            notificationStatus = ScheduleNotificationReadiness.ChannelDisabled,
             isLaunchable = { _, _ -> true },
             countMatches = { 0 },
         )
         val available = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> true },
             countMatches = { 1 },
         )
 
         assertEquals(
-            listOf(PreflightRecoveryAction.SetUpAutomation),
+            listOf(
+                PreflightRecoveryAction.SetUpAutomation,
+                PreflightRecoveryAction.OpenNotificationSettings,
+            ),
             blocked.recoveryActions(),
         )
         assertTrue(available.recoveryActions().isEmpty())
@@ -216,7 +220,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { _, _ -> true },
             countMatches = { 0 },
             imageCaptureSupported = false,
@@ -239,7 +243,7 @@ class WorkflowPreflightTest {
         val report = buildWorkflowPreflightReport(
             workflow = workflow,
             accessibilityConnected = true,
-            notificationStatus = NotificationPreflightStatus.NotRequired,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
             isLaunchable = { packageName, intentAction ->
                 packageName == "com.example" && intentAction == null
             },

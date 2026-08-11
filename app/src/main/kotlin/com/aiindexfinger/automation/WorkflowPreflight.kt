@@ -11,19 +11,18 @@ import com.aiindexfinger.model.WorkflowValidator
 import com.aiindexfinger.model.effectiveState
 import com.aiindexfinger.model.launchTargets
 import com.aiindexfinger.model.selectorUses
-
-enum class NotificationPreflightStatus {
-    Granted,
-    Denied,
-    NotRequired,
-}
+import com.aiindexfinger.scheduler.ScheduleNotificationReadiness
 
 enum class PreflightRecoveryAction {
     SetUpAutomation,
+    OpenNotificationSettings,
 }
 
 fun WorkflowPreflightReport.recoveryActions(): List<PreflightRecoveryAction> = buildList {
     if (!accessibilityConnected) add(PreflightRecoveryAction.SetUpAutomation)
+    if (notificationStatus != ScheduleNotificationReadiness.Ready) {
+        add(PreflightRecoveryAction.OpenNotificationSettings)
+    }
 }
 
 data class LaunchTargetCheck(
@@ -44,7 +43,7 @@ data class WorkflowPreflightReport(
     val state: WorkflowState,
     val validation: WorkflowValidationSummary,
     val accessibilityConnected: Boolean,
-    val notificationStatus: NotificationPreflightStatus,
+    val notificationStatus: ScheduleNotificationReadiness,
     val launchTargets: List<LaunchTargetCheck>,
     val selectors: List<SelectorPreflightCheck>,
     val requiresImageCapture: Boolean,
@@ -57,7 +56,7 @@ data class WorkflowPreflightReport(
 fun buildWorkflowPreflightReport(
     workflow: Workflow,
     accessibilityConnected: Boolean,
-    notificationStatus: NotificationPreflightStatus,
+    notificationStatus: ScheduleNotificationReadiness,
     isLaunchable: (String, String?) -> Boolean,
     countMatches: (com.aiindexfinger.model.NodeSelector) -> Int,
     imageCaptureSupported: Boolean = true,

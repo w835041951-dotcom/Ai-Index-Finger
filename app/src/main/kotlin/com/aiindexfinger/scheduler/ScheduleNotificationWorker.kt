@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.net.Uri
+import android.provider.Settings
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import androidx.work.Worker
@@ -27,25 +28,8 @@ class ScheduleNotificationWorker(
         val workflowName = inputData.getString(KEY_WORKFLOW_NAME)
             ?: applicationContext.getString(R.string.scheduled_workflow_fallback_name)
 
-        val notificationManager = applicationContext.getSystemService(NotificationManager::class.java)
-        notificationManager.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                applicationContext.getString(R.string.schedule_notification_channel),
-                NotificationManager.IMPORTANCE_HIGH,
-            ),
-        )
-        val runtimePermissionGranted = Build.VERSION.SDK_INT < 33 ||
-            applicationContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-        val channelImportance = notificationManager.getNotificationChannel(CHANNEL_ID)?.importance
-            ?: NotificationManager.IMPORTANCE_NONE
-        if (!canPostScheduleNotification(
-                runtimePermissionGranted,
-                notificationManager.areNotificationsEnabled(),
-                channelImportance,
-            )
-        ) {
+        val notificationManager = ensureScheduleNotificationChannel(applicationContext)
+        if (scheduleNotificationReadiness(applicationContext) != ScheduleNotificationReadiness.Ready) {
             try {
                 WorkflowScheduler(applicationContext).missOccurrence(workflowId, scheduledAtMillis)
             } catch (_: ScheduleStorageException) {
@@ -88,8 +72,73 @@ class ScheduleNotificationWorker(
         const val KEY_WORKFLOW_NAME = "workflow_name"
         const val KEY_SCHEDULED_AT_MILLIS = "scheduled_at_millis"
         const val EXTRA_WORKFLOW_ID = "scheduled_workflow_id"
-        private const val CHANNEL_ID = "workflow_schedules"
+        internal const val CHANNEL_ID = "workflow_schedules"
         private const val SCHEDULE_NOTIFICATION_ID = 1
+    }
+}
+
+internal fun ensureScheduleNotificationChannel(context: Context): NotificationManager =
+    context.getSystemService(NotificationManager::class.java).also { notificationManager ->
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                ScheduleNotificationWorker.CHANNEL_ID,
+                context.getString(R.string.schedule_notification_channel),
+                NotificationManager.IMPORTANCE_HIGH,
+            ),
+        )
+    }
+
+internal fun scheduleNotificationReadiness(context: Context): ScheduleNotificationReadiness {
+    val notificationManager = ensureScheduleNotificationChannel(context)
+    val runtimePermissionGranted = Build.VERSION.SDK_INT < 33 ||
+        context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    val channelImportance = notificationManager
+        .getNotificationChannel(ScheduleNotificationWorker.CHANNEL_ID)
+        ?.importance
+        ?: NotificationManager.IMPORTANCE_NONE
+    return scheduleNotificationReadiness(
+        runtimePermissionGranted,
+        notificationManager.areNotificationsEnabled(),
+        channelImportance,
+    )
+}
+
+internal fun scheduleNotificationSettingsIntent(
+    context: Context,
+    readiness: ScheduleNotificationReadiness,
+): Intent = if (readiness == ScheduleNotificationReadiness.ChannelDisabled) {
+    Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        putExtra(Settings.EXTRA_CHANNEL_ID, ScheduleNotificationWorker.CHANNEL_ID)
+    }
+} else {
+    appNotificationSettingsIntent(context)
+}
+
+internal fun appNotificationSettingsIntent(context: Context): Intent =
+    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+    }
+
+internal fun openScheduleNotificationSettings(
+    context: Context,
+    readiness: ScheduleNotificationReadiness,
+): Boolean {
+    val applicationDetails = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.parse("package:${context.packageName}"),
+    )
+    val intents = listOf(
+        scheduleNotificationSettingsIntent(context, readiness),
+        appNotificationSettingsIntent(context),
+        applicationDetails,
+    ).distinctBy { intent ->
+        listOf(intent.action, intent.dataString, intent.getStringExtra(Settings.EXTRA_CHANNEL_ID))
+    }
+    return intents.any { intent ->
+        if (intent.resolveActivity(context.packageManager) == null) return@any false
+        if (context !is android.app.Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(intent) }.isSuccess
     }
 }
 
@@ -101,9 +150,46 @@ internal fun canPostScheduleNotification(
     runtimePermissionGranted: Boolean,
     appNotificationsEnabled: Boolean,
     channelImportance: Int,
-): Boolean = runtimePermissionGranted &&
-    appNotificationsEnabled &&
-    channelImportance != NotificationManager.IMPORTANCE_NONE
+): Boolean = scheduleNotificationReadiness(
+    runtimePermissionGranted,
+    appNotificationsEnabled,
+    channelImportance,
+) == ScheduleNotificationReadiness.Ready
+
+enum class ScheduleNotificationReadiness {
+    Ready,
+    RuntimePermissionRequired,
+    AppNotificationsDisabled,
+    ChannelDisabled,
+}
+
+internal enum class ScheduleNotificationAction {
+    Schedule,
+    RequestPermission,
+    OpenSettings,
+}
+
+internal fun scheduleNotificationAction(
+    readiness: ScheduleNotificationReadiness,
+): ScheduleNotificationAction = when (readiness) {
+    ScheduleNotificationReadiness.Ready -> ScheduleNotificationAction.Schedule
+    ScheduleNotificationReadiness.RuntimePermissionRequired ->
+        ScheduleNotificationAction.RequestPermission
+    ScheduleNotificationReadiness.AppNotificationsDisabled,
+    ScheduleNotificationReadiness.ChannelDisabled -> ScheduleNotificationAction.OpenSettings
+}
+
+internal fun scheduleNotificationReadiness(
+    runtimePermissionGranted: Boolean,
+    appNotificationsEnabled: Boolean,
+    channelImportance: Int,
+): ScheduleNotificationReadiness = when {
+    !runtimePermissionGranted -> ScheduleNotificationReadiness.RuntimePermissionRequired
+    !appNotificationsEnabled -> ScheduleNotificationReadiness.AppNotificationsDisabled
+    channelImportance == NotificationManager.IMPORTANCE_NONE ->
+        ScheduleNotificationReadiness.ChannelDisabled
+    else -> ScheduleNotificationReadiness.Ready
+}
 
 internal fun missedSchedules(
     schedules: List<WorkflowSchedule>,

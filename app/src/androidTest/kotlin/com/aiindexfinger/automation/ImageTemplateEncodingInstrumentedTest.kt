@@ -3,6 +3,7 @@ package com.aiindexfinger.automation
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.aiindexfinger.model.Step
 import java.util.Base64
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -40,6 +41,44 @@ class ImageTemplateEncodingInstrumentedTest {
         assertNull(encodeTemplatePng(source))
         assertFalse(source.isRecycled)
 
+        source.recycle()
+    }
+
+    @Test
+    fun encodedTemplateDecodesWithDeclaredDimensions() {
+        val source = patternedBitmap(32, 24)
+        val encoded = requireNotNull(encodeTemplatePng(source))
+        val step = Step.ImageClick(
+            id = "image",
+            packageName = "com.example",
+            templatePngBase64 = encoded.base64,
+            templateWidth = encoded.width,
+            templateHeight = encoded.height,
+        )
+
+        val decoded = requireNotNull(decodeImageTemplate(step))
+
+        assertEquals(32, decoded.width)
+        assertEquals(24, decoded.height)
+        decoded.recycle()
+        source.recycle()
+    }
+
+    @Test
+    fun invalidOrDimensionMismatchedTemplateDoesNotDecode() {
+        val source = patternedBitmap(32, 24)
+        val encoded = requireNotNull(encodeTemplatePng(source))
+
+        assertNull(
+            decodeImageTemplate(
+                Step.ImageClick("invalid", "com.example", "not-png", 32, 24),
+            ),
+        )
+        assertNull(
+            decodeImageTemplate(
+                Step.ImageClick("mismatch", "com.example", encoded.base64, 31, 24),
+            ),
+        )
         source.recycle()
     }
 

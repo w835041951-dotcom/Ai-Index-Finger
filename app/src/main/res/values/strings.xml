@@ -47,6 +47,9 @@
     <string name="crop_right">Right</string>
     <string name="crop_bottom">Bottom</string>
     <string name="image_click_saved_template">Saved %1$d×%2$d template. Save it as-is or capture again.</string>
+    <string name="image_click_saved_template_title">Saved recognition template</string>
+    <string name="image_click_saved_template_description">Preview of the saved image-click recognition template</string>
+    <string name="image_click_saved_template_invalid">The saved template cannot be previewed. Capture a replacement or cancel without saving.</string>
     <string name="image_click_crop_too_small">The selection must be at least %1$d×%1$d pixels.</string>
     <string name="image_click_template_too_large">The template is too large. Select a smaller or simpler area.</string>
     <string name="image_click_step_title">Click by screenshot %1$d×%2$d</string>
@@ -68,6 +71,9 @@
     <string name="live_action_overlay">Add action over app</string>
     <string name="live_action_quick_add">Pick coordinate or image over app</string>
     <string name="floating_editor_open">Open floating workflow editor</string>
+    <string name="floating_editor_collapse">Hide editor</string>
+    <string name="floating_editor_restore">Show editor</string>
+    <string name="floating_editor_restore_description">Restore the hidden floating workflow editor</string>
     <string name="floating_editor_title">Floating workflow editor</string>
     <string name="floating_editor_description">Choose an existing workflow or create a new draft. All workflow operations are available without running them.</string>
     <string name="floating_editor_workflow_summary">%1$s · %2$d steps</string>
@@ -309,9 +315,10 @@
     <string name="system_action_recents">Recents</string>
     <string name="workflow_state_draft">Draft</string>
     <string name="workflow_state_ready">Ready</string>
-    <string name="notification_status_granted">Granted</string>
-    <string name="notification_status_denied">Not granted</string>
-    <string name="notification_status_not_required">Not required</string>
+    <string name="notification_status_ready">Ready</string>
+    <string name="notification_status_permission_required">Permission required</string>
+    <string name="notification_status_app_disabled">App notifications disabled</string>
+    <string name="notification_status_channel_disabled">Workflow schedule notifications disabled</string>
     <string name="selector_role_click">Click</string>
     <string name="selector_role_recorded_click">Recorded click</string>
     <string name="selector_role_long_click">Long click</string>
@@ -644,6 +651,9 @@
     <string name="schedule_failed">Could not schedule workflow</string>
     <string name="cannot_schedule">Cannot schedule: %1$s</string>
     <string name="schedule_requires_notifications">Scheduled reminders require notification permission</string>
+    <string name="schedule_notifications_blocked_title">Enable schedule notifications</string>
+    <string name="schedule_notifications_blocked">This reminder was not scheduled because Android is blocking app or workflow schedule notifications.</string>
+    <string name="open_notification_settings">Open notification settings</string>
     <string name="workflow_exported">Exported %1$s</string>
     <string name="export_failed">Export failed: %1$s</string>
     <string name="workflows_backed_up">Backed up %1$d workflows</string>
@@ -700,6 +710,8 @@
     <string name="clock_workflow_open">Open Clock</string>
     <string name="clock_workflow_verify_time">Verify current time display</string>
     <string name="clock_workflow_verify_date">Verify current date display</string>
+    <string name="clock_workflow_set_validation_alarm_time">Set AI_INDEX_FINGER_CLOCK_VALIDATION_V1 to 10:37</string>
+    <string name="clock_workflow_set_validation_alarm_sound">Set AI_INDEX_FINGER_CLOCK_VALIDATION_V1 sound to Silent</string>
     <string name="files_folder_name">Files</string>
     <string name="files_workflow_open">Open Files</string>
     <string name="files_workflow_verify_header">Verify Files header</string>
@@ -788,7 +800,7 @@
     <string name="workflow_test_title">Test %1$s</string>
     <string name="workflow_test_state">State: %1$s</string>
     <string name="workflow_test_automation">Automation service: %1$s</string>
-    <string name="workflow_test_notifications">Notification permission: %1$s</string>
+    <string name="workflow_test_notifications">Schedule notifications: %1$s</string>
     <string name="status_connected">Connected</string>
     <string name="status_not_connected">Not connected</string>
     <string name="set_up_automation">Set up automation service</string>
@@ -820,6 +832,7 @@
     <string name="up_one_level">Up one level</string>
     <string name="add_first_action">Add the first action below</string>
     <string name="add_action">Add action</string>
+    <string name="add_operation">Add operation</string>
     <string name="launch_app">Launch app</string>
     <string name="add">Add</string>
     <string name="search_installed_apps">Search installed apps</string>

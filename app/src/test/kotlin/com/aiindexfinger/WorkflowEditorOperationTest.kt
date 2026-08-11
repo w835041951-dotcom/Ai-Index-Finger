@@ -1,6 +1,8 @@
 package com.aiindexfinger
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkflowEditorOperationTest {
@@ -30,5 +32,17 @@ class WorkflowEditorOperationTest {
             ),
             ALL_WORKFLOW_EDITOR_OPERATIONS,
         )
+    }
+
+    @Test
+    fun chooserPreservesOperationPrerequisites() {
+        assertFalse(WorkflowEditorOperation.RecordedClick.isAvailable(false, false))
+        assertTrue(WorkflowEditorOperation.RecordedClick.isAvailable(false, true))
+        assertTrue(WorkflowEditorOperation.ReadNodeText.isAvailable(false, false))
+        assertFalse(WorkflowEditorOperation.Repeat.isAvailable(false, true))
+        assertFalse(WorkflowEditorOperation.VariableCondition.isAvailable(false, true))
+        assertFalse(WorkflowEditorOperation.NodeCondition.isAvailable(false, true))
+        assertTrue(WorkflowEditorOperation.NodeCondition.isAvailable(true, true))
+        assertTrue(WorkflowEditorOperation.ImageClick.isAvailable(false, false))
     }
 }

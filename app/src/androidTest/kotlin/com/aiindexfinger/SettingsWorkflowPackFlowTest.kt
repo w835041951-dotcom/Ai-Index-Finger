@@ -30,7 +30,7 @@ class SettingsWorkflowPackFlowTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun installActionCreatesFourFoldersWithTwentyTwoRunnableWorkflowsIdempotently() {
+    fun installActionCreatesFourFoldersWithTwentyFiveRunnableWorkflowsIdempotently() {
         var latestLibrary = WorkflowLibrary()
         composeRule.setContent {
             var library by remember { mutableStateOf(latestLibrary) }
@@ -68,7 +68,17 @@ class SettingsWorkflowPackFlowTest {
                                     "Open Languages settings",
                                 ),
                             ),
-                            Triple(ClockWorkflowPack.definition, "Clock", listOf("Open Clock", "Verify time", "Verify date")),
+                            Triple(
+                                ClockWorkflowPack.definition,
+                                "Clock",
+                                listOf(
+                                    "Open Clock",
+                                    "Verify time",
+                                    "Verify date",
+                                    "Set validation alarm time",
+                                    "Set validation alarm sound",
+                                ),
+                            ),
                             Triple(FilesWorkflowPack.definition, "Files", listOf("Open Files", "Verify header", "Verify list")),
                             Triple(
                                 AiIndexFingerSelfTestPack.definition,
@@ -109,6 +119,8 @@ class SettingsWorkflowPackFlowTest {
         composeRule.onNodeWithTag(folderFilterTag(ClockWorkflowPack.FOLDER_ID))
             .performScrollTo().performClick().assertIsSelected()
         composeRule.onNodeWithText("Open Clock").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Set validation alarm time").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Set validation alarm sound").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag(SETTINGS_PACK_INSTALL_TAG).performScrollTo()
         composeRule.onNodeWithTag(folderFilterTag(AiIndexFingerSelfTestPack.FOLDER_ID))
             .performScrollTo().performClick().assertIsSelected()
@@ -117,10 +129,10 @@ class SettingsWorkflowPackFlowTest {
 
         composeRule.onNodeWithTag(SETTINGS_PACK_INSTALL_TAG).performScrollTo().performClick()
         composeRule.runOnIdle {
-            assertEquals(23, latestLibrary.workflows.size)
+            assertEquals(25, latestLibrary.workflows.size)
             assertEquals(listOf(WorkflowState.Ready), latestLibrary.workflows.map { it.state }.distinct())
             assertEquals(4, latestLibrary.folders.size)
-            assertEquals(23, latestLibrary.workflowFolderIds.size)
+            assertEquals(25, latestLibrary.workflowFolderIds.size)
         }
     }
 }

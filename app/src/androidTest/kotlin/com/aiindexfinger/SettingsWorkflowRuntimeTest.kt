@@ -94,7 +94,17 @@ class SettingsWorkflowRuntimeTest {
                     "Open Languages settings",
                 ),
             ),
-            Triple(ClockWorkflowPack.definition, "Clock", listOf("Open Clock", "Verify time", "Verify date")),
+            Triple(
+                ClockWorkflowPack.definition,
+                "Clock",
+                listOf(
+                    "Open Clock",
+                    "Verify time",
+                    "Verify date",
+                    "Set validation alarm time",
+                    "Set validation alarm sound",
+                ),
+            ),
             Triple(FilesWorkflowPack.definition, "Files", listOf("Open Files", "Verify header", "Verify list")),
         ).forEach { (pack, folderName, names) ->
             installed = pack.install(installed, folderName, names).library
@@ -106,7 +116,11 @@ class SettingsWorkflowRuntimeTest {
             installed.folders.map { it.id }.toSet(),
         )
         assertTrue(installed.workflows.all { it.state == WorkflowState.Ready })
-        installed.workflows.forEach { workflow ->
+        val fixtureRequiredWorkflowIds = setOf(
+            ClockWorkflowPack.SET_VALIDATION_ALARM_TIME_WORKFLOW_ID,
+            ClockWorkflowPack.SET_VALIDATION_ALARM_SOUND_WORKFLOW_ID,
+        )
+        installed.workflows.filterNot { it.id in fixtureRequiredWorkflowIds }.forEach { workflow ->
             val launchPackageName = workflow.steps.filterIsInstance<Step.LaunchApp>().single().packageName
             val terminalPackageName = workflow.steps.filterIsInstance<Step.WaitForNode>().last().selector.packageName
             shell("am force-stop $launchPackageName")

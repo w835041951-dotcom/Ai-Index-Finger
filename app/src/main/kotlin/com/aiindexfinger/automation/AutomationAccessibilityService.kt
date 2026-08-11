@@ -16,7 +16,6 @@ import android.content.pm.ServiceInfo
 import android.graphics.Rect
 import android.graphics.Path
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.os.Build
 import android.view.Display
 import android.view.Gravity
@@ -137,6 +136,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var liveImageCaptureJob: Job? = null
     private var liveActionLaunchJob: Job? = null
     private var floatingEditorLaunchJob: Job? = null
+    private var floatingEditorRestoreView: View? = null
     private var liveImageTargetBounds: List<ScreenBounds> = emptyList()
     private var liveActionTargetPackage: String? = null
     private var liveActionStatusMessage: String? = null
@@ -175,6 +175,9 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             resetVolatileSharedStateAfterReplacement()
         }
         mutableConnected.value = true
+        if (FloatingWorkflowEditorActivity.hasCollapsedSession()) {
+            showFloatingEditorRestoreControl()
+        }
         serviceScope.launch {
             workflowExecutor.state.collect { state ->
                 if (!isCurrentServiceInstance()) {
@@ -445,6 +448,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             stopForegroundService = ownedSharedState,
         )
         stopLiveAction()
+        hideFloatingEditorRestoreControl()
         serviceScope.cancel()
         if (ownedSharedState) {
             cancelRunningNotification()
@@ -470,6 +474,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         stopLiveAction()
         floatingEditorLaunchJob?.cancel()
         floatingEditorLaunchJob = null
+        hideFloatingEditorRestoreControl()
         cancelPendingObservationCapture()
         serviceScope.cancel()
     }
@@ -699,6 +704,41 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             overlayStatus.value = liveActionString(R.string.floating_editor_start_failed)
             false
         }
+    }
+
+    fun showFloatingEditorRestoreControl(): Boolean {
+        hideFloatingEditorRestoreControl()
+        val restoreButton = Button(this).apply {
+            text = liveActionString(R.string.floating_editor_restore)
+            contentDescription = liveActionString(R.string.floating_editor_restore_description)
+            setOnClickListener { restoreFloatingWorkflowEditor() }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        return runCatching {
+            overlayWindowManager.addView(restoreButton, params)
+            floatingEditorRestoreView = restoreButton
+            floatingEditorRestoreVisible.value = true
+        }.isSuccess
+    }
+
+    fun restoreFloatingWorkflowEditor(): Boolean {
+        val intent = FloatingWorkflowEditorActivity.returnIntent(this) ?: return false
+        return runCatching { startActivity(intent) }.isSuccess
+    }
+
+    fun hideFloatingEditorRestoreControl() {
+        floatingEditorRestoreView?.let { view ->
+            runCatching { overlayWindowManager.removeView(view) }
+        }
+        floatingEditorRestoreView = null
+        floatingEditorRestoreVisible.value = false
     }
 
     private fun liveActionContext(): Context {
@@ -2044,16 +2084,6 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             }
     }
 
-    private fun decodeImageTemplate(step: Step.ImageClick): Bitmap? = runCatching {
-        val bytes = Base64.getDecoder().decode(step.templatePngBase64)
-        if (bytes.size > MAX_TEMPLATE_PNG_BYTES) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth != step.templateWidth || bounds.outHeight != step.templateHeight) return null
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-            ?.takeIf { it.width == step.templateWidth && it.height == step.templateHeight }
-    }.getOrNull()
-
     @RequiresApi(Build.VERSION_CODES.R)
     private suspend fun captureBitmapOnce(): Bitmap? = suspendCancellableCoroutine { continuation ->
         takeScreenshot(
@@ -2338,7 +2368,6 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         private const val OBSERVATION_SETTLE_MILLIS = 300L
         private const val SCREEN_CAPTURE_SETTLE_MILLIS = 450L
         private const val SCREEN_CAPTURE_TIMEOUT_MILLIS = 15_000L
-        private const val MAX_TEMPLATE_PNG_BYTES = 96 * 1024
         private const val MAX_RECORDED_CLICKS = 1_000
         private const val MAX_RECORDING_SNAPSHOT_NODES = 1_000
         private const val MAX_RECORDING_WINDOW_SNAPSHOTS = 8
@@ -2362,6 +2391,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         val screenCaptureState = MutableStateFlow<ScreenCaptureState>(ScreenCaptureState.Idle)
         val pendingOverlayAction = MutableStateFlow<PendingOverlayAction?>(null)
         val overlayStatus = MutableStateFlow<String?>(null)
+        val floatingEditorRestoreVisible = MutableStateFlow(false)
         private val inspectedSelectorHandoff = InspectedSelectorHandoff()
         val inspectedSelector = inspectedSelectorHandoff.selector
         private val observationController = AccessibilityObservationController(

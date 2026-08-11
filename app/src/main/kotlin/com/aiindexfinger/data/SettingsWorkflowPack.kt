@@ -1,11 +1,16 @@
 package com.aiindexfinger.data
 
 import com.aiindexfinger.model.Condition
+import com.aiindexfinger.model.AncestorSelector
+import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.Step
+import com.aiindexfinger.model.SystemAction
+import com.aiindexfinger.model.TextInputMethod
+import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
@@ -206,8 +211,297 @@ object ClockWorkflowPack {
     const val OPEN_WORKFLOW_ID = "built-in-clock-open"
     const val VERIFY_TIME_WORKFLOW_ID = "built-in-clock-verify-time"
     const val VERIFY_DATE_WORKFLOW_ID = "built-in-clock-verify-date"
+    const val SET_VALIDATION_ALARM_TIME_WORKFLOW_ID = "built-in-clock-set-validation-alarm-time-v1"
+    const val SET_VALIDATION_ALARM_SOUND_WORKFLOW_ID = "built-in-clock-set-validation-alarm-sound-v1"
+    const val VALIDATION_ALARM_LABEL = "AI_INDEX_FINGER_CLOCK_VALIDATION_V1"
 
     private const val CLOCK_PACKAGE = "com.google.android.deskclock"
+    private const val CLOCK_ID_PREFIX = "$CLOCK_PACKAGE:id/"
+    private const val SHOW_ALARMS_ACTION = "android.intent.action.SHOW_ALARMS"
+
+    private fun node(
+        viewId: String? = null,
+        text: String? = null,
+        contentDescription: String? = null,
+        contentDescriptionMatchMode: TextMatchMode = TextMatchMode.Exact,
+        className: String? = null,
+        ancestor: AncestorSelector? = null,
+        matchIndex: Int = 0,
+    ) = NodeSelector(
+        packageName = CLOCK_PACKAGE,
+        viewId = viewId?.let { "$CLOCK_ID_PREFIX$it" },
+        text = text,
+        contentDescription = contentDescription,
+        contentDescriptionMatchMode = contentDescriptionMatchMode,
+        className = className,
+        ancestor = ancestor,
+        matchIndex = matchIndex,
+    )
+
+    private val validationListLabel = node(viewId = "label", text = VALIDATION_ALARM_LABEL)
+    private val validationDetailLabel = node(viewId = "alarm_label", text = VALIDATION_ALARM_LABEL)
+    private val validationCardAncestor = AncestorSelector(
+        viewId = "${CLOCK_ID_PREFIX}alarm_card",
+        contentDescription = VALIDATION_ALARM_LABEL,
+        contentDescriptionMatchMode = TextMatchMode.Contains,
+    )
+    private val validationAlarmSwitch = node(
+        viewId = "onoff",
+        ancestor = validationCardAncestor,
+    )
+    private val validationAlarmCard = node(
+        viewId = "alarm_card",
+        contentDescription = VALIDATION_ALARM_LABEL,
+        contentDescriptionMatchMode = TextMatchMode.Contains,
+    )
+
+    private fun failureStep(id: String) = Step.WaitForNode(
+        id = id,
+        selector = node(viewId = "ai_index_finger_clock_validation_failure"),
+        timeoutMillis = 500,
+    )
+
+    private fun alarmOffSteps(prefix: String, suffix: String): List<Step> {
+        val variableName = "${prefix}_${suffix}_alarm_status"
+        return listOf(
+            Step.ReadNodeText(
+                "$prefix-read-status-$suffix",
+                node(viewId = "schedule_alarm_detail_1"),
+                variableName,
+                NodeAttribute.Text,
+            ),
+            Step.IfElse(
+                "$prefix-check-status-en-$suffix",
+                Condition.Equals(Value.Variable(variableName), Value.Literal("Alarm is off")),
+                whenTrue = emptyList(),
+                whenFalse = listOf(
+                    Step.IfElse(
+                        "$prefix-check-status-zh-$suffix",
+                        Condition.Equals(Value.Variable(variableName), Value.Literal("闹钟已关闭")),
+                        whenTrue = emptyList(),
+                        whenFalse = listOf(failureStep("$prefix-status-failure-$suffix")),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun restoreDisabledSteps(prefix: String): List<Step> {
+        val variableName = "${prefix}_saved_card_state"
+        val disableStep = Step.Click("$prefix-restore-disabled", validationAlarmSwitch)
+        return listOf(
+            Step.ReadNodeText(
+                "$prefix-read-saved-card-state",
+                validationAlarmCard,
+                variableName,
+                NodeAttribute.ContentDescription,
+            ),
+            Step.IfElse(
+                "$prefix-disable-if-enabled-en",
+                Condition.Equals(
+                    Value.Variable(variableName),
+                    Value.Literal("currently enabled"),
+                    ComparisonOperator.Contains,
+                ),
+                whenTrue = listOf(disableStep),
+                whenFalse = listOf(
+                    Step.IfElse(
+                        "$prefix-disable-if-enabled-zh",
+                        Condition.Equals(
+                            Value.Variable(variableName),
+                            Value.Literal("目前已启用"),
+                            ComparisonOperator.Contains,
+                        ),
+                        whenTrue = listOf(disableStep.copy(id = "$prefix-restore-disabled-zh")),
+                    ),
+                ),
+            ),
+            Step.Delay("$prefix-wait-disabled", 1_000),
+        )
+    }
+
+    private fun preparedAlarmPrefix(prefix: String): List<Step> = listOf(
+        Step.LaunchApp("$prefix-launch", CLOCK_PACKAGE, SHOW_ALARMS_ACTION),
+        Step.WaitForNode("$prefix-wait-label", validationListLabel),
+        Step.WaitForNode(
+            "$prefix-require-unique-label",
+            validationListLabel.copy(matchIndex = 1),
+            mustExist = false,
+            timeoutMillis = 15_000,
+        ),
+        Step.Click("$prefix-open", validationListLabel),
+        Step.WaitForNode("$prefix-wait-detail", validationDetailLabel),
+    ) + alarmOffSteps(prefix, "before")
+
+    private fun setValidationAlarmTimeTemplate(): SystemWorkflowTemplate {
+        val prefix = SET_VALIDATION_ALARM_TIME_WORKFLOW_ID
+        val hourInput = node(
+            className = "android.widget.EditText",
+            ancestor = AncestorSelector(viewId = "${CLOCK_ID_PREFIX}material_hour_text_input"),
+        )
+        val minuteInput = node(
+            className = "android.widget.EditText",
+            ancestor = AncestorSelector(viewId = "${CLOCK_ID_PREFIX}material_minute_text_input"),
+        )
+        val minuteFocusTarget = node(
+            className = "android.view.View",
+            ancestor = AncestorSelector(viewId = "${CLOCK_ID_PREFIX}material_minute_text_input"),
+        )
+        val configuredTimeVariable = "${prefix}_configured_time"
+        return SystemWorkflowTemplate(
+            id = prefix,
+            steps = preparedAlarmPrefix(prefix) + listOf(
+                Step.Click("$prefix-edit-time", node(viewId = "clock_edit_button")),
+                Step.WaitForNode("$prefix-wait-picker", node(viewId = "material_timepicker_mode_button")),
+                Step.IfElse(
+                    "$prefix-open-text-mode",
+                    Condition.NodeExists(hourInput),
+                    whenTrue = emptyList(),
+                    whenFalse = listOf(
+                        Step.Click("$prefix-text-mode", node(viewId = "material_timepicker_mode_button")),
+                        Step.WaitForNode("$prefix-wait-hour", hourInput),
+                    ),
+                ),
+                Step.InputText(
+                    "$prefix-hour",
+                    hourInput,
+                    "10",
+                    inputMethod = TextInputMethod.SetText,
+                ),
+                Step.IfElse(
+                    "$prefix-focus-minute",
+                    Condition.NodeExists(minuteInput),
+                    whenTrue = emptyList(),
+                    whenFalse = listOf(
+                        Step.Click("$prefix-click-minute", minuteFocusTarget),
+                        Step.WaitForNode("$prefix-wait-minute", minuteInput),
+                    ),
+                ),
+                Step.InputText(
+                    "$prefix-minute",
+                    minuteInput,
+                    "37",
+                    inputMethod = TextInputMethod.SetText,
+                ),
+                Step.IfElse(
+                    "$prefix-select-am-if-present",
+                    Condition.NodeExists(node(viewId = "material_clock_period_am_button")),
+                    whenTrue = listOf(
+                        Step.Click("$prefix-am", node(viewId = "material_clock_period_am_button")),
+                    ),
+                ),
+                Step.Click("$prefix-confirm-time", node(viewId = "material_timepicker_ok_button")),
+                Step.WaitForNode("$prefix-wait-time", node(viewId = "clock")),
+                Step.ReadNodeText(
+                    "$prefix-read-time",
+                    node(viewId = "clock"),
+                    configuredTimeVariable,
+                    NodeAttribute.Text,
+                ),
+                Step.IfElse(
+                    "$prefix-check-time",
+                    Condition.Equals(
+                        Value.Variable(configuredTimeVariable),
+                        Value.Literal("10:37"),
+                        ComparisonOperator.Contains,
+                    ),
+                    whenTrue = emptyList(),
+                    whenFalse = listOf(failureStep("$prefix-time-failure")),
+                ),
+                Step.Click("$prefix-save", node(viewId = "save_button")),
+                Step.WaitForNode("$prefix-wait-saved-label", validationListLabel),
+                Step.WaitForNode(
+                    "$prefix-verify-saved-time",
+                    node(
+                        viewId = "digital_clock",
+                        contentDescription = "10:37",
+                        contentDescriptionMatchMode = TextMatchMode.Contains,
+                        ancestor = validationCardAncestor,
+                    ),
+                ),
+            ) + restoreDisabledSteps(prefix) + listOf(
+                Step.Click("$prefix-reopen", validationListLabel),
+                Step.WaitForNode("$prefix-wait-after", validationDetailLabel),
+            ) + alarmOffSteps(prefix, "after") + listOf(
+                Step.GlobalAction("$prefix-close-detail", SystemAction.Back),
+                Step.WaitForNode("$prefix-finished", validationListLabel),
+            ),
+        )
+    }
+
+    private fun silentValueSteps(prefix: String, suffix: String): List<Step> {
+        val variableName = "${prefix}_${suffix}_ringtone"
+        return listOf(
+            Step.ReadNodeText(
+                "$prefix-read-ringtone-$suffix",
+                node(viewId = "alarm_ringtone"),
+                variableName,
+                NodeAttribute.Text,
+            ),
+            Step.IfElse(
+                "$prefix-check-silent-en-$suffix",
+                Condition.Equals(
+                    Value.Variable(variableName),
+                    Value.Literal("Silent"),
+                    ComparisonOperator.Contains,
+                ),
+                whenTrue = emptyList(),
+                whenFalse = listOf(
+                    Step.IfElse(
+                        "$prefix-check-silent-zh-$suffix",
+                        Condition.Equals(
+                            Value.Variable(variableName),
+                            Value.Literal("静音"),
+                            ComparisonOperator.Contains,
+                        ),
+                        whenTrue = emptyList(),
+                        whenFalse = listOf(failureStep("$prefix-ringtone-failure-$suffix")),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun setValidationAlarmSoundTemplate(): SystemWorkflowTemplate {
+        val prefix = SET_VALIDATION_ALARM_SOUND_WORKFLOW_ID
+        val silentEnglish = node(viewId = "ringtone_primary_text", text = "Silent")
+        val silentChinese = node(viewId = "ringtone_primary_text", text = "静音")
+        return SystemWorkflowTemplate(
+            id = prefix,
+            steps = preparedAlarmPrefix(prefix) + listOf(
+                Step.Click("$prefix-open-sound", node(viewId = "ringtone_setting")),
+                Step.WaitForNode("$prefix-wait-sounds", node(viewId = "ringtone_content")),
+                Step.WaitForNode(
+                    "$prefix-wait-ringtone-rows",
+                    node(viewId = "ringtone_primary_text"),
+                ),
+                Step.IfElse(
+                    "$prefix-select-silent-en",
+                    Condition.NodeExists(silentEnglish),
+                    whenTrue = listOf(Step.Click("$prefix-click-silent-en", silentEnglish)),
+                    whenFalse = listOf(
+                        Step.IfElse(
+                            "$prefix-select-silent-zh",
+                            Condition.NodeExists(silentChinese),
+                            whenTrue = listOf(Step.Click("$prefix-click-silent-zh", silentChinese)),
+                            whenFalse = listOf(failureStep("$prefix-select-silent-failure")),
+                        ),
+                    ),
+                ),
+                Step.GlobalAction("$prefix-back-to-alarm", SystemAction.Back),
+                Step.WaitForNode("$prefix-wait-selected", validationDetailLabel),
+            ) + silentValueSteps(prefix, "selected") + listOf(
+                Step.Click("$prefix-save", node(viewId = "save_button")),
+                Step.WaitForNode("$prefix-wait-saved-label", validationListLabel),
+            ) + restoreDisabledSteps(prefix) + listOf(
+                Step.Click("$prefix-reopen", validationListLabel),
+                Step.WaitForNode("$prefix-wait-persisted", validationDetailLabel),
+            ) + alarmOffSteps(prefix, "after") + silentValueSteps(prefix, "persisted") + listOf(
+                Step.GlobalAction("$prefix-close-detail", SystemAction.Back),
+                Step.WaitForNode("$prefix-finished", validationListLabel),
+            ),
+        )
+    }
 
     val definition = SystemWorkflowPack(
         id = "clock",
@@ -218,6 +512,8 @@ object ClockWorkflowPack {
             readOnlyTemplate(OPEN_WORKFLOW_ID, CLOCK_PACKAGE, "com.google.android.deskclock:id/action_bar_title"),
             readOnlyTemplate(VERIFY_TIME_WORKFLOW_ID, CLOCK_PACKAGE, "com.google.android.deskclock:id/digital_clock"),
             readOnlyTemplate(VERIFY_DATE_WORKFLOW_ID, CLOCK_PACKAGE, "com.google.android.deskclock:id/date_and_next_alarm"),
+            setValidationAlarmTimeTemplate(),
+            setValidationAlarmSoundTemplate(),
         ),
     )
 }

@@ -1,6 +1,7 @@
 package com.aiindexfinger.automation
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.aiindexfinger.model.Step
 import java.io.ByteArrayOutputStream
 import java.util.Base64
@@ -43,6 +44,16 @@ internal fun encodeTemplatePng(source: Bitmap): EncodedTemplate? {
 internal fun templateDimensionsAreSupported(width: Int, height: Int): Boolean =
     width in Step.ImageClick.MIN_TEMPLATE_SIZE..Step.ImageClick.MAX_TEMPLATE_SIZE &&
         height in Step.ImageClick.MIN_TEMPLATE_SIZE..Step.ImageClick.MAX_TEMPLATE_SIZE
+
+internal fun decodeImageTemplate(step: Step.ImageClick): Bitmap? = runCatching {
+    val bytes = Base64.getDecoder().decode(step.templatePngBase64)
+    if (bytes.size > IMAGE_TEMPLATE_MAX_PNG_BYTES) return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth != step.templateWidth || bounds.outHeight != step.templateHeight) return null
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        ?.takeIf { it.width == step.templateWidth && it.height == step.templateHeight }
+}.getOrNull()
 
 internal data class EncodedTemplate(val base64: String, val width: Int, val height: Int)
 

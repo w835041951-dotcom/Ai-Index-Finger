@@ -1,9 +1,7 @@
 package com.aiindexfinger
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -57,7 +55,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aiindexfinger.automation.AutomationAccessibilityService
-import com.aiindexfinger.automation.NotificationPreflightStatus
 import com.aiindexfinger.automation.PreflightRecoveryAction
 import com.aiindexfinger.automation.WorkflowPreflightReport
 import com.aiindexfinger.automation.buildWorkflowPreflightReport
@@ -69,6 +66,8 @@ import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.effectiveState
 import com.aiindexfinger.scheduler.ScheduleStorageException
+import com.aiindexfinger.scheduler.openScheduleNotificationSettings
+import com.aiindexfinger.scheduler.scheduleNotificationReadiness
 import com.aiindexfinger.scheduler.WorkflowScheduler
 import java.lang.ref.WeakReference
 import java.util.UUID
@@ -79,8 +78,12 @@ import kotlinx.coroutines.withContext
 class FloatingWorkflowEditorActivity : ComponentActivity() {
     private val workflowApplication by lazy { application as AiIndexFingerApplication }
     private val workflowScheduler by lazy { WorkflowScheduler(this) }
+    private val accessibilityDisclosurePreferences by lazy {
+        AccessibilityDisclosurePreferences(this)
+    }
     private var requestedWorkflowId by mutableStateOf<String?>(null)
     private var openRequestSequence by mutableIntStateOf(0)
+    private var collapsed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,6 +98,11 @@ class FloatingWorkflowEditorActivity : ComponentActivity() {
                     application = workflowApplication,
                     scheduler = workflowScheduler,
                     onClose = ::finish,
+                    onCollapse = ::collapseEditor,
+                    accessibilityDisclosureAcknowledged =
+                        accessibilityDisclosurePreferences.isAcknowledged(),
+                    onAccessibilityDisclosureAcknowledged =
+                        accessibilityDisclosurePreferences::acknowledge,
                     onOpenAccessibilitySettings = {
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
@@ -106,13 +114,18 @@ class FloatingWorkflowEditorActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         currentActivity = WeakReference(this)
+        collapsed = false
+        AutomationAccessibilityService.instance?.hideFloatingEditorRestoreControl()
         configureFloatingWindow()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (!intent.getBooleanExtra(EXTRA_RETURN_TO_EDITOR, false)) {
+        if (intent.getBooleanExtra(EXTRA_RETURN_TO_EDITOR, false)) {
+            collapsed = false
+            AutomationAccessibilityService.instance?.hideFloatingEditorRestoreControl()
+        } else {
             applyOpenRequest(intent)
         }
     }
@@ -123,8 +136,20 @@ class FloatingWorkflowEditorActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        AutomationAccessibilityService.instance?.hideFloatingEditorRestoreControl()
         if (currentActivity?.get() === this) currentActivity = null
         super.onDestroy()
+    }
+
+    private fun collapseEditor() {
+        val service = AutomationAccessibilityService.instance ?: return
+        if (service.showFloatingEditorRestoreControl()) {
+            collapsed = true
+            if (!moveTaskToBack(true)) {
+                collapsed = false
+                service.hideFloatingEditorRestoreControl()
+            }
+        }
     }
 
     private fun configureFloatingWindow() {
@@ -162,6 +187,8 @@ class FloatingWorkflowEditorActivity : ComponentActivity() {
                 putExtra(EXTRA_RETURN_TO_EDITOR, true)
             }
         }
+
+        internal fun hasCollapsedSession(): Boolean = currentActivity?.get()?.collapsed == true
     }
 }
 
@@ -172,6 +199,9 @@ private fun FloatingWorkflowEditor(
     application: AiIndexFingerApplication,
     scheduler: WorkflowScheduler,
     onClose: () -> Unit,
+    onCollapse: () -> Unit,
+    accessibilityDisclosureAcknowledged: Boolean,
+    onAccessibilityDisclosureAcknowledged: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
 ) {
     val canonicalLibrary by application.library.collectAsStateWithLifecycle()
@@ -184,7 +214,19 @@ private fun FloatingWorkflowEditor(
     var saveError by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var handledOpenRequest by remember { mutableIntStateOf(0) }
+    val accessibilityDisclosureGate = remember(accessibilityDisclosureAcknowledged) {
+        AccessibilityDisclosureGate(accessibilityDisclosureAcknowledged)
+    }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    val requestAccessibilitySetup = {
+        when (accessibilityDisclosureGate.requestSetup()) {
+            AccessibilityDisclosureAction.ShowDisclosure -> showAccessibilityDisclosure = true
+            AccessibilityDisclosureAction.OpenSettings -> onOpenAccessibilitySettings()
+            AccessibilityDisclosureAction.StayInApp -> Unit
+        }
+    }
 
     DisposableEffect(Unit) {
         val observationLease = AutomationAccessibilityService.acquireObservationLease()
@@ -233,6 +275,7 @@ private fun FloatingWorkflowEditor(
                     )
                 },
                 onClose = onClose,
+                onCollapse = onCollapse,
             )
         } else {
             key(workflow.id, editorRevision) {
@@ -241,18 +284,11 @@ private fun FloatingWorkflowEditor(
                     persistedBaseline = persistedBaseline,
                     initialEditingStepPath = initialEditingStepPath,
                     floatingEditorMode = true,
+                    onCollapse = onCollapse,
                     saveInProgress = saving,
                     onTest = { candidate ->
                         val service = AutomationAccessibilityService.instance
-                        val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
-                            NotificationPreflightStatus.NotRequired
-                        } else if (application.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-                            PackageManager.PERMISSION_GRANTED
-                        ) {
-                            NotificationPreflightStatus.Granted
-                        } else {
-                            NotificationPreflightStatus.Denied
-                        }
+                        val notificationStatus = scheduleNotificationReadiness(application)
                         preflight = candidate to buildWorkflowPreflightReport(
                             workflow = candidate,
                             accessibilityConnected = service != null,
@@ -351,7 +387,26 @@ private fun FloatingWorkflowEditor(
             onRecoveryAction = { action ->
                 preflight = null
                 when (action) {
-                    PreflightRecoveryAction.SetUpAutomation -> onOpenAccessibilitySettings()
+                    PreflightRecoveryAction.SetUpAutomation -> requestAccessibilitySetup()
+                    PreflightRecoveryAction.OpenNotificationSettings -> {
+                        openScheduleNotificationSettings(application, report.notificationStatus)
+                    }
+                }
+            },
+        )
+    }
+    if (showAccessibilityDisclosure) {
+        AccessibilityDisclosureDialog(
+            onDecline = {
+                accessibilityDisclosureGate.declineDisclosure()
+                showAccessibilityDisclosure = false
+            },
+            onAccept = {
+                val action = accessibilityDisclosureGate.acceptDisclosure()
+                onAccessibilityDisclosureAcknowledged()
+                showAccessibilityDisclosure = false
+                if (action == AccessibilityDisclosureAction.OpenSettings) {
+                    onOpenAccessibilitySettings()
                 }
             },
         )
@@ -365,6 +420,7 @@ private fun FloatingWorkflowPicker(
     onSelect: (Workflow) -> Unit,
     onCreate: (String) -> Unit,
     onClose: () -> Unit,
+    onCollapse: () -> Unit,
 ) {
     val untitledName = stringResource(R.string.untitled_workflow)
     BackHandler(onBack = onClose)
@@ -375,6 +431,12 @@ private fun FloatingWorkflowPicker(
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                OutlinedButton(
+                    onClick = onCollapse,
+                    modifier = Modifier.weight(1f).testTag(FLOATING_EDITOR_COLLAPSE_TAG),
+                ) {
+                    Text(stringResource(R.string.floating_editor_collapse))
+                }
                 OutlinedButton(onClick = onClose, modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.close))
                 }
@@ -450,4 +512,5 @@ private fun FloatingWorkflowPicker(
 }
 
 internal const val FLOATING_EDITOR_NEW_TAG = "floating-editor-new"
+internal const val FLOATING_EDITOR_COLLAPSE_TAG = "floating-editor-collapse"
 internal fun floatingWorkflowTag(workflowId: String) = "floating-workflow-$workflowId"

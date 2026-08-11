@@ -6,7 +6,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 ## Current Baseline
 
-- Version `0.33.0` (`versionCode 33`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
+- Current prerelease `0.33.0-beta.9` (`versionCode 40`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
 - Core workflow editing, execution, persistence, import/export, scheduling, node inspection, and run history are implemented.
 - Core and app JVM tests pass. Structured validator and executor errors are localized through English and Simplified Chinese resources, and new run-history records persist stable error codes while legacy text records remain readable.
 - The application has no network permission.
@@ -18,7 +18,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 | Gate | Owner | Current state | Required evidence | Production blocker |
 | --- | --- | --- | --- | --- |
-| Release identity | Product owner | `com.aiindexfinger`, `0.33.0`, code 33 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
+| Release identity | Product owner | `com.aiindexfinger`, `0.33.0-beta.9`, code 40 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
 | Upload signing | Release owner | Not configured | Upload keystore and alias stored outside Git; signed AAB verified with `jarsigner` or `apksigner`; Play App Signing enabled | Yes |
 | Automated build gate | Engineering | Local commands pass; no CI | Protected GitHub workflow runs tests, release lint, and unsigned bundle build for the release commit | Yes |
 | Bilingual product UI | Engineering/QA | Resource keys match; remaining hardcoded Compose text exists outside the newly localized run-history flow | English and Simplified Chinese smoke-test checklist passes with no mixed-language critical workflow | Yes |
@@ -80,7 +80,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 | Complete | 4 | Run-history details and export | Users can inspect all retained runs, filter them, reopen workflows, and export local diagnostics. |
 | Complete | 5 | Safe starter examples | A searchable bilingual catalog contains 100 reviewed examples across ten categories. Every selection creates a fresh explicit draft and never runs automatically; app-observation and text-reading examples use visible placeholders and require user configuration before use. |
 | Complete | 6 | User workflow folders | Users can create, rename, delete, filter, and move workflows among single-level folders or Unfiled. Folder deletion preserves workflows, and versioned backups round-trip empty folders and assignments while legacy data remains importable. The complete Compose interaction flow passes on the API 36 emulator. |
-| Complete | 7 | Tested system-app workflow packs | An explicit bilingual action idempotently installs nine real Draft workflows across Settings, Clock, and Files folders without overwriting user edits. All nine verify real package-scoped UI through the production accessibility service on the API 36 emulator and persist Completed run records. Calculator is not installed on the test image, and the remaining catalog entries are not claimed as device-tested workflows. |
+| Complete | 7 | Tested system-app workflow packs | An explicit bilingual action idempotently installs 25 Ready workflows across Settings, Clock, Files, and AI Index Finger folders without overwriting user edits. The 21 fixture-free system-app workflows and two self-tests run through the production accessibility service on the API 36 emulator. Two additional Google Clock 9.0 workflows safely modify only a unique, pre-created, disabled `AI_INDEX_FINGER_CLOCK_VALIDATION_V1` fixture: one sets 10:37 and one selects Silent/静音. Dedicated English and Simplified Chinese runtime coverage repeats both workflows, verifies the fixture remains disabled, protects a separate sentinel alarm, and cleans up test fixtures. OEM Clock variants are not claimed as compatible. |
 | Complete | 8 | Preflight checks | User-triggered snapshots report validation, Draft/Ready state, variable dataflow, structural and retry-expanded execution limits, launchability, selector match indexes, service state, and notification permission without dispatching actions or writing history. |
 | Device check pending | 9 | Date/time scheduling | Users choose an absolute local date and time. Past, DST-gap, and over-one-year targets are rejected; overlap behavior is deterministic; WorkManager remains a best-effort one-time reminder and never executes automation. Verify delivery and timezone-change behavior on devices. |
 

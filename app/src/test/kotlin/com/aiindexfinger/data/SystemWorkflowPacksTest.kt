@@ -10,11 +10,11 @@ import org.junit.Test
 
 class SystemWorkflowPacksTest {
     @Test
-    fun systemAndSelfTestPacksInstallTwentyThreeRunnableWorkflowsInFourFolders() {
+    fun systemAndSelfTestPacksInstallTwentyFiveRunnableWorkflowsInFourFolders() {
         var library = WorkflowLibrary()
         val packs = listOf(
             Triple(SettingsWorkflowPack.definition, "Settings", List(15) { "Settings $it" }),
-            Triple(ClockWorkflowPack.definition, "Clock", List(3) { "Clock $it" }),
+            Triple(ClockWorkflowPack.definition, "Clock", List(5) { "Clock $it" }),
             Triple(FilesWorkflowPack.definition, "Files", List(3) { "Files $it" }),
             Triple(
                 AiIndexFingerSelfTestPack.definition,
@@ -26,8 +26,8 @@ class SystemWorkflowPacksTest {
             library = pack.install(library, folderName, names).library
         }
 
-        assertEquals(23, library.workflows.size)
-        assertEquals(23, library.workflows.map { it.id }.distinct().size)
+        assertEquals(25, library.workflows.size)
+        assertEquals(25, library.workflows.map { it.id }.distinct().size)
         assertEquals(setOf("Settings", "Clock", "Files", "AI Index Finger"), library.folders.map { it.name }.toSet())
         assertTrue(library.workflows.all { it.state == WorkflowState.Ready })
         assertTrue(library.workflows.all { it.isReadyToRun() })
@@ -59,6 +59,60 @@ class SystemWorkflowPacksTest {
         assertTrue(selfTestSteps.any { it is Step.IfElse })
         assertTrue(selfTestSteps.any { it is Step.Repeat })
         assertTrue(selfTestSteps.none { it.isProhibitedSelfTestStep() })
+
+        val validationSteps = library.workflows
+            .filter { workflow ->
+                workflow.id == ClockWorkflowPack.SET_VALIDATION_ALARM_TIME_WORKFLOW_ID ||
+                    workflow.id == ClockWorkflowPack.SET_VALIDATION_ALARM_SOUND_WORKFLOW_ID
+            }
+            .flatMap { it.steps.flatten() }
+        assertTrue(validationSteps.any { it is Step.LaunchApp })
+        assertTrue(validationSteps.any { it is Step.WaitForNode })
+        assertTrue(validationSteps.any { it is Step.Click })
+        assertTrue(validationSteps.any { it is Step.InputText })
+        assertTrue(validationSteps.any { it is Step.ReadNodeText })
+        assertTrue(validationSteps.any { it is Step.IfElse })
+        assertTrue(validationSteps.any { it is Step.GlobalAction })
+        assertTrue(validationSteps.none { it is Step.Tap || it is Step.Swipe || it is Step.ImageClick })
+        assertTrue(
+            validationSteps.filterIsInstance<Step.LaunchApp>()
+                .all { it.packageName == "com.google.android.deskclock" },
+        )
+    }
+
+    @Test
+    fun clockPackUpgradeAddsOnlyValidationWorkflowsAndPreservesExistingClockEdits() {
+        val legacyDefinition = ClockWorkflowPack.definition.copy(
+            templates = ClockWorkflowPack.definition.templates.take(3),
+        )
+        val legacy = legacyDefinition.install(
+            WorkflowLibrary(),
+            "Clock",
+            listOf("Open Clock", "Verify time", "Verify date"),
+        ).library
+        val customized = legacy.copy(
+            workflows = legacy.workflows.map { workflow ->
+                if (workflow.id == ClockWorkflowPack.OPEN_WORKFLOW_ID) {
+                    workflow.copy(name = "User Clock", state = WorkflowState.Draft)
+                } else {
+                    workflow
+                }
+            },
+        )
+
+        val upgraded = ClockWorkflowPack.definition.install(
+            customized,
+            "Clock",
+            List(5) { "Clock $it" },
+        )
+
+        assertEquals(2, upgraded.addedWorkflowCount)
+        assertEquals(5, upgraded.library.workflows.size)
+        assertEquals(
+            customized.workflows.single { it.id == ClockWorkflowPack.OPEN_WORKFLOW_ID },
+            upgraded.library.workflows.single { it.id == ClockWorkflowPack.OPEN_WORKFLOW_ID },
+        )
+        assertEquals(ClockWorkflowPack.FOLDER_ID, upgraded.library.folders.single().id)
     }
 
     @Test

@@ -13,8 +13,8 @@ android {
         applicationId = "com.aiindexfinger"
         minSdk = 26
         targetSdk = 36
-        versionCode = 39
-        versionName = "0.33.0-beta.8"
+        versionCode = 40
+        versionName = "0.33.0-beta.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -47,6 +47,9 @@
     <string name="crop_right">右边界</string>
     <string name="crop_bottom">下边界</string>
     <string name="image_click_saved_template">已保存 %1$d×%2$d 模板；可直接保存或重新截取。</string>
+    <string name="image_click_saved_template_title">已保存的识图模板</string>
+    <string name="image_click_saved_template_description">已保存的截图点击识图模板预览</string>
+    <string name="image_click_saved_template_invalid">无法预览已保存模板。请重新截取，或取消且不保存。</string>
     <string name="image_click_crop_too_small">选区至少需要 %1$d×%1$d 像素。</string>
     <string name="image_click_template_too_large">模板图片过大，请选择更小或更简单的区域。</string>
     <string name="image_click_step_title">按截图点击 %1$d×%2$d</string>
@@ -68,6 +71,9 @@
     <string name="live_action_overlay">在目标应用上现场添加动作</string>
     <string name="live_action_quick_add">在目标应用上选坐标或截图</string>
     <string name="floating_editor_open">打开悬浮工作流编辑器</string>
+    <string name="floating_editor_collapse">隐藏编辑器</string>
+    <string name="floating_editor_restore">显示编辑器</string>
+    <string name="floating_editor_restore_description">恢复已隐藏的悬浮工作流编辑器</string>
     <string name="floating_editor_title">悬浮工作流编辑器</string>
     <string name="floating_editor_description">选择已有工作流或新建草稿。这里提供全部工作流操作，编辑时不会运行任何步骤。</string>
     <string name="floating_editor_workflow_summary">%1$s · %2$d 个步骤</string>
@@ -309,9 +315,10 @@
     <string name="system_action_recents">最近任务</string>
     <string name="workflow_state_draft">草稿</string>
     <string name="workflow_state_ready">就绪</string>
-    <string name="notification_status_granted">已授予</string>
-    <string name="notification_status_denied">未授予</string>
-    <string name="notification_status_not_required">无需授权</string>
+    <string name="notification_status_ready">可用</string>
+    <string name="notification_status_permission_required">需要通知权限</string>
+    <string name="notification_status_app_disabled">应用通知已关闭</string>
+    <string name="notification_status_channel_disabled">工作流计划通知已关闭</string>
     <string name="selector_role_click">点击</string>
     <string name="selector_role_recorded_click">录制点击</string>
     <string name="selector_role_long_click">长按</string>
@@ -644,6 +651,9 @@
     <string name="schedule_failed">无法计划工作流</string>
     <string name="cannot_schedule">无法计划：%1$s</string>
     <string name="schedule_requires_notifications">计划提醒需要通知权限</string>
+    <string name="schedule_notifications_blocked_title">启用计划通知</string>
+    <string name="schedule_notifications_blocked">由于 Android 已关闭应用通知或工作流计划通知，此提醒未创建。</string>
+    <string name="open_notification_settings">打开通知设置</string>
     <string name="workflow_exported">已导出 %1$s</string>
     <string name="export_failed">导出失败：%1$s</string>
     <string name="workflows_backed_up">已备份 %1$d 个工作流</string>
@@ -700,6 +710,8 @@
     <string name="clock_workflow_open">打开时钟</string>
     <string name="clock_workflow_verify_time">确认当前时间显示</string>
     <string name="clock_workflow_verify_date">确认当前日期显示</string>
+    <string name="clock_workflow_set_validation_alarm_time">将 AI_INDEX_FINGER_CLOCK_VALIDATION_V1 设为 10:37</string>
+    <string name="clock_workflow_set_validation_alarm_sound">将 AI_INDEX_FINGER_CLOCK_VALIDATION_V1 铃声设为静音</string>
     <string name="files_folder_name">文件</string>
     <string name="files_workflow_open">打开文件</string>
     <string name="files_workflow_verify_header">确认文件页面标题</string>
@@ -788,7 +800,7 @@
     <string name="workflow_test_title">测试 %1$s</string>
     <string name="workflow_test_state">状态：%1$s</string>
     <string name="workflow_test_automation">自动化服务：%1$s</string>
-    <string name="workflow_test_notifications">通知权限：%1$s</string>
+    <string name="workflow_test_notifications">计划通知：%1$s</string>
     <string name="status_connected">已连接</string>
     <string name="status_not_connected">未连接</string>
     <string name="set_up_automation">设置自动化服务</string>
@@ -820,6 +832,7 @@
     <string name="up_one_level">上一级</string>
     <string name="add_first_action">请在下方添加第一个操作</string>
     <string name="add_action">添加操作</string>
+    <string name="add_operation">新增操作</string>
     <string name="launch_app">启动应用</string>
     <string name="add">添加</string>
     <string name="search_installed_apps">搜索已安装应用</string>

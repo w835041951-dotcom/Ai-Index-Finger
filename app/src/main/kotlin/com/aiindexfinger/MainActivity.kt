@@ -6,7 +6,6 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
@@ -100,6 +99,7 @@ import com.aiindexfinger.automation.applyLiveActionHandoff
 import com.aiindexfinger.automation.cropBoundsOrNull
 import com.aiindexfinger.automation.cropTemplate
 import com.aiindexfinger.automation.encodeTemplatePng
+import com.aiindexfinger.automation.decodeImageTemplate
 import com.aiindexfinger.automation.filterLaunchableApps
 import com.aiindexfinger.automation.ObservedNode
 import com.aiindexfinger.automation.SelectorRecommendations
@@ -108,7 +108,6 @@ import com.aiindexfinger.automation.ScreenPoint
 import com.aiindexfinger.automation.mapFitCenterTapToScreen
 import com.aiindexfinger.automation.recommendedSelector
 import com.aiindexfinger.automation.selectCaptureNode
-import com.aiindexfinger.automation.NotificationPreflightStatus
 import com.aiindexfinger.automation.PendingOverlayAction
 import com.aiindexfinger.automation.PreflightRecoveryAction
 import com.aiindexfinger.automation.WorkflowPreflightReport
@@ -193,6 +192,8 @@ import com.aiindexfinger.model.filterWorkflowExamples
 import com.aiindexfinger.model.isReadyToRun
 import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.scheduler.ScheduleNotificationWorker
+import com.aiindexfinger.scheduler.ScheduleNotificationAction
+import com.aiindexfinger.scheduler.ScheduleNotificationReadiness
 import com.aiindexfinger.scheduler.ScheduleRecurrence
 import com.aiindexfinger.scheduler.ScheduleStorageException
 import com.aiindexfinger.scheduler.ScheduledWorkflowEvent
@@ -202,6 +203,9 @@ import com.aiindexfinger.scheduler.WorkflowScheduler
 import com.aiindexfinger.scheduler.localScheduleEpochMillis
 import com.aiindexfinger.scheduler.missedSchedules
 import com.aiindexfinger.scheduler.scheduleDelayMillis
+import com.aiindexfinger.scheduler.scheduleNotificationAction
+import com.aiindexfinger.scheduler.scheduleNotificationReadiness
+import com.aiindexfinger.scheduler.openScheduleNotificationSettings
 import com.aiindexfinger.scheduler.removeTriggeredSchedule
 import com.aiindexfinger.executor.ExecutionError
 import com.aiindexfinger.executor.ExecutionErrorCode
@@ -226,8 +230,8 @@ class MainActivity : ComponentActivity() {
     private val runHistoryStore by lazy { RunHistoryStore(this) }
     private val workflowScheduler by lazy { WorkflowScheduler(this) }
     private val appPreferences by lazy { AppPreferences(this) }
-    private val releasePreferences by lazy {
-        getSharedPreferences(RELEASE_PREFERENCES_NAME, MODE_PRIVATE)
+    private val accessibilityDisclosurePreferences by lazy {
+        AccessibilityDisclosurePreferences(this)
     }
     private val scheduledWorkflowEvents = ScheduledWorkflowEventController()
 
@@ -277,15 +281,10 @@ class MainActivity : ComponentActivity() {
                             appearanceMode = mode
                             appPreferences.setAppearanceMode(mode)
                         },
-                        accessibilityDisclosureAcknowledged = releasePreferences.getBoolean(
-                            ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED,
-                            false,
-                        ),
-                        onAccessibilityDisclosureAcknowledged = {
-                            releasePreferences.edit()
-                                .putBoolean(ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED, true)
-                                .apply()
-                        },
+                        accessibilityDisclosureAcknowledged =
+                            accessibilityDisclosurePreferences.isAcknowledged(),
+                        onAccessibilityDisclosureAcknowledged =
+                            accessibilityDisclosurePreferences::acknowledge,
                     )
                 }
             }
@@ -341,10 +340,6 @@ class MainActivity : ComponentActivity() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
-    private companion object {
-        const val RELEASE_PREFERENCES_NAME = "release_readiness"
-        const val ACCESSIBILITY_DISCLOSURE_ACKNOWLEDGED = "accessibility_disclosure_acknowledged"
-    }
 }
 
 private data class InitialAppState(
@@ -485,32 +480,43 @@ private fun WorkflowApp(
         }
     }
     var pendingSchedule by remember { mutableStateOf<Triple<Workflow, Long, ScheduleRecurrence>?>(null) }
+    var blockedNotificationReadiness by remember { mutableStateOf<ScheduleNotificationReadiness?>(null) }
+    val persistSchedule: (Triple<Workflow, Long, ScheduleRecurrence>) -> Unit = { request ->
+        runCatching { onSchedule(request.first, request.second, request.third) }
+            .onSuccess {
+                schedules = it
+                runMessage = context.getString(R.string.workflow_scheduled, request.first.name)
+            }
+            .onFailure { error ->
+                runMessage = context.getString(
+                    if (error is ScheduleStorageException) {
+                        R.string.schedule_storage_corrupt
+                    } else {
+                        R.string.schedule_failed
+                    },
+                )
+            }
+    }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         val request = pendingSchedule
         pendingSchedule = null
         if (granted && request != null && request.first.isReadyToRun()) {
-            runCatching { onSchedule(request.first, request.second, request.third) }
-                .onSuccess {
-                    schedules = it
-                    runMessage = context.getString(R.string.workflow_scheduled, request.first.name)
-                }
-                .onFailure { error ->
-                    runMessage = context.getString(
-                        if (error is ScheduleStorageException) {
-                            R.string.schedule_storage_corrupt
-                        } else {
-                            R.string.schedule_failed
-                        },
-                    )
-                }
+            val readiness = scheduleNotificationReadiness(context)
+            if (readiness == ScheduleNotificationReadiness.Ready) {
+                persistSchedule(request)
+            } else {
+                blockedNotificationReadiness = readiness
+                runMessage = context.getString(R.string.schedule_notifications_blocked)
+            }
         } else if (granted && request != null) {
             runMessage = context.getString(
                 R.string.cannot_schedule,
                 request.first.readinessIssues().first().localizedMessage(context),
             )
         } else if (!granted) {
+            blockedNotificationReadiness = ScheduleNotificationReadiness.RuntimePermissionRequired
             runMessage = context.getString(R.string.schedule_requires_notifications)
         }
     }
@@ -606,15 +612,7 @@ private fun WorkflowApp(
             saveErrorMessage = editorSaveError,
             onTest = { workflow ->
                 val service = AutomationAccessibilityService.instance
-                val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
-                    NotificationPreflightStatus.NotRequired
-                } else if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    NotificationPreflightStatus.Granted
-                } else {
-                    NotificationPreflightStatus.Denied
-                }
+                val notificationStatus = scheduleNotificationReadiness(context)
                 preflightReport = workflow to buildWorkflowPreflightReport(
                     workflow = workflow,
                     accessibilityConnected = service != null,
@@ -734,6 +732,8 @@ private fun WorkflowApp(
                             R.string.clock_workflow_open,
                             R.string.clock_workflow_verify_time,
                             R.string.clock_workflow_verify_date,
+                            R.string.clock_workflow_set_validation_alarm_time,
+                            R.string.clock_workflow_set_validation_alarm_sound,
                         ),
                     ),
                     Triple(
@@ -843,27 +843,20 @@ private fun WorkflowApp(
                         R.string.cannot_schedule,
                         workflow.readinessIssues().first().localizedMessage(context),
                     )
-                } else if (Build.VERSION.SDK_INT >= 33 &&
-                    context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    pendingSchedule = Triple(workflow, targetEpochMillis, recurrence)
-                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
-                    runCatching { onSchedule(workflow, targetEpochMillis, recurrence) }
-                        .onSuccess {
-                            schedules = it
-                            runMessage = context.getString(R.string.workflow_scheduled, workflow.name)
+                    val request = Triple(workflow, targetEpochMillis, recurrence)
+                    val readiness = scheduleNotificationReadiness(context)
+                    when (scheduleNotificationAction(readiness)) {
+                        ScheduleNotificationAction.Schedule -> persistSchedule(request)
+                        ScheduleNotificationAction.RequestPermission -> {
+                            pendingSchedule = request
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
-                        .onFailure { error ->
-                            runMessage = context.getString(
-                                if (error is ScheduleStorageException) {
-                                    R.string.schedule_storage_corrupt
-                                } else {
-                                    R.string.schedule_failed
-                                },
-                            )
+                        ScheduleNotificationAction.OpenSettings -> {
+                            blockedNotificationReadiness = readiness
+                            runMessage = context.getString(R.string.schedule_notifications_blocked)
                         }
+                    }
                 }
             },
             onCancelSchedule = { workflow ->
@@ -923,15 +916,7 @@ private fun WorkflowApp(
             },
             onPreflight = { workflow ->
                 val service = AutomationAccessibilityService.instance
-                val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
-                    NotificationPreflightStatus.NotRequired
-                } else if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    NotificationPreflightStatus.Granted
-                } else {
-                    NotificationPreflightStatus.Denied
-                }
+                val notificationStatus = scheduleNotificationReadiness(context)
                 preflightReport = workflow to buildWorkflowPreflightReport(
                     workflow = workflow,
                     accessibilityConnected = service != null,
@@ -1017,8 +1002,20 @@ private fun WorkflowApp(
                 preflightReport = null
                 when (action) {
                     PreflightRecoveryAction.SetUpAutomation -> requestAccessibilitySetup()
+                    PreflightRecoveryAction.OpenNotificationSettings -> {
+                        openScheduleNotificationSettings(context, report.notificationStatus)
+                    }
                 }
             },
+        )
+    }
+    blockedNotificationReadiness?.let { readiness ->
+        ScheduleNotificationRecoveryDialog(
+            onOpenSettings = {
+                openScheduleNotificationSettings(context, readiness)
+                blockedNotificationReadiness = null
+            },
+            onDismiss = { blockedNotificationReadiness = null },
         )
     }
 
@@ -1039,6 +1036,33 @@ private fun WorkflowApp(
             confirmButton = {},
         )
     }
+}
+
+@Composable
+internal fun ScheduleNotificationRecoveryDialog(
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag(SCHEDULE_NOTIFICATION_RECOVERY_TAG),
+        title = { Text(stringResource(R.string.schedule_notifications_blocked_title)) },
+        text = {
+            Text(
+                stringResource(R.string.schedule_notifications_blocked),
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag(SCHEDULE_NOTIFICATION_SETTINGS_TAG),
+            ) { Text(stringResource(R.string.open_notification_settings)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
 }
 
 @Composable
@@ -1286,6 +1310,7 @@ internal fun WorkflowHome(
                 WorkflowRow(
                     workflow = workflow,
                     isRunning = workflow.id == runningWorkflowId,
+                    isAnotherWorkflowRunning = runningWorkflowId != null && workflow.id != runningWorkflowId,
                     canCompare = workflows.size > 1,
                     schedule = schedule,
                     onEdit = { onEdit(workflow) },
@@ -1881,6 +1906,7 @@ internal fun WorkflowEditor(
     persistedBaseline: Workflow? = workflow,
     initialEditingStepPath: StepPath? = null,
     floatingEditorMode: Boolean = false,
+    onCollapse: (() -> Unit)? = null,
     saveInProgress: Boolean = false,
     saveErrorMessage: String? = null,
     onTest: (Workflow) -> Unit,
@@ -1912,6 +1938,7 @@ internal fun WorkflowEditor(
     var showRepeatDialog by remember { mutableStateOf(false) }
     var showConditionDialog by remember { mutableStateOf(false) }
     var showNodeConditionDialog by remember { mutableStateOf(false) }
+    var showOperationChooser by remember { mutableStateOf(false) }
     var inspectedClickSelector by remember { mutableStateOf<NodeSelector?>(null) }
     var policyStepPath by remember { mutableStateOf<StepPath?>(null) }
     var editingStepPath by remember(workflow.id) { mutableStateOf(initialEditingStepPath) }
@@ -1936,7 +1963,8 @@ internal fun WorkflowEditor(
     } else {
         emptyList()
     }
-    val hasUnsavedChanges = name != workflow.name ||
+    val hasUnsavedChanges = saveBaseline == null ||
+        name != workflow.name ||
         defaultTimeoutMillis != workflow.defaultStepTimeoutMillis ||
         steps != workflow.steps
     val requestBack = {
@@ -2015,6 +2043,54 @@ internal fun WorkflowEditor(
             },
         )
     }
+    if (showOperationChooser) {
+        WorkflowOperationChooserDialog(
+            hasSteps = currentSteps.isNotEmpty(),
+            serviceConnected = AutomationAccessibilityService.instance != null,
+            onDismiss = { showOperationChooser = false },
+            onSelect = { operation ->
+                showOperationChooser = false
+                when (operation) {
+                    WorkflowEditorOperation.LaunchApp -> showLaunchDialog = true
+                    WorkflowEditorOperation.Click -> {
+                        inspectedClickSelector = null
+                        showClickDialog = true
+                    }
+                    WorkflowEditorOperation.ImageClick -> showImageClickDialog = true
+                    WorkflowEditorOperation.RecordedClick -> {
+                        AutomationAccessibilityService.instance?.startElementMonitor(workflow.id, currentListPath)
+                    }
+                    WorkflowEditorOperation.LongClick -> showLongClickDialog = true
+                    WorkflowEditorOperation.Tap -> showTapDialog = true
+                    WorkflowEditorOperation.Scroll -> showScrollDialog = true
+                    WorkflowEditorOperation.InputText -> showInputDialog = true
+                    WorkflowEditorOperation.Swipe -> showSwipeDialog = true
+                    WorkflowEditorOperation.Delay -> showWaitDialog = true
+                    WorkflowEditorOperation.GlobalBack -> steps = steps.insertStep(
+                        currentListPath,
+                        currentSteps.size,
+                        Step.GlobalAction(newId(), SystemAction.Back),
+                    )
+                    WorkflowEditorOperation.GlobalHome -> steps = steps.insertStep(
+                        currentListPath,
+                        currentSteps.size,
+                        Step.GlobalAction(newId(), SystemAction.Home),
+                    )
+                    WorkflowEditorOperation.GlobalRecents -> steps = steps.insertStep(
+                        currentListPath,
+                        currentSteps.size,
+                        Step.GlobalAction(newId(), SystemAction.Recents),
+                    )
+                    WorkflowEditorOperation.WaitForNode -> showWaitNodeDialog = true
+                    WorkflowEditorOperation.SetVariable -> showVariableDialog = true
+                    WorkflowEditorOperation.ReadNodeText -> showReadNodeTextDialog = true
+                    WorkflowEditorOperation.Repeat -> showRepeatDialog = true
+                    WorkflowEditorOperation.VariableCondition -> showConditionDialog = true
+                    WorkflowEditorOperation.NodeCondition -> showNodeConditionDialog = true
+                }
+            },
+        )
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -2031,6 +2107,16 @@ internal fun WorkflowEditor(
                     if (saveInProgress) {
                         Text(stringResource(R.string.floating_editor_saving), fontSize = 12.sp)
                     }
+                    onCollapse?.let { collapse ->
+                        OutlinedButton(
+                            onClick = collapse,
+                            modifier = Modifier.fillMaxWidth().testTag(FLOATING_EDITOR_COLLAPSE_TAG),
+                        ) { Text(stringResource(R.string.floating_editor_collapse)) }
+                    }
+                    Button(
+                        onClick = { showOperationChooser = true },
+                        modifier = Modifier.fillMaxWidth().testTag(WORKFLOW_EDITOR_ADD_OPERATION_TAG),
+                    ) { Text(stringResource(R.string.add_operation)) }
                     Button(
                         enabled = canSave,
                         onClick = {
@@ -2092,7 +2178,10 @@ internal fun WorkflowEditor(
                 .padding(20.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = requestBack) { Text(stringResource(R.string.back)) }
+                TextButton(
+                    onClick = requestBack,
+                    modifier = Modifier.testTag(WORKFLOW_EDITOR_BACK_TAG),
+                ) { Text(stringResource(R.string.back)) }
                 Text(stringResource(R.string.workflow_editor), fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(16.dp))
@@ -4162,10 +4251,14 @@ private fun WorkflowState.displayName(): String = stringResource(when (this) {
 })
 
 @Composable
-private fun NotificationPreflightStatus.displayName(): String = stringResource(when (this) {
-    NotificationPreflightStatus.Granted -> R.string.notification_status_granted
-    NotificationPreflightStatus.Denied -> R.string.notification_status_denied
-    NotificationPreflightStatus.NotRequired -> R.string.notification_status_not_required
+private fun ScheduleNotificationReadiness.displayName(): String = stringResource(when (this) {
+    ScheduleNotificationReadiness.Ready -> R.string.notification_status_ready
+    ScheduleNotificationReadiness.RuntimePermissionRequired ->
+        R.string.notification_status_permission_required
+    ScheduleNotificationReadiness.AppNotificationsDisabled ->
+        R.string.notification_status_app_disabled
+    ScheduleNotificationReadiness.ChannelDisabled ->
+        R.string.notification_status_channel_disabled
 })
 
 @Composable
@@ -4812,8 +4905,12 @@ private fun ImageClickStepDialog(
     onDismiss: () -> Unit,
     onAdd: (Step.ImageClick) -> Unit,
 ) {
-    DisposableEffect(Unit) {
-        onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
+    val savedTemplatePreview = remember(initialStep) { initialStep?.let(::decodeImageTemplate) }
+    DisposableEffect(savedTemplatePreview) {
+        onDispose {
+            AutomationAccessibilityService.cancelPendingScreenCapture()
+            savedTemplatePreview?.recycle()
+        }
     }
     val context = LocalContext.current
     val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
@@ -4863,6 +4960,41 @@ private fun ImageClickStepDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
+                if (initialStep != null) {
+                    Text(
+                        stringResource(R.string.image_click_saved_template_title),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (savedTemplatePreview != null) {
+                        Image(
+                            bitmap = savedTemplatePreview.asImageBitmap(),
+                            contentDescription = stringResource(
+                                R.string.image_click_saved_template_description,
+                            ),
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                                .testTag(IMAGE_CLICK_SAVED_TEMPLATE_PREVIEW_TAG),
+                        )
+                        Text(
+                            stringResource(
+                                R.string.image_click_saved_template,
+                                initialStep.templateWidth,
+                                initialStep.templateHeight,
+                            ),
+                            fontSize = 12.sp,
+                        )
+                    } else {
+                        Text(
+                            stringResource(R.string.image_click_saved_template_invalid),
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    HorizontalDivider()
+                }
                 NodeField(packageName, { packageName = it }, stringResource(R.string.image_click_package), true)
                 HorizontalDivider()
                 Text(stringResource(R.string.image_click_matching_settings), fontWeight = FontWeight.SemiBold)
@@ -5398,6 +5530,62 @@ private fun StepRow(
 }
 
 @Composable
+private fun WorkflowOperationChooserDialog(
+    hasSteps: Boolean,
+    serviceConnected: Boolean,
+    onDismiss: () -> Unit,
+    onSelect: (WorkflowEditorOperation) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.add_operation)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                WorkflowEditorOperation.entries.forEach { operation ->
+                    OutlinedButton(
+                        enabled = operation.isAvailable(hasSteps, serviceConnected),
+                        onClick = { onSelect(operation) },
+                        modifier = Modifier.fillMaxWidth().testTag(workflowOperationTag(operation)),
+                    ) { Text(operation.localizedLabel()) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+@Composable
+private fun WorkflowEditorOperation.localizedLabel(): String = stringResource(
+    when (this) {
+        WorkflowEditorOperation.LaunchApp -> R.string.launch_app
+        WorkflowEditorOperation.Click -> R.string.click
+        WorkflowEditorOperation.ImageClick -> R.string.image_click
+        WorkflowEditorOperation.RecordedClick -> R.string.monitor_elements_overlay
+        WorkflowEditorOperation.LongClick -> R.string.long_click
+        WorkflowEditorOperation.Tap -> R.string.tap_coordinates
+        WorkflowEditorOperation.Scroll -> R.string.scroll_element
+        WorkflowEditorOperation.InputText -> R.string.input_text
+        WorkflowEditorOperation.Swipe -> R.string.swipe
+        WorkflowEditorOperation.Delay -> R.string.wait_action
+        WorkflowEditorOperation.GlobalBack -> R.string.back
+        WorkflowEditorOperation.GlobalHome -> R.string.home
+        WorkflowEditorOperation.GlobalRecents -> R.string.recents
+        WorkflowEditorOperation.WaitForNode -> R.string.wait_for_element
+        WorkflowEditorOperation.SetVariable -> R.string.set_variable
+        WorkflowEditorOperation.ReadNodeText -> R.string.read_element_attribute
+        WorkflowEditorOperation.Repeat -> R.string.repeat_steps
+        WorkflowEditorOperation.VariableCondition -> R.string.variable_condition
+        WorkflowEditorOperation.NodeCondition -> R.string.element_exists_condition
+    },
+)
+
+@Composable
 private fun FailurePolicy.label(): String = when (this) {
     FailurePolicy.Stop -> stringResource(R.string.failure_policy_stop)
     FailurePolicy.Continue -> stringResource(R.string.failure_policy_continue)
@@ -5516,7 +5704,7 @@ private fun formatElapsed(elapsedMillis: Long): String {
 }
 
 @Composable
-private fun AccessibilityDisclosureDialog(
+internal fun AccessibilityDisclosureDialog(
     onDecline: () -> Unit,
     onAccept: () -> Unit,
 ) {
@@ -5603,6 +5791,7 @@ private fun PermissionStatus(
 private fun WorkflowRow(
     workflow: Workflow,
     isRunning: Boolean,
+    isAnotherWorkflowRunning: Boolean,
     canCompare: Boolean,
     schedule: WorkflowSchedule?,
     onEdit: () -> Unit,
@@ -5648,16 +5837,28 @@ private fun WorkflowRow(
                     fontSize = 12.sp,
                 )
             }
+            if (isAnotherWorkflowRunning && isReady) {
+                Text(
+                    stringResource(R.string.another_workflow_running),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
         }
         Column(horizontalAlignment = Alignment.End) {
             Row {
                 TextButton(onClick = onEdit, enabled = !isRunning) { Text(stringResource(R.string.edit)) }
-                TextButton(onClick = onDebug, enabled = !isRunning && isReady) {
+                TextButton(
+                    onClick = onDebug,
+                    enabled = !isRunning && !isAnotherWorkflowRunning && isReady,
+                    modifier = Modifier.testTag(workflowDebugTag(workflow.id)),
+                ) {
                     Text(stringResource(R.string.debug_workflow))
                 }
                 Button(
                     onClick = if (isRunning) onStop else onRun,
-                    enabled = isRunning || isReady,
+                    enabled = isRunning || isReady && !isAnotherWorkflowRunning,
+                    modifier = Modifier.testTag(workflowRunTag(workflow.id)),
                 ) {
                     Text(stringResource(if (isRunning) R.string.stop else R.string.run_action))
                 }
@@ -5697,6 +5898,14 @@ private fun WorkflowRow(
 internal const val FOLDER_MANAGE_TAG = "folder-manage"
 internal const val WORKFLOW_EDITOR_ALL_ACTIONS_TAG = "workflow-editor-all-actions"
 internal const val WORKFLOW_NAME_INPUT_TAG = "workflow-name-input"
+internal const val WORKFLOW_EDITOR_BACK_TAG = "workflow-editor-back"
+internal const val SCHEDULE_NOTIFICATION_RECOVERY_TAG = "schedule-notification-recovery"
+internal const val SCHEDULE_NOTIFICATION_SETTINGS_TAG = "schedule-notification-settings"
+internal const val RUN_HISTORY_DETAILS_SCROLL_TAG = "run-history-details-scroll"
+internal const val IMAGE_CLICK_SAVED_TEMPLATE_PREVIEW_TAG = "image-click-saved-template-preview"
+internal const val WORKFLOW_EDITOR_ADD_OPERATION_TAG = "workflow-editor-add-operation"
+internal fun workflowOperationTag(operation: WorkflowEditorOperation) =
+    "workflow-operation-${operation.name}"
 internal const val SETTINGS_PACK_INSTALL_TAG = "settings-pack-install"
 internal const val FOLDER_CREATE_TAG = "folder-create"
 internal const val FOLDER_NAME_INPUT_TAG = "folder-name-input"
@@ -5709,6 +5918,8 @@ internal fun folderFilterTag(folderId: String) = "folder-filter-$folderId"
 internal fun folderRenameTag(folderId: String) = "folder-rename-$folderId"
 internal fun folderDeleteTag(folderId: String) = "folder-delete-$folderId"
 internal fun folderMoveWorkflowTag(workflowId: String) = "folder-move-workflow-$workflowId"
+internal fun workflowRunTag(workflowId: String) = "workflow-run-$workflowId"
+internal fun workflowDebugTag(workflowId: String) = "workflow-debug-$workflowId"
 internal fun folderDestinationTag(folderId: String) = "folder-destination-$folderId"
 internal fun stepOperationTag(stepId: String, operation: String) = "step-$stepId-$operation"
 
@@ -6001,6 +6212,9 @@ internal fun PreflightReportDialog(
                                 PreflightRecoveryAction.SetUpAutomation -> stringResource(
                                     R.string.set_up_automation,
                                 )
+                                PreflightRecoveryAction.OpenNotificationSettings -> stringResource(
+                                    R.string.open_notification_settings,
+                                )
                             },
                         )
                     }
@@ -6241,7 +6455,7 @@ private fun RunHistoryScreen(
 }
 
 @Composable
-private fun RunRecordDetailsDialog(
+internal fun RunRecordDetailsDialog(
     record: RunRecord,
     destination: com.aiindexfinger.data.RunHistoryDestination?,
     onDismiss: () -> Unit,
@@ -6252,7 +6466,12 @@ private fun RunRecordDetailsDialog(
         onDismissRequest = onDismiss,
         title = { Text(record.workflowName) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .testTag(RUN_HISTORY_DETAILS_SCROLL_TAG),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(stringResource(R.string.run_history_detail_status, record.status.localizedName()))
                 Text(stringResource(R.string.run_history_detail_workflow_id, record.workflowId))
                 Text(

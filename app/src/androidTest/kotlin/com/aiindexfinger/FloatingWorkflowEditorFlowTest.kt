@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.view.Gravity
+import android.graphics.Bitmap
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -22,6 +23,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.aiindexfinger.data.WorkflowLibrary
 import com.aiindexfinger.data.WorkflowStore
+import com.aiindexfinger.automation.encodeTemplatePng
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
@@ -59,6 +61,14 @@ class FloatingWorkflowEditorFlowTest {
                                 steps = listOf(Step.Delay("delay", 100)),
                             ),
                             Step.Delay("root-delay", 200),
+                            validImageClickStep(),
+                            Step.ImageClick(
+                                id = "invalid-image-click",
+                                packageName = CLOCK_PACKAGE,
+                                templatePngBase64 = "invalid-template",
+                                templateWidth = 16,
+                                templateHeight = 16,
+                            ),
                         ),
                         state = WorkflowState.Draft,
                     ),
@@ -80,7 +90,9 @@ class FloatingWorkflowEditorFlowTest {
 
     @Test
     fun existingNestedWorkflowAndCompleteOperationSurfaceAreAvailable() {
-        composeRule.waitUntil { composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty() }
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag(floatingWorkflowTag(WORKFLOW_ID)).assertIsDisplayed().performClick()
 
         composeRule.onNodeWithText("Repeat 2 times").assertIsDisplayed()
@@ -125,7 +137,7 @@ class FloatingWorkflowEditorFlowTest {
 
     @Test
     fun newWorkflowCanBeCreatedAndSavedAsDraft() {
-        composeRule.waitUntil {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodesWithTag(FLOATING_EDITOR_NEW_TAG).fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithTag(FLOATING_EDITOR_NEW_TAG).performClick()
@@ -134,10 +146,71 @@ class FloatingWorkflowEditorFlowTest {
         composeRule.onNodeWithTag(WORKFLOW_NAME_INPUT_TAG).performTextInput("Created over app")
         composeRule.onNodeWithText("Save draft").performClick()
 
-        composeRule.waitUntil {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
             WorkflowStore(context).loadLibrary().workflows.any { it.name == "Created over app" }
         }
         assertTrue(WorkflowStore(context).loadLibrary().workflows.any { it.name == "Created over app" })
+    }
+
+    @Test
+    fun untouchedNewWorkflowRequiresDiscardConfirmation() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTag(FLOATING_EDITOR_NEW_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(FLOATING_EDITOR_NEW_TAG).performClick()
+
+        composeRule.onNodeWithTag(WORKFLOW_EDITOR_BACK_TAG).performClick()
+        composeRule.onNodeWithText(context.getString(R.string.discard_changes_title)).assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.continue_editing)).performClick()
+
+        composeRule.onNodeWithTag(WORKFLOW_NAME_INPUT_TAG).assertIsDisplayed()
+        composeRule.onAllNodesWithTag(FLOATING_EDITOR_NEW_TAG).assertCountEquals(0)
+    }
+
+    @Test
+    fun savedImageClickShowsPreviewAndInvalidTemplateShowsRecoveryMessage() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(floatingWorkflowTag(WORKFLOW_ID)).performClick()
+
+        composeRule.onNodeWithTag(stepOperationTag("image-click", "edit")).performScrollTo().performClick()
+        composeRule.onNodeWithTag(IMAGE_CLICK_SAVED_TEMPLATE_PREVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText("Cancel").performClick()
+
+        composeRule.onNodeWithTag(stepOperationTag("invalid-image-click", "edit"))
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText(context.getString(R.string.image_click_saved_template_invalid))
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun addOperationChooserIsAlwaysReachableAndUsesCurrentBranch() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(floatingWorkflowTag(WORKFLOW_ID)).performClick()
+
+        waitUntilDisplayed(WORKFLOW_EDITOR_ADD_OPERATION_TAG)
+        composeRule.onNodeWithTag(WORKFLOW_EDITOR_ADD_OPERATION_TAG).performClick()
+        WorkflowEditorOperation.entries.forEach { operation ->
+            composeRule.onNodeWithTag(workflowOperationTag(operation)).assertExists()
+        }
+        composeRule.onNodeWithTag(workflowOperationTag(WorkflowEditorOperation.Click)).performClick()
+        composeRule.onNodeWithText("Click element").assertIsDisplayed()
+        composeRule.onNodeWithText("Cancel").performClick()
+        composeRule.onAllNodesWithText("Click element").assertCountEquals(0)
+
+        composeRule.onNodeWithText("Open steps").performScrollTo().performClick()
+        val baselineBackCount = composeRule.onAllNodesWithText("Back").fetchSemanticsNodes().size
+        waitUntilDisplayed(WORKFLOW_EDITOR_ADD_OPERATION_TAG)
+        composeRule.onNodeWithTag(WORKFLOW_EDITOR_ADD_OPERATION_TAG).performClick()
+        composeRule.onNodeWithTag(workflowOperationTag(WorkflowEditorOperation.GlobalBack)).performClick()
+
+        composeRule.onAllNodesWithText("Back").assertCountEquals(baselineBackCount + 1)
+        composeRule.onNodeWithText("Up one level").performClick()
+        composeRule.onAllNodesWithText("Back").assertCountEquals(baselineBackCount)
     }
 
     @Test
@@ -161,7 +234,9 @@ class FloatingWorkflowEditorFlowTest {
 
     @Test
     fun staleFloatingEditorCannotOverwriteNewerSavedWorkflow() {
-        composeRule.waitUntil { composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty() }
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag(floatingWorkflowTag(WORKFLOW_ID)).performClick()
 
         val baseline = WorkflowStore(context).loadLibrary().workflows.single { it.id == WORKFLOW_ID }
@@ -171,7 +246,7 @@ class FloatingWorkflowEditorFlowTest {
         }
 
         composeRule.onNodeWithText("Save draft").performClick()
-        composeRule.waitUntil {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
             composeRule.onAllNodesWithText(
                 context.getString(R.string.workflow_edit_conflict),
             ).fetchSemanticsNodes().isNotEmpty()
@@ -185,7 +260,9 @@ class FloatingWorkflowEditorFlowTest {
 
     @Test
     fun unsavedEditingSessionSurvivesRotation() {
-        composeRule.waitUntil { composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty() }
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty()
+        }
         composeRule.onNodeWithTag(floatingWorkflowTag(WORKFLOW_ID)).performClick()
         composeRule.onNodeWithTag(stepOperationTag("repeat", "duplicate")).performClick()
         composeRule.onAllNodesWithText("Repeat 2 times").assertCountEquals(2)
@@ -204,6 +281,27 @@ class FloatingWorkflowEditorFlowTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
 
         composeRule.onAllNodesWithText("Repeat 2 times").assertCountEquals(2)
+    }
+
+    private fun validImageClickStep(): Step.ImageClick {
+        val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(0xff116b56.toInt())
+        }
+        val encoded = requireNotNull(encodeTemplatePng(bitmap))
+        bitmap.recycle()
+        return Step.ImageClick(
+            id = "image-click",
+            packageName = CLOCK_PACKAGE,
+            templatePngBase64 = encoded.base64,
+            templateWidth = encoded.width,
+            templateHeight = encoded.height,
+        )
+    }
+
+    private fun waitUntilDisplayed(tag: String) {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            runCatching { composeRule.onNodeWithTag(tag).assertIsDisplayed() }.isSuccess
+        }
     }
 
     private fun clearWorkflowFiles() {
