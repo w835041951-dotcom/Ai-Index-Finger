@@ -150,6 +150,21 @@ class OverlayActionFactoryTest {
     }
 
     @Test
+    fun lateSensitiveClassificationDiscardsOnlyActiveTextBurst() {
+        val session = RecordedClickSession(capacity = 4)
+        val selector = NodeSelector("com.example", viewId = "com.example:id/input")
+        session.start()
+        session.recordStep(Step.Delay("before", 10))
+        session.recordOrReplaceText("input", Step.InputText("secret", selector, "transitional"))
+
+        session.discardActiveTextBurst()
+        session.recordStep(Step.Delay("after", 10))
+
+        val actions = session.finish().actions.map { (it as RecordedAction.ExistingStep).step }
+        assertEquals(listOf("before", "after"), actions.map(Step::id))
+    }
+
+    @Test
     fun mixedRecordedActionsPreserveTheirExactOrder() {
         val session = RecordedClickSession(capacity = 8)
         val selector = NodeSelector("com.example", viewId = "com.example:id/action")

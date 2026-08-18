@@ -182,7 +182,7 @@ class WorkflowSerializationTest {
     }
 
     @Test
-    fun `round trips image click and defaults schema 17 scale tolerance`() {
+    fun `round trips image click and defaults legacy matching and click settings`() {
         val imageClick = Step.ImageClick(
             id = "image",
             packageName = "com.example.target",
@@ -194,6 +194,8 @@ class WorkflowSerializationTest {
             scaleTolerancePermille = 100,
             timeoutMillis = 4_000,
             failurePolicy = FailurePolicy.Continue,
+            templateClickX = 7,
+            templateClickY = 11,
         )
         val workflow = Workflow(id = "image-workflow", name = "Image", steps = listOf(imageClick))
         val legacyJson = """{"schemaVersion":17,"id":"legacy","name":"Legacy","steps":[{"type":"image_click","id":"image","packageName":"com.example","templatePngBase64":"aGVsbG8=","templateWidth":24,"templateHeight":24,"minimumScorePermille":920,"ambiguityMarginPermille":25,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
@@ -204,7 +206,10 @@ class WorkflowSerializationTest {
         )
         val legacy = json.decodeFromString(Workflow.serializer(), legacyJson)
         assertEquals(17, legacy.schemaVersion)
-        assertEquals(0, (legacy.steps.single() as Step.ImageClick).scaleTolerancePermille)
+        val legacyImageClick = legacy.steps.single() as Step.ImageClick
+        assertEquals(0, legacyImageClick.scaleTolerancePermille)
+        assertEquals(null, legacyImageClick.templateClickX)
+        assertEquals(null, legacyImageClick.templateClickY)
     }
 
     @Test
@@ -217,6 +222,27 @@ class WorkflowSerializationTest {
         }
         assertFailsWith<IllegalArgumentException> {
             Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, scaleTolerancePermille = 25)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick(
+                "image",
+                "com.example",
+                "aGVsbG8=",
+                24,
+                24,
+                templateClickX = 8,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick(
+                "image",
+                "com.example",
+                "aGVsbG8=",
+                24,
+                24,
+                templateClickX = 24,
+                templateClickY = 8,
+            )
         }
     }
 }

@@ -5,6 +5,31 @@ import org.junit.Test
 
 class LaunchableAppCatalogTest {
     @Test
+    fun normalizedLaunchTargetTrimsImportedPackageAndAction() {
+        assertEquals(
+            LaunchTargetSpec("com.example", "example.OPEN"),
+            normalizedLaunchTarget(" com.example ", " example.OPEN "),
+        )
+        assertEquals(
+            LaunchTargetSpec("com.example", null),
+            normalizedLaunchTarget(" com.example ", "   "),
+        )
+        assertEquals(null, normalizedLaunchTarget("   ", "example.OPEN"))
+    }
+
+    @Test
+    fun launchStrategyKeepsPackageManagersExplicitFrontDoor() {
+        assertEquals(
+            LaunchIntentStrategy.PackageManagerFrontDoor,
+            launchIntentStrategy(LaunchTargetSpec("com.example", null)),
+        )
+        assertEquals(
+            LaunchIntentStrategy.PackageScopedAction("example.OPEN"),
+            launchIntentStrategy(LaunchTargetSpec("com.example", "example.OPEN")),
+        )
+    }
+
+    @Test
     fun appChooserUsesCaseInsensitiveLabelsWithDeterministicTieBreakers() {
         val stored = listOf(
             LaunchableApp("Zulu", "com.example.zulu"),

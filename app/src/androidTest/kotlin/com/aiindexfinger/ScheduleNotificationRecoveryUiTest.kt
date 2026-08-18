@@ -56,6 +56,32 @@ class ScheduleNotificationRecoveryUiTest {
     }
 
     @Test
+    fun deniedRunOffersWorkflowControlNotificationSettings() {
+        var settingsRequests = 0
+        var dismissed = false
+        composeRule.setContent {
+            MaterialTheme {
+                RunNotificationRecoveryDialog(
+                    onOpenSettings = { settingsRequests += 1 },
+                    onDismiss = { dismissed = true },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(context.getString(R.string.run_notifications_blocked_title))
+            .assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.run_notifications_blocked))
+            .assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.open_notification_settings))
+            .performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(1, settingsRequests)
+            assertTrue(!dismissed)
+        }
+    }
+
+    @Test
     fun preflightShowsChannelBlockAndNotificationRecoveryAction() {
         val workflow = Workflow(
             id = "notification-preflight",

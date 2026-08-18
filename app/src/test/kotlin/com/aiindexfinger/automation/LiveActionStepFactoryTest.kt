@@ -20,6 +20,8 @@ class LiveActionStepFactoryTest {
             templatePngBase64 = "template",
             templateWidth = 24,
             templateHeight = 18,
+            templateClickX = 7,
+            templateClickY = 11,
         ).toStep("step-b") as Step.ImageClick
 
         assertEquals("step-b", step.id)
@@ -27,7 +29,10 @@ class LiveActionStepFactoryTest {
         assertEquals("template", step.templatePngBase64)
         assertEquals(24, step.templateWidth)
         assertEquals(18, step.templateHeight)
+        assertEquals(7, step.templateClickX)
+        assertEquals(11, step.templateClickY)
         assertEquals(920, step.minimumScorePermille)
         assertEquals(25, step.ambiguityMarginPermille)
+        assertEquals(0, step.scaleTolerancePermille)
     }
 }

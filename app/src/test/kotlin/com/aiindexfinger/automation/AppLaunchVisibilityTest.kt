@@ -3,7 +3,6 @@ package com.aiindexfinger.automation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,7 +18,6 @@ class AppLaunchVisibilityTest {
                 assertEquals("com.example.target", packageName)
                 ++checks == 3
             },
-            maxChecks = 5,
             pollIntervalMillis = 0,
         )
 
@@ -28,18 +26,17 @@ class AppLaunchVisibilityTest {
     }
 
     @Test
-    fun returnsFalseWhenTheTargetPackageNeverBecomesVisible() = runBlocking {
+    fun continuesBeyondThePreviousFixedDeadline() = runBlocking {
         var checks = 0
 
         val visible = awaitTargetPackageVisible(
             packageName = "com.example.target",
-            isVisible = { checks++; false },
-            maxChecks = 3,
+            isVisible = { ++checks == 51 },
             pollIntervalMillis = 0,
         )
 
-        assertFalse(visible)
-        assertEquals(3, checks)
+        assertTrue(visible)
+        assertEquals(51, checks)
     }
 
     @Test
@@ -49,7 +46,6 @@ class AppLaunchVisibilityTest {
                 awaitTargetPackageVisible(
                     packageName = "com.example.target",
                     isVisible = { throw CancellationException("cancelled") },
-                    maxChecks = 3,
                     pollIntervalMillis = 0,
                 )
             }

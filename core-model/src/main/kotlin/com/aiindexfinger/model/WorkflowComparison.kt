@@ -163,6 +163,8 @@ private fun Step.comparisonConfiguration(): Any = when (this) {
         minimumScorePermille,
         ambiguityMarginPermille,
         scaleTolerancePermille,
+        templateClickX,
+        templateClickY,
         timeoutMillis,
         failurePolicy,
     )

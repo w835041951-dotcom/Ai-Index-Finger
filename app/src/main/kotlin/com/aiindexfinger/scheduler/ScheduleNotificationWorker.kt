@@ -12,26 +12,47 @@ import android.net.Uri
 import android.provider.Settings
 import java.nio.charset.StandardCharsets
 import java.util.Base64
-import androidx.work.Worker
+import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.aiindexfinger.MainActivity
 import com.aiindexfinger.R
+import com.aiindexfinger.data.WorkflowLoadResult
+import com.aiindexfinger.data.WorkflowStore
+import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.isReadyToRun
 
 class ScheduleNotificationWorker(
     appContext: Context,
     workerParameters: WorkerParameters,
-) : Worker(appContext, workerParameters) {
-    override fun doWork(): Result {
+) : CoroutineWorker(appContext, workerParameters) {
+    override suspend fun doWork(): Result {
         val workflowId = inputData.getString(KEY_WORKFLOW_ID) ?: return Result.failure()
         val scheduledAtMillis = inputData.getLong(KEY_SCHEDULED_AT_MILLIS, Long.MIN_VALUE)
         if (scheduledAtMillis == Long.MIN_VALUE) return Result.failure()
-        val workflowName = inputData.getString(KEY_WORKFLOW_NAME)
-            ?: applicationContext.getString(R.string.scheduled_workflow_fallback_name)
+        val occurrenceId = inputData.getString(KEY_OCCURRENCE_ID)
+        val runnableWorkflows = loadRunnableWorkflows() ?: return Result.failure()
+        if (runnableWorkflows.none { it.id == workflowId }) {
+            return try {
+                WorkflowScheduler(applicationContext).discardOccurrence(
+                    workflowId,
+                    scheduledAtMillis,
+                    occurrenceId,
+                )
+                Result.success()
+            } catch (_: ScheduleStorageException) {
+                Result.failure()
+            }
+        }
 
         val notificationManager = ensureScheduleNotificationChannel(applicationContext)
         if (scheduleNotificationReadiness(applicationContext) != ScheduleNotificationReadiness.Ready) {
             try {
-                WorkflowScheduler(applicationContext).missOccurrence(workflowId, scheduledAtMillis)
+                WorkflowScheduler(applicationContext).missOccurrence(
+                    workflowId,
+                    scheduledAtMillis,
+                    ScheduleWorkOrigin.RunningWorker,
+                    occurrenceId,
+                )
             } catch (_: ScheduleStorageException) {
                 return Result.failure()
             }
@@ -39,11 +60,21 @@ class ScheduleNotificationWorker(
         }
 
         val completion = try {
-            WorkflowScheduler(applicationContext).completeOccurrence(workflowId, scheduledAtMillis)
+            WorkflowScheduler(applicationContext).completeOccurrence(
+                workflowId,
+                scheduledAtMillis,
+                ScheduleWorkOrigin.RunningWorker,
+                occurrenceId,
+            )
         } catch (_: ScheduleStorageException) {
             return Result.failure()
         }
         if (!completion.accepted) return Result.success()
+        val workflowBeforeNotification = workflowForScheduledNotification(
+            workflowId,
+            loadRunnableWorkflows(),
+        )
+            ?: return Result.success()
 
         val openAppIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -59,23 +90,47 @@ class ScheduleNotificationWorker(
         val notification = android.app.Notification.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(applicationContext.getString(R.string.schedule_notification_title))
-            .setContentText(applicationContext.getString(R.string.schedule_notification_text, workflowName))
+            .setContentText(
+                applicationContext.getString(
+                    R.string.schedule_notification_text,
+                    workflowBeforeNotification.name,
+                ),
+            )
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
+            .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
             .build()
         notificationManager.notify(workflowId, SCHEDULE_NOTIFICATION_ID, notification)
         return Result.success()
     }
 
+    private fun loadRunnableWorkflows(): List<Workflow>? = runCatching {
+        runnableWorkflowsForScheduling(WorkflowStore(applicationContext).loadDetailed())
+    }.getOrNull()
+
     companion object {
         const val KEY_WORKFLOW_ID = "workflow_id"
-        const val KEY_WORKFLOW_NAME = "workflow_name"
         const val KEY_SCHEDULED_AT_MILLIS = "scheduled_at_millis"
+        const val KEY_OCCURRENCE_ID = "occurrence_id"
         const val EXTRA_WORKFLOW_ID = "scheduled_workflow_id"
         internal const val CHANNEL_ID = "workflow_schedules"
         private const val SCHEDULE_NOTIFICATION_ID = 1
     }
 }
+
+internal fun runnableWorkflowsForScheduling(result: WorkflowLoadResult): List<Workflow>? = when (result) {
+    WorkflowLoadResult.Missing -> emptyList()
+    is WorkflowLoadResult.Loaded -> result.workflows.filter(Workflow::isReadyToRun)
+    is WorkflowLoadResult.RecoveredFromBackup -> result.workflows.filter(Workflow::isReadyToRun)
+    is WorkflowLoadResult.Corrupt,
+    is WorkflowLoadResult.UnsupportedVersion,
+    -> null
+}
+
+internal fun workflowForScheduledNotification(
+    workflowId: String,
+    runnableWorkflows: List<Workflow>?,
+): Workflow? = runnableWorkflows?.firstOrNull { it.id == workflowId }
 
 internal fun ensureScheduleNotificationChannel(context: Context): NotificationManager =
     context.getSystemService(NotificationManager::class.java).also { notificationManager ->
@@ -136,7 +191,6 @@ internal fun openScheduleNotificationSettings(
         listOf(intent.action, intent.dataString, intent.getStringExtra(Settings.EXTRA_CHANNEL_ID))
     }
     return intents.any { intent ->
-        if (intent.resolveActivity(context.packageManager) == null) return@any false
         if (context !is android.app.Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { context.startActivity(intent) }.isSuccess
     }

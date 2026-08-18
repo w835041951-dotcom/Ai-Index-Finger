@@ -10,6 +10,7 @@ import org.junit.Test
 
 class ScheduleCompletionTest {
     private val utc = ZoneId.of("UTC")
+    private val newYork = ZoneId.of("America/New_York")
 
     @Test
     fun `once completion removes the schedule`() {
@@ -42,6 +43,36 @@ class ScheduleCompletionTest {
             Instant.parse("2025-01-04T09:00:00Z").toEpochMilli(),
             completion.nextSchedule?.scheduledAtMillis,
         )
+        assertEquals(9 * 60, completion.nextSchedule?.recurrenceLocalTimeMinutes)
+    }
+
+    @Test
+    fun `daily completion returns to its local anchor after a daylight saving gap`() {
+        val first = Instant.parse("2025-03-08T07:30:00Z").toEpochMilli()
+        val schedule = WorkflowSchedule(
+            "id",
+            "Name",
+            first,
+            recurrence = ScheduleRecurrence.Daily,
+            recurrenceLocalTimeMinutes = 2 * 60 + 30,
+        )
+
+        val gapDay = requireNotNull(
+            completeScheduleOccurrence(listOf(schedule), "id", first, first, newYork).nextSchedule,
+        )
+        val followingDay = completeScheduleOccurrence(
+            listOf(gapDay),
+            "id",
+            gapDay.scheduledAtMillis,
+            gapDay.scheduledAtMillis,
+            newYork,
+        ).nextSchedule
+
+        assertEquals(Instant.parse("2025-03-09T07:30:00Z").toEpochMilli(), gapDay.scheduledAtMillis)
+        assertEquals(
+            Instant.parse("2025-03-10T06:30:00Z").toEpochMilli(),
+            followingDay?.scheduledAtMillis,
+        )
     }
 
     @Test
@@ -50,6 +81,66 @@ class ScheduleCompletionTest {
 
         assertFalse(completion.accepted)
         assertEquals(emptyList<WorkflowSchedule>(), completion.schedules)
+    }
+
+    @Test
+    fun `discard removes only the exact stale pending occurrence`() {
+        val stale = WorkflowSchedule("id", "Stale", 100, occurrenceId = "old")
+
+        val discarded = discardScheduleOccurrence(listOf(stale), "id", 100, "old")
+        val replacement = WorkflowSchedule("id", "Replacement", 100, occurrenceId = "new")
+        val staleWorker = discardScheduleOccurrence(listOf(replacement), "id", 100, "old")
+        val missed = stale.copy(status = ScheduleStatus.Missed)
+        val missedWorker = discardScheduleOccurrence(listOf(missed), "id", 100, "old")
+
+        assertTrue(discarded.accepted)
+        assertEquals(emptyList<WorkflowSchedule>(), discarded.schedules)
+        assertFalse(staleWorker.accepted)
+        assertEquals(listOf(replacement), staleWorker.schedules)
+        assertFalse(missedWorker.accepted)
+        assertEquals(listOf(missed), missedWorker.schedules)
+    }
+
+    @Test
+    fun `completion rejects same-time replacement with a different occurrence ID`() {
+        val replacement = WorkflowSchedule("id", "Replacement", 100, occurrenceId = "new")
+
+        val completion = completeScheduleOccurrence(
+            listOf(replacement),
+            "id",
+            100,
+            100,
+            utc,
+            expectedOccurrenceId = "old",
+            nextOccurrenceId = "next",
+        )
+
+        assertFalse(completion.accepted)
+        assertEquals(listOf(replacement), completion.schedules)
+    }
+
+    @Test
+    fun `recurring completion advances occurrence identity`() {
+        val current = WorkflowSchedule(
+            "id",
+            "Current",
+            100,
+            recurrence = ScheduleRecurrence.Daily,
+            occurrenceId = "old",
+        )
+
+        val completion = completeScheduleOccurrence(
+            listOf(current),
+            "id",
+            100,
+            100,
+            utc,
+            expectedOccurrenceId = "old",
+            nextOccurrenceId = "next",
+        )
+
+        assertTrue(completion.accepted)
+        assertEquals("next", completion.nextSchedule?.occurrenceId)
     }
 
     @Test

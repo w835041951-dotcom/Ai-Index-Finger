@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -24,6 +26,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.aiindexfinger.data.WorkflowLibrary
 import com.aiindexfinger.data.WorkflowStore
 import com.aiindexfinger.automation.encodeTemplatePng
+import com.aiindexfinger.automation.AutomationAccessibilityService
+import com.aiindexfinger.automation.ScreenBounds
+import com.aiindexfinger.automation.ScreenCaptureState
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
@@ -132,7 +137,9 @@ class FloatingWorkflowEditorFlowTest {
         ).forEach { label ->
             composeRule.onNodeWithText(label).performScrollTo().assertIsDisplayed()
         }
-        composeRule.onAllNodesWithText("Back")[1].performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.system_action_back))
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test
@@ -176,6 +183,27 @@ class FloatingWorkflowEditorFlowTest {
 
         composeRule.onNodeWithTag(stepOperationTag("image-click", "edit")).performScrollTo().performClick()
         composeRule.onNodeWithTag(IMAGE_CLICK_SAVED_TEMPLATE_PREVIEW_TAG).assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.image_click_point_x)).assertExists()
+        composeRule.onNodeWithText(context.getString(R.string.image_click_point_y)).assertExists()
+        composeRule.onNodeWithText(context.getString(R.string.image_click_point_selected, 3, 11))
+            .assertIsDisplayed()
+
+        val replacementBitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        composeRule.runOnIdle {
+            AutomationAccessibilityService.screenCaptureState.value = ScreenCaptureState.Ready(
+                bitmap = replacementBitmap,
+                nodes = emptyList(),
+                screenBounds = ScreenBounds(0, 0, 16, 16),
+                targetPackage = CLOCK_PACKAGE,
+                targetBounds = listOf(ScreenBounds(0, 0, 16, 16)),
+            )
+        }
+        composeRule.onNodeWithText(context.getString(R.string.save)).assertIsNotEnabled()
+
+        composeRule.runOnIdle { AutomationAccessibilityService.discardScreenCapture() }
+        composeRule.onNodeWithText(context.getString(R.string.image_click_point_selected, 3, 11))
+            .assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.save)).assertIsEnabled()
         composeRule.onNodeWithText("Cancel").performClick()
 
         composeRule.onNodeWithTag(stepOperationTag("invalid-image-click", "edit"))
@@ -203,14 +231,37 @@ class FloatingWorkflowEditorFlowTest {
         composeRule.onAllNodesWithText("Click element").assertCountEquals(0)
 
         composeRule.onNodeWithText("Open steps").performScrollTo().performClick()
-        val baselineBackCount = composeRule.onAllNodesWithText("Back").fetchSemanticsNodes().size
+        val systemBack = context.getString(R.string.system_action_back)
+        val baselineBackCount = composeRule.onAllNodesWithText(systemBack).fetchSemanticsNodes().size
         waitUntilDisplayed(WORKFLOW_EDITOR_ADD_OPERATION_TAG)
         composeRule.onNodeWithTag(WORKFLOW_EDITOR_ADD_OPERATION_TAG).performClick()
         composeRule.onNodeWithTag(workflowOperationTag(WorkflowEditorOperation.GlobalBack)).performClick()
 
-        composeRule.onAllNodesWithText("Back").assertCountEquals(baselineBackCount + 1)
+        composeRule.onAllNodesWithText(systemBack).assertCountEquals(baselineBackCount + 1)
         composeRule.onNodeWithText("Up one level").performClick()
-        composeRule.onAllNodesWithText("Back").assertCountEquals(baselineBackCount)
+        composeRule.onAllNodesWithText(systemBack).assertCountEquals(baselineBackCount)
+    }
+
+    @Test
+    fun wrappingActionExposesTheSelectedStep() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithText(WORKFLOW_NAME).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(floatingWorkflowTag(WORKFLOW_ID)).performClick()
+        waitUntilDisplayed(WORKFLOW_EDITOR_ADD_OPERATION_TAG)
+        composeRule.onNodeWithTag(WORKFLOW_EDITOR_ADD_OPERATION_TAG).performClick()
+        composeRule.onNodeWithTag(workflowOperationTag(WorkflowEditorOperation.Repeat)).performClick()
+
+        composeRule.onNodeWithText(
+            context.getString(
+                R.string.numbered_step_label,
+                1,
+                context.resources.getQuantityString(R.plurals.step_repeat, 2, 2),
+            ),
+        )
+            .performClick()
+            .assertIsSelected()
+        composeRule.onNodeWithText(context.getString(R.string.cancel)).performClick()
     }
 
     @Test
@@ -295,6 +346,8 @@ class FloatingWorkflowEditorFlowTest {
             templatePngBase64 = encoded.base64,
             templateWidth = encoded.width,
             templateHeight = encoded.height,
+            templateClickX = 3,
+            templateClickY = 11,
         )
     }
 

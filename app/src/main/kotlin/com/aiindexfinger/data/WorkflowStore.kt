@@ -9,6 +9,8 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -87,15 +89,20 @@ internal class WorkflowFileStore(
     fun loadLibrary(): WorkflowLibrary = loadDetailed().library
 
     fun loadDetailed(): WorkflowLoadResult {
+        cleanupTemporaryFiles()
         val primary = decode(file)
+        if (primary is DecodeResult.Unsupported) {
+            return WorkflowLoadResult.UnsupportedVersion(primary.version)
+        }
         if (primary is DecodeResult.Success) {
-            return primary.unsupportedVersion?.let(WorkflowLoadResult::UnsupportedVersion)
-                ?: WorkflowLoadResult.Loaded(primary.library)
+            return WorkflowLoadResult.Loaded(primary.library)
         }
 
         val backup = decode(backupFile)
+        if (backup is DecodeResult.Unsupported) {
+            return WorkflowLoadResult.UnsupportedVersion(backup.version)
+        }
         if (backup is DecodeResult.Success) {
-            backup.unsupportedVersion?.let { return WorkflowLoadResult.UnsupportedVersion(it) }
             return WorkflowLoadResult.RecoveredFromBackup(backup.library)
         }
         if (primary is DecodeResult.Missing && backup is DecodeResult.Missing) {
@@ -105,6 +112,22 @@ internal class WorkflowFileStore(
             primaryError = (primary as? DecodeResult.Failure)?.error,
             backupError = (backup as? DecodeResult.Failure)?.error,
         )
+    }
+
+    private fun cleanupTemporaryFiles() {
+        AtomicFileWriter.cleanupTemporary(file)
+        AtomicFileWriter.cleanupTemporary(backupFile)
+        versionsDirectory.listFiles { candidate -> candidate.isDirectory }.orEmpty()
+            .flatMap { directory ->
+                directory.listFiles { candidate ->
+                    candidate.isFile && candidate.name.endsWith(".$VERSION_FILE_EXTENSION.tmp")
+                }.orEmpty().asList()
+            }
+            .forEach { temporaryFile ->
+                AtomicFileWriter.cleanupTemporary(
+                    File(temporaryFile.parentFile, temporaryFile.name.removeSuffix(".tmp")),
+                )
+            }
     }
 
     fun save(workflows: List<Workflow>) {
@@ -122,16 +145,34 @@ internal class WorkflowFileStore(
             "Workflow library format is newer than this app supports"
         }
         val normalizedLibrary = library.normalized()
+        requireUniqueLibraryIds(normalizedLibrary)
+        normalizedLibrary.workflows.forEach { workflow ->
+            require(WorkflowValidator.structuralIssues(workflow).isEmpty()) {
+                "Workflow structure is unsafe"
+            }
+        }
         normalizedLibrary.workflows.filter { it.state == WorkflowState.Ready }.forEach { workflow ->
             val issue = WorkflowValidator.validate(workflow).firstOrNull()
             require(issue == null) { issue?.code?.name ?: "Invalid ready workflow" }
         }
         val previousById = loadResult.workflows.associateBy(Workflow::id)
         val incomingById = normalizedLibrary.workflows.associateBy(Workflow::id)
+        val removedWorkflowIds = previousById.keys - incomingById.keys
         previousById.forEach { (workflowId, previous) ->
-            if (incomingById[workflowId] != previous) snapshot(previous)
+            if (workflowId !in removedWorkflowIds && incomingById[workflowId] != previous) {
+                snapshot(previous)
+            }
         }
-        writeLibrary(normalizedLibrary)
+        removedWorkflowIds.forEach { workflowId ->
+            check(versionDirectory(workflowId).deleteRecursively()) {
+                "Workflow version history could not be deleted"
+            }
+        }
+        val sanitizedBackup = loadResult.library.takeIf { removedWorkflowIds.isNotEmpty() }?.copy(
+            workflows = loadResult.workflows.filterNot { it.id in removedWorkflowIds },
+            workflowFolderIds = loadResult.library.workflowFolderIds - removedWorkflowIds,
+        )?.normalized()
+        writeLibrary(normalizedLibrary, sanitizedBackup)
     }
 
     fun listVersions(workflowId: String): List<WorkflowVersion> = versionDirectory(workflowId)
@@ -171,9 +212,21 @@ internal class WorkflowFileStore(
         return restored
     }
 
-    private fun writeLibrary(library: WorkflowLibrary) {
+    private fun writeLibrary(library: WorkflowLibrary, backupLibrary: WorkflowLibrary? = null) {
         val content = json.encodeToString(WorkflowLibrary.serializer(), library)
-        if (decode(file) is DecodeResult.Success) {
+        require(content.toByteArray(Charsets.UTF_8).size <= MAX_LIBRARY_BYTES) {
+            "Workflow library is too large"
+        }
+        if (backupLibrary != null) {
+            val backupContent = json.encodeToString(WorkflowLibrary.serializer(), backupLibrary)
+            require(backupContent.toByteArray(Charsets.UTF_8).size <= MAX_LIBRARY_BYTES) {
+                "Workflow backup is too large"
+            }
+            AtomicFileWriter.write(
+                backupFile,
+                backupContent,
+            )
+        } else if (decode(file) is DecodeResult.Success) {
             Files.copy(file.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
         AtomicFileWriter.write(file, content)
@@ -189,9 +242,13 @@ internal class WorkflowFileStore(
             ?: 0
         val versionId = "$timestamp-$sequence"
         val version = WorkflowVersion(versionId, timestamp, workflow)
+        val content = json.encodeToString(WorkflowVersion.serializer(), version)
+        require(content.toByteArray(Charsets.UTF_8).size <= MAX_VERSION_BYTES) {
+            "Workflow version is too large"
+        }
         AtomicFileWriter.write(
             File(directory, "$versionId.$VERSION_FILE_EXTENSION"),
-            json.encodeToString(WorkflowVersion.serializer(), version),
+            content,
         )
         directory.listFiles { candidate ->
             candidate.isFile && candidate.extension == VERSION_FILE_EXTENSION
@@ -210,9 +267,12 @@ internal class WorkflowFileStore(
         return File(versionsDirectory, encodedId)
     }
 
-    private fun decodeVersion(source: File): WorkflowVersion? = runCatching {
-        json.decodeFromString(WorkflowVersion.serializer(), source.readText())
-    }.getOrNull()
+    private fun decodeVersion(source: File): WorkflowVersion? {
+        if (source.length() > MAX_VERSION_BYTES) return null
+        return runCatching {
+            json.decodeFromString(WorkflowVersion.serializer(), source.readText())
+        }.getOrNull()
+    }
 
     private fun versionTimestamp(versionId: String): Long = versionId.substringBefore('-').toLongOrNull() ?: Long.MIN_VALUE
 
@@ -220,15 +280,26 @@ internal class WorkflowFileStore(
 
     private fun decode(source: File): DecodeResult {
         if (!source.exists()) return DecodeResult.Missing
+        if (source.length() > MAX_LIBRARY_BYTES) {
+            return DecodeResult.Failure(IllegalStateException("Workflow library is too large"))
+        }
         return try {
             val root = json.parseToJsonElement(source.readText())
+            declaredUnsupportedVersion(root)?.let { return DecodeResult.Unsupported(it) }
             when (root) {
                 is JsonArray -> WorkflowLibrary(
                     workflows = json.decodeFromJsonElement(ListSerializer(Workflow.serializer()), root),
                 )
                 is JsonObject -> json.decodeFromJsonElement(WorkflowLibrary.serializer(), root)
                 else -> error("Workflow library must be a JSON array or object")
-            }.normalized().let(DecodeResult::Success)
+            }.normalized().also { library ->
+                requireUniqueLibraryIds(library)
+                require(library.workflows.all { WorkflowValidator.structuralIssues(it).isEmpty() }) {
+                    "Workflow structure is unsafe"
+                }
+            }.let(DecodeResult::Success)
+        } catch (error: StackOverflowError) {
+            DecodeResult.Failure(error)
         } catch (error: Exception) {
             DecodeResult.Failure(error)
         }
@@ -236,15 +307,34 @@ internal class WorkflowFileStore(
 
     private sealed interface DecodeResult {
         data object Missing : DecodeResult
-        data class Success(val library: WorkflowLibrary) : DecodeResult {
-            val workflows: List<Workflow> get() = library.workflows
-            val unsupportedVersion: Int?
-                get() = library.formatVersion
-                    .takeIf { it > WorkflowLibrary.CURRENT_FORMAT_VERSION }
-                    ?: workflows.maxOfOrNull(Workflow::schemaVersion)
-                        ?.takeIf { it > Workflow.CURRENT_SCHEMA_VERSION }
+        data class Unsupported(val version: Int) : DecodeResult
+        data class Success(val library: WorkflowLibrary) : DecodeResult
+        data class Failure(val error: Throwable) : DecodeResult
+    }
+
+    private fun declaredUnsupportedVersion(root: kotlinx.serialization.json.JsonElement): Int? {
+        if (root is JsonObject) {
+            root["formatVersion"]?.jsonPrimitive?.intOrNull
+                ?.takeIf { it > WorkflowLibrary.CURRENT_FORMAT_VERSION }
+                ?.let { return it }
         }
-        data class Failure(val error: Exception) : DecodeResult
+        val workflows = when (root) {
+            is JsonArray -> root
+            is JsonObject -> root["workflows"] as? JsonArray
+            else -> null
+        } ?: return null
+        return workflows.mapNotNull { element ->
+            (element as? JsonObject)?.get("schemaVersion")?.jsonPrimitive?.intOrNull
+        }.maxOrNull()?.takeIf { it > Workflow.CURRENT_SCHEMA_VERSION }
+    }
+
+    private fun requireUniqueLibraryIds(library: WorkflowLibrary) {
+        require(library.workflows.map(Workflow::id).distinct().size == library.workflows.size) {
+            "Workflow IDs must be unique"
+        }
+        require(library.folders.map(WorkflowFolder::id).distinct().size == library.folders.size) {
+            "Folder IDs must be unique"
+        }
     }
 
     private companion object {
@@ -253,5 +343,7 @@ internal class WorkflowFileStore(
         const val VERSIONS_DIRECTORY_NAME = "workflow-versions"
         const val VERSION_FILE_EXTENSION = "json"
         const val MAX_VERSIONS_PER_WORKFLOW = 5
+        const val MAX_LIBRARY_BYTES = 64L * 1024 * 1024
+        const val MAX_VERSION_BYTES = 4L * 1024 * 1024
     }
 }

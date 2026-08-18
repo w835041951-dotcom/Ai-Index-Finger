@@ -96,7 +96,7 @@ class SettingsWorkflowPackFlowTest {
                     onExportAll = {}, onExport = {},
                     onDuplicate = {}, onCompare = { _, _ -> }, onViewVersions = {}, onDelete = {},
                     onSchedule = { _, _, _ -> }, onCancelSchedule = {}, onClearRunHistory = {},
-                    onViewRunHistory = {}, onOpenSettings = {}, runningWorkflowId = null,
+                    onViewRunHistory = {}, onOpenSettings = {}, onOpenTutorial = {}, runningWorkflowId = null,
                     runMessage = null, onRun = {}, onDebug = {},
                     onPreflight = {}, onStop = {}, onOpenAccessibilitySettings = {},
                     onReviewAccessibilityDisclosure = {},

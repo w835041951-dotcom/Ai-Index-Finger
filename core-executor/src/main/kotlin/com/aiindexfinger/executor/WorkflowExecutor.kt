@@ -17,27 +17,58 @@ import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.model.evaluate
 import com.aiindexfinger.model.renderTemplate
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 interface AutomationDriver {
     suspend fun launchApp(packageName: String, intentAction: String? = null): Boolean
-    suspend fun click(selector: NodeSelector): Boolean
+    suspend fun clickNode(selector: NodeSelector): NodeActionResult
     suspend fun clickImage(step: Step.ImageClick): ImageClickResult
-    suspend fun longClick(selector: NodeSelector): Boolean
-    suspend fun tap(x: Int, y: Int): Boolean
-    suspend fun scroll(selector: NodeSelector, direction: ScrollDirection): Boolean
-    suspend fun inputText(selector: NodeSelector, text: String, method: TextInputMethod): Boolean
-    suspend fun readNodeAttribute(selector: NodeSelector, attribute: NodeAttribute): String?
-    suspend fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMillis: Long): Boolean
+    suspend fun longClickNode(selector: NodeSelector): NodeActionResult
+    suspend fun tap(x: Int, y: Int): GestureActionResult
+    suspend fun scrollNode(selector: NodeSelector, direction: ScrollDirection): NodeActionResult
+    suspend fun inputTextNode(
+        selector: NodeSelector,
+        text: String,
+        method: TextInputMethod,
+    ): NodeActionResult
+    suspend fun readNode(selector: NodeSelector, attribute: NodeAttribute): NodeReadResult
+    suspend fun swipe(
+        startX: Int,
+        startY: Int,
+        endX: Int,
+        endY: Int,
+        durationMillis: Long,
+    ): GestureActionResult
     suspend fun performSystemAction(action: SystemAction): Boolean
     suspend fun nodeExists(selector: NodeSelector): Boolean
+}
+
+enum class NodeActionResult {
+    Succeeded,
+    TargetNotFound,
+    ActionFailed,
+    ClipboardUnavailable,
+}
+
+sealed interface GestureActionResult {
+    data object Succeeded : GestureActionResult
+    data class CoordinatesOutOfBounds(
+        val displayWidth: Int,
+        val displayHeight: Int,
+    ) : GestureActionResult
+    data object ActionFailed : GestureActionResult
+}
+
+sealed interface NodeReadResult {
+    data class Value(val value: String) : NodeReadResult
+    data object TargetNotFound : NodeReadResult
+    data object AttributeMissing : NodeReadResult
 }
 
 sealed interface ImageClickResult {
@@ -86,11 +117,14 @@ enum class ExecutionErrorCode {
     TargetNotScrollable,
     AppLaunchFailed,
     TargetNotLongClickable,
+    TargetNotFound,
     UndefinedVariable,
     TextInputFailed,
     MissingNodeAttribute,
     SwipeFailed,
     TapFailed,
+    CoordinatesOutOfBounds,
+    ClipboardUnavailable,
 }
 
 data class RunExecution(
@@ -104,6 +138,8 @@ data class StepExecutionDiagnostic(
     val durationMillis: Long,
     val attemptCount: Int,
     val outcome: StepExecutionOutcome,
+    val error: ExecutionError? = null,
+    val failedStepId: String? = null,
 )
 
 enum class StepExecutionOutcome {
@@ -181,6 +217,8 @@ class WorkflowExecutor(
                     startedAtNanos = startedAtNanos,
                     attemptCount = policyResult.attemptCount,
                     outcome = policyResult.outcome,
+                    error = policyResult.error,
+                    failedStepId = policyResult.failedStepId,
                 )
             } catch (cancelled: CancellationException) {
                 context.recordDiagnostic(step, sequence, startedAtNanos, 1, StepExecutionOutcome.Cancelled)
@@ -192,6 +230,8 @@ class WorkflowExecutor(
                     startedAtNanos,
                     failure.attemptCount,
                     StepExecutionOutcome.Failed,
+                    failure.error,
+                    failure.stepId,
                 )
                 throw failure
             }
@@ -215,13 +255,22 @@ class WorkflowExecutor(
             }
             try {
                 val timeoutMillis = step.timeoutMillis ?: context.workflow.defaultStepTimeoutMillis
-                withTimeout(timeoutMillis) { executeStep(step, context) }
+                val completed = withTimeoutOrNull(timeoutMillis) {
+                    executeStep(step, context)
+                    true
+                }
+                if (completed == null) throw OwnedStepTimeout()
                 return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.Completed)
-            } catch (error: TimeoutCancellationException) {
+            } catch (error: OwnedStepTimeout) {
                 if (attempt + 1 < attempts) {
                     delay(retry?.delayMillis ?: 0)
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
-                    return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.ContinuedAfterFailure)
+                    return PolicyExecutionResult(
+                        attempt + 1,
+                        StepExecutionOutcome.ContinuedAfterFailure,
+                        ExecutionError(ExecutionErrorCode.StepTimedOut),
+                        step.id,
+                    )
                 } else {
                     throw StepFailure(
                         step.id,
@@ -233,17 +282,23 @@ class WorkflowExecutor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
+                val executionError = when (error) {
+                    is StepFailure -> error.error
+                    is ExecutionFailure -> error.error
+                    else -> ExecutionError(ExecutionErrorCode.StepFailed)
+                }
+                val failedStepId = (error as? StepFailure)?.stepId ?: step.id
                 if (attempt + 1 < attempts) {
                     delay(retry?.delayMillis ?: 0)
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
-                    return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.ContinuedAfterFailure)
+                    return PolicyExecutionResult(
+                        attempt + 1,
+                        StepExecutionOutcome.ContinuedAfterFailure,
+                        executionError,
+                        failedStepId,
+                    )
                 } else {
-                    val executionError = when (error) {
-                        is StepFailure -> error.error
-                        is ExecutionFailure -> error.error
-                        else -> ExecutionError(ExecutionErrorCode.StepFailed)
-                    }
-                    throw StepFailure(step.id, executionError, attempt + 1, error)
+                    throw StepFailure(failedStepId, executionError, attempt + 1, error)
                 }
             }
         }
@@ -252,13 +307,16 @@ class WorkflowExecutor(
 
     private suspend fun executeStep(step: Step, context: ExecutionContext) {
         when (step) {
-            is Step.Click -> requireSuccess(driver.click(step.selector), ExecutionErrorCode.TargetNotClickable)
+            is Step.Click -> requireNodeAction(
+                driver.clickNode(step.selector),
+                ExecutionErrorCode.TargetNotClickable,
+            )
             is Step.RecordedClick -> when (step.targetMode) {
-                RecordedClickTargetMode.Control -> requireSuccess(
-                    driver.click(requireNotNull(step.selector)),
+                RecordedClickTargetMode.Control -> requireNodeAction(
+                    driver.clickNode(requireNotNull(step.selector)),
                     ExecutionErrorCode.TargetNotClickable,
                 )
-                RecordedClickTargetMode.Coordinates -> requireSuccess(
+                RecordedClickTargetMode.Coordinates -> requireGestureAction(
                     driver.tap(step.x, step.y),
                     ExecutionErrorCode.TapFailed,
                 )
@@ -274,19 +332,35 @@ class WorkflowExecutor(
                 ImageClickResult.GestureFailed -> fail(ExecutionErrorCode.ImageGestureFailed)
             }
             is Step.Delay -> delay(step.durationMillis)
-            is Step.GlobalAction ->
-                requireSuccess(driver.performSystemAction(step.action), ExecutionErrorCode.SystemActionFailed)
+            is Step.GlobalAction -> if (!driver.performSystemAction(step.action)) {
+                fail(
+                    ExecutionErrorCode.SystemActionFailed,
+                    mapOf("action" to step.action.name),
+                )
+            }
             is Step.IfElse -> {
                 val branch = if (evaluate(step.condition, context)) step.whenTrue else step.whenFalse
                 executeSteps(branch, context)
             }
             is Step.Repeat -> repeat(step.times) { executeSteps(step.steps, context) }
-            is Step.Scroll ->
-                requireSuccess(driver.scroll(step.selector, step.direction), ExecutionErrorCode.TargetNotScrollable)
-            is Step.LaunchApp ->
-                requireSuccess(driver.launchApp(step.packageName, step.intentAction), ExecutionErrorCode.AppLaunchFailed)
-            is Step.LongClick ->
-                requireSuccess(driver.longClick(step.selector), ExecutionErrorCode.TargetNotLongClickable)
+            is Step.Scroll -> requireNodeAction(
+                driver.scrollNode(step.selector, step.direction),
+                ExecutionErrorCode.TargetNotScrollable,
+                mapOf("direction" to step.direction.name),
+            )
+            is Step.LaunchApp -> if (!driver.launchApp(step.packageName, step.intentAction)) {
+                fail(
+                    ExecutionErrorCode.AppLaunchFailed,
+                    buildMap {
+                        put("packageName", step.packageName)
+                        step.intentAction?.let { put("intentAction", it) }
+                    },
+                )
+            }
+            is Step.LongClick -> requireNodeAction(
+                driver.longClickNode(step.selector),
+                ExecutionErrorCode.TargetNotLongClickable,
+            )
             is Step.InputText -> {
                 val text = step.variableName?.let { variableName ->
                     context.variables[variableName]
@@ -295,33 +369,34 @@ class WorkflowExecutor(
                             mapOf("variableName" to variableName),
                         )
                 } ?: step.text
-                requireSuccess(
-                    driver.inputText(step.selector, text, step.inputMethod),
+                requireNodeAction(
+                    driver.inputTextNode(step.selector, text, step.inputMethod),
                     ExecutionErrorCode.TextInputFailed,
+                    mapOf("inputMethod" to step.inputMethod.name),
                 )
             }
             is Step.ReadNodeText -> {
-                context.variables[step.variableName] = driver.readNodeAttribute(step.selector, step.attribute)
-                    ?: fail(
+                when (val result = driver.readNode(step.selector, step.attribute)) {
+                    is NodeReadResult.Value -> context.variables[step.variableName] = result.value
+                    NodeReadResult.TargetNotFound -> fail(ExecutionErrorCode.TargetNotFound)
+                    NodeReadResult.AttributeMissing -> fail(
                         ExecutionErrorCode.MissingNodeAttribute,
                         mapOf("attribute" to step.attribute.name),
                     )
+                }
             }
             is Step.SetVariable -> context.variables[step.name] = resolve(step.value, context)
-            is Step.Swipe -> requireSuccess(
+            is Step.Swipe -> requireGestureAction(
                 driver.swipe(step.startX, step.startY, step.endX, step.endY, step.durationMillis),
                 ExecutionErrorCode.SwipeFailed,
             )
-            is Step.Tap -> requireSuccess(driver.tap(step.x, step.y), ExecutionErrorCode.TapFailed)
-            is Step.WaitForNode -> waitForNode(step, context)
+            is Step.Tap -> requireGestureAction(driver.tap(step.x, step.y), ExecutionErrorCode.TapFailed)
+            is Step.WaitForNode -> waitForNode(step)
         }
     }
 
-    private suspend fun waitForNode(step: Step.WaitForNode, context: ExecutionContext) {
-        val timeoutMillis = step.timeoutMillis ?: context.workflow.defaultStepTimeoutMillis
-        withTimeout(timeoutMillis) {
-            while (driver.nodeExists(step.selector) != step.mustExist) delay(NODE_POLL_INTERVAL_MILLIS)
-        }
+    private suspend fun waitForNode(step: Step.WaitForNode) {
+        while (driver.nodeExists(step.selector) != step.mustExist) delay(NODE_POLL_INTERVAL_MILLIS)
     }
 
     private suspend fun evaluate(condition: Condition, context: ExecutionContext): Boolean = when (condition) {
@@ -346,6 +421,33 @@ class WorkflowExecutor(
         if (!success) fail(code)
     }
 
+    private fun requireGestureAction(result: GestureActionResult, failureCode: ExecutionErrorCode) {
+        when (result) {
+            GestureActionResult.Succeeded -> Unit
+            GestureActionResult.ActionFailed -> fail(failureCode)
+            is GestureActionResult.CoordinatesOutOfBounds -> fail(
+                ExecutionErrorCode.CoordinatesOutOfBounds,
+                mapOf(
+                    "displayWidth" to result.displayWidth.toString(),
+                    "displayHeight" to result.displayHeight.toString(),
+                ),
+            )
+        }
+    }
+
+    private fun requireNodeAction(
+        result: NodeActionResult,
+        actionFailureCode: ExecutionErrorCode,
+        arguments: Map<String, String> = emptyMap(),
+    ) {
+        when (result) {
+            NodeActionResult.Succeeded -> Unit
+            NodeActionResult.TargetNotFound -> fail(ExecutionErrorCode.TargetNotFound)
+            NodeActionResult.ActionFailed -> fail(actionFailureCode, arguments)
+            NodeActionResult.ClipboardUnavailable -> fail(ExecutionErrorCode.ClipboardUnavailable)
+        }
+    }
+
     private fun fail(code: ExecutionErrorCode, arguments: Map<String, String> = emptyMap()): Nothing =
         throw ExecutionFailure(ExecutionError(code, arguments))
 
@@ -363,21 +465,44 @@ class WorkflowExecutor(
             startedAtNanos: Long,
             attemptCount: Int,
             outcome: StepExecutionOutcome,
+            error: ExecutionError? = null,
+            failedStepId: String? = null,
         ) {
-            if (diagnostics.size >= MAX_DIAGNOSTIC_EVENTS) return
-            diagnostics += StepExecutionDiagnostic(
+            val diagnostic = StepExecutionDiagnostic(
                 sequence = sequence,
                 stepId = step.id,
                 durationMillis = ((nanoTime() - startedAtNanos).coerceAtLeast(0) / 1_000_000),
                 attemptCount = attemptCount,
                 outcome = outcome,
+                error = error,
+                failedStepId = failedStepId,
             )
+            if (diagnostics.size < MAX_DIAGNOSTIC_EVENTS) {
+                diagnostics += diagnostic
+                return
+            }
+            val incomingPriority = diagnosticPriority(outcome)
+            val replaceIndex = diagnostics.indices
+                .filter { diagnosticPriority(diagnostics[it].outcome) < incomingPriority }
+                .maxByOrNull { it }
+            if (replaceIndex != null) {
+                diagnostics[replaceIndex] = diagnostic
+            }
+        }
+
+        private fun diagnosticPriority(outcome: StepExecutionOutcome): Int = when (outcome) {
+            StepExecutionOutcome.Completed -> 0
+            StepExecutionOutcome.ContinuedAfterFailure -> 1
+            StepExecutionOutcome.Failed,
+            StepExecutionOutcome.Cancelled -> 2
         }
     }
 
     private data class PolicyExecutionResult(
         val attemptCount: Int,
         val outcome: StepExecutionOutcome,
+        val error: ExecutionError? = null,
+        val failedStepId: String? = null,
     )
 
     private class StepFailure(
@@ -391,6 +516,8 @@ class WorkflowExecutor(
     }
 
     private class ExecutionFailure(val error: ExecutionError) : IllegalStateException(error.code.name)
+
+    private class OwnedStepTimeout : Exception()
 
     private companion object {
         const val NODE_POLL_INTERVAL_MILLIS = 100L

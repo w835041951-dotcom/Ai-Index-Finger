@@ -422,6 +422,127 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `driver backed actions report specific failure codes`() = runTest {
+        val cases = listOf(
+            Triple(Step.Click("click", selector), FakeDriver(clickResult = false), ExecutionErrorCode.TargetNotClickable),
+            Triple(
+                Step.LongClick("long-click", selector),
+                FakeDriver(longClickResult = false),
+                ExecutionErrorCode.TargetNotLongClickable,
+            ),
+            Triple(
+                Step.LaunchApp("launch", "com.example"),
+                FakeDriver(launchResult = false),
+                ExecutionErrorCode.AppLaunchFailed,
+            ),
+            Triple(
+                Step.GlobalAction("global", SystemAction.Back),
+                FakeDriver(systemActionResult = false),
+                ExecutionErrorCode.SystemActionFailed,
+            ),
+            Triple(
+                Step.Scroll("scroll", selector, ScrollDirection.Forward),
+                FakeDriver(scrollResult = false),
+                ExecutionErrorCode.TargetNotScrollable,
+            ),
+            Triple(
+                Step.InputText("input", selector, "text"),
+                FakeDriver(inputTextResult = NodeActionResult.ActionFailed),
+                ExecutionErrorCode.TextInputFailed,
+            ),
+            Triple(
+                Step.InputText(
+                    "paste-hidden",
+                    selector,
+                    "text",
+                    inputMethod = TextInputMethod.Paste,
+                ),
+                FakeDriver(inputTextResult = NodeActionResult.ClipboardUnavailable),
+                ExecutionErrorCode.ClipboardUnavailable,
+            ),
+            Triple(
+                Step.ReadNodeText("read", selector, "value", NodeAttribute.Text),
+                FakeDriver(nodeTextResult = null),
+                ExecutionErrorCode.MissingNodeAttribute,
+            ),
+            Triple(
+                Step.Swipe("swipe", 1, 2, 3, 4),
+                FakeDriver(swipeResult = GestureActionResult.ActionFailed),
+                ExecutionErrorCode.SwipeFailed,
+            ),
+            Triple(
+                Step.Tap("tap", 1, 2),
+                FakeDriver(tapResult = GestureActionResult.ActionFailed),
+                ExecutionErrorCode.TapFailed,
+            ),
+            Triple(
+                Step.Tap("tap-outside", 2_000, 3_000),
+                FakeDriver(
+                    tapResult = GestureActionResult.CoordinatesOutOfBounds(1_080, 2_400),
+                ),
+                ExecutionErrorCode.CoordinatesOutOfBounds,
+            ),
+            Triple(
+                Step.Swipe("swipe-outside", 0, 0, 2_000, 3_000),
+                FakeDriver(
+                    swipeResult = GestureActionResult.CoordinatesOutOfBounds(1_080, 2_400),
+                ),
+                ExecutionErrorCode.CoordinatesOutOfBounds,
+            ),
+        )
+
+        cases.forEach { (step, driver, expectedCode) ->
+            val result = WorkflowExecutor(driver).run(
+                Workflow(id = "failure-${step.id}", name = "Failure", steps = listOf(step)),
+            )
+
+            val failure = assertIs<RunResult.Failed>(result, step.id)
+            assertEquals(step.id, failure.stepId, step.id)
+            assertEquals(expectedCode, failure.error.code, step.id)
+            if (expectedCode == ExecutionErrorCode.CoordinatesOutOfBounds) {
+                assertEquals("1080", failure.error.arguments["displayWidth"], step.id)
+                assertEquals("2400", failure.error.arguments["displayHeight"], step.id)
+            }
+            if (step is Step.GlobalAction) {
+                assertEquals(step.action.name, failure.error.arguments["action"], step.id)
+            }
+            if (step is Step.LaunchApp) {
+                assertEquals(step.packageName, failure.error.arguments["packageName"], step.id)
+                assertEquals(step.intentAction, failure.error.arguments["intentAction"], step.id)
+            }
+            if (step is Step.Scroll) {
+                assertEquals(step.direction.name, failure.error.arguments["direction"], step.id)
+            }
+            if (step is Step.InputText && expectedCode == ExecutionErrorCode.TextInputFailed) {
+                assertEquals(step.inputMethod.name, failure.error.arguments["inputMethod"], step.id)
+            }
+            if (step is Step.ReadNodeText) {
+                assertEquals(step.attribute.name, failure.error.arguments["attribute"])
+            }
+        }
+    }
+
+    @Test
+    fun `selector backed actions distinguish a missing target`() = runTest {
+        val steps = listOf<Step>(
+            Step.Click("click", selector),
+            Step.LongClick("long-click", selector),
+            Step.Scroll("scroll", selector, ScrollDirection.Forward),
+            Step.InputText("input", selector, "text"),
+            Step.ReadNodeText("read", selector, "value", NodeAttribute.Text),
+        )
+
+        steps.forEach { step ->
+            val result = WorkflowExecutor(FakeDriver(targetFound = false)).run(
+                Workflow(id = "missing-${step.id}", name = "Missing", steps = listOf(step)),
+            )
+            val failure = assertIs<RunResult.Failed>(result, step.id)
+            assertEquals(step.id, failure.stepId)
+            assertEquals(ExecutionErrorCode.TargetNotFound, failure.error.code, step.id)
+        }
+    }
+
+    @Test
     fun `reports default timeout as a step failure`() = runTest {
         val workflow = Workflow(
             id = "timeout",
@@ -502,6 +623,118 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `continued failure keeps its structured error diagnostic`() = runTest {
+        val workflow = Workflow(
+            id = "continue-diagnostic",
+            name = "Continue diagnostic",
+            steps = listOf(
+                Step.Click("click", selector, failurePolicy = FailurePolicy.Continue),
+                Step.GlobalAction("back", SystemAction.Back),
+            ),
+        )
+
+        val execution = WorkflowExecutor(FakeDriver(clickResult = false)).runWithDiagnostics(workflow)
+
+        assertEquals(RunResult.Completed, execution.result)
+        assertEquals(StepExecutionOutcome.ContinuedAfterFailure, execution.diagnostics.first().outcome)
+        assertEquals(
+            ExecutionError(ExecutionErrorCode.TargetNotClickable),
+            execution.diagnostics.first().error,
+        )
+    }
+
+    @Test
+    fun `continued failure is retained after diagnostic capacity is reached`() = runTest {
+        val workflow = Workflow(
+            id = "late-warning",
+            name = "Late warning",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1_000,
+                    steps = listOf(Step.Delay("delay", 0)),
+                ),
+                Step.Click("late-click", selector, failurePolicy = FailurePolicy.Continue),
+            ),
+        )
+
+        val execution = WorkflowExecutor(FakeDriver(clickResult = false)).runWithDiagnostics(workflow)
+
+        assertEquals(RunResult.Completed, execution.result)
+        val warning = execution.diagnostics.single {
+            it.outcome == StepExecutionOutcome.ContinuedAfterFailure
+        }
+        assertEquals("late-click", warning.stepId)
+        assertEquals(ExecutionErrorCode.TargetNotClickable, warning.error?.code)
+        assertTrue(execution.diagnostics.size <= 1_000)
+    }
+
+    @Test
+    fun `terminal failure is retained after diagnostic capacity is reached`() = runTest {
+        val workflow = Workflow(
+            id = "late-failure",
+            name = "Late failure",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat-success",
+                    times = 1_000,
+                    steps = listOf(Step.Delay("delay", 0)),
+                ),
+                Step.Repeat(
+                    id = "repeat-failure",
+                    times = 1,
+                    steps = listOf(Step.Click("late-click", selector)),
+                ),
+            ),
+        )
+
+        val execution = WorkflowExecutor(FakeDriver(clickResult = false)).runWithDiagnostics(workflow)
+
+        assertEquals(
+            RunResult.Failed("late-click", ExecutionError(ExecutionErrorCode.TargetNotClickable)),
+            execution.result,
+        )
+        val failures = execution.diagnostics.filter { it.outcome == StepExecutionOutcome.Failed }
+        assertEquals(setOf("late-click", "repeat-failure"), failures.map { it.stepId }.toSet())
+        val containerFailure = failures.single { it.stepId == "repeat-failure" }
+        assertEquals("late-click", containerFailure.failedStepId)
+        assertEquals(ExecutionErrorCode.TargetNotClickable, containerFailure.error?.code)
+        assertTrue(execution.diagnostics.size <= 1_000)
+    }
+
+    @Test
+    fun `late cancellation is retained after diagnostic capacity is reached`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val workflow = Workflow(
+            id = "late-cancel",
+            name = "Late cancel",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1_000,
+                    steps = listOf(Step.Delay("delay", 0)),
+                ),
+                Step.Click("blocked-click", selector),
+            ),
+        )
+        val executor = WorkflowExecutor(FakeDriver(clickGate = gate))
+        var execution: RunExecution? = null
+
+        val running = launch { execution = executor.runWithDiagnostics(workflow) }
+        testScheduler.runCurrent()
+        running.cancelAndJoin()
+
+        val completed = requireNotNull(execution)
+        assertEquals(RunResult.Cancelled, completed.result)
+        assertTrue(
+            completed.diagnostics.any {
+                it.stepId == "blocked-click" && it.outcome == StepExecutionOutcome.Cancelled
+            },
+        )
+        assertTrue(completed.diagnostics.size <= 1_000)
+    }
+
+    @Test
     fun `container retry handles a nested step failure`() = runTest {
         val driver = FakeDriver(failClicksBeforeSuccess = 1)
         val workflow = Workflow(
@@ -519,6 +752,55 @@ class WorkflowExecutorTest {
 
         assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
         assertEquals(2, driver.clickCount)
+    }
+
+    @Test
+    fun `nested failure preserves the leaf step id`() = runTest {
+        val workflow = Workflow(
+            id = "nested-failure",
+            name = "Nested failure",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1,
+                    steps = listOf(Step.Click("nested-click", selector)),
+                ),
+            ),
+        )
+
+        val result = WorkflowExecutor(FakeDriver(clickResult = false)).run(workflow)
+
+        assertEquals(
+            RunResult.Failed(
+                "nested-click",
+                ExecutionError(ExecutionErrorCode.TargetNotClickable),
+            ),
+            result,
+        )
+    }
+
+    @Test
+    fun `container timeout is attributed to the container`() = runTest {
+        val workflow = Workflow(
+            id = "container-timeout",
+            name = "Container timeout",
+            defaultStepTimeoutMillis = 5_000,
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1,
+                    steps = listOf(
+                        Step.Delay("leaf", durationMillis = 1_000, timeoutMillis = 5_000),
+                    ),
+                    timeoutMillis = 10,
+                ),
+            ),
+        )
+
+        assertEquals(
+            RunResult.Failed("repeat", ExecutionError(ExecutionErrorCode.StepTimedOut)),
+            WorkflowExecutor(FakeDriver()).run(workflow),
+        )
     }
 
     @Test
@@ -540,6 +822,31 @@ class WorkflowExecutorTest {
 
         assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
         assertEquals(1, driver.systemActionCount)
+    }
+
+    @Test
+    fun `container continue diagnostic keeps policy owner and failed leaf`() = runTest {
+        val workflow = Workflow(
+            id = "nested-continue-diagnostic",
+            name = "Nested continue diagnostic",
+            steps = listOf(
+                Step.Repeat(
+                    id = "repeat",
+                    times = 1,
+                    steps = listOf(Step.Click("click", selector)),
+                    failurePolicy = FailurePolicy.Continue,
+                ),
+            ),
+        )
+
+        val execution = WorkflowExecutor(FakeDriver(clickResult = false)).runWithDiagnostics(workflow)
+        val continued = execution.diagnostics.single {
+            it.outcome == StepExecutionOutcome.ContinuedAfterFailure
+        }
+
+        assertEquals("repeat", continued.stepId)
+        assertEquals("click", continued.failedStepId)
+        assertEquals(ExecutionErrorCode.TargetNotClickable, continued.error?.code)
     }
 
     @Test
@@ -658,6 +965,22 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `wait for node reports a timeout error`() = runTest {
+        val workflow = Workflow(
+            id = "wait-timeout",
+            name = "Wait timeout",
+            steps = listOf(
+                Step.WaitForNode("wait", selector, mustExist = true, timeoutMillis = 1),
+            ),
+        )
+
+        assertEquals(
+            RunResult.Failed("wait", ExecutionError(ExecutionErrorCode.StepTimedOut)),
+            WorkflowExecutor(FakeDriver(nodeExistsResult = false)).run(workflow),
+        )
+    }
+
+    @Test
     fun `stops when actual step execution budget is exceeded`() = runTest {
         val workflow = Workflow(
             id = "budget",
@@ -744,6 +1067,13 @@ class WorkflowExecutorTest {
         private val nodeTextResult: String? = "node text",
         private val imageClickResult: ImageClickResult = ImageClickResult.Clicked(1_000),
         private val scrollResult: Boolean = true,
+        private val launchResult: Boolean = true,
+        private val longClickResult: Boolean = true,
+        private val inputTextResult: NodeActionResult = NodeActionResult.Succeeded,
+        private val swipeResult: GestureActionResult = GestureActionResult.Succeeded,
+        private val tapResult: GestureActionResult = GestureActionResult.Succeeded,
+        private val systemActionResult: Boolean = true,
+        private val targetFound: Boolean = true,
     ) : AutomationDriver {
         var clickCount = 0
         var longClickCount = 0
@@ -759,40 +1089,47 @@ class WorkflowExecutorTest {
         override suspend fun launchApp(packageName: String, intentAction: String?): Boolean {
             lastLaunchPackage = packageName
             lastIntentAction = intentAction
-            return true
+            return launchResult
         }
 
-        override suspend fun inputText(
+        override suspend fun inputTextNode(
             selector: NodeSelector,
             text: String,
             method: TextInputMethod,
-        ): Boolean {
+        ): NodeActionResult {
+            if (!targetFound) return NodeActionResult.TargetNotFound
             lastInputText = text
             lastInputMethod = method
-            return true
+            return inputTextResult
         }
 
-        override suspend fun readNodeAttribute(
+        override suspend fun readNode(
             selector: NodeSelector,
             attribute: NodeAttribute,
-        ): String? {
+        ): NodeReadResult {
+            if (!targetFound) return NodeReadResult.TargetNotFound
             lastReadAttribute = attribute
-            return nodeTextResult
+            return nodeTextResult?.let(NodeReadResult::Value) ?: NodeReadResult.AttributeMissing
         }
 
-        override suspend fun longClick(selector: NodeSelector): Boolean {
+        override suspend fun longClickNode(selector: NodeSelector): NodeActionResult {
+            if (!targetFound) return NodeActionResult.TargetNotFound
             longClickCount++
-            return true
+            return longClickResult.toNodeActionResult()
         }
 
-        override suspend fun tap(x: Int, y: Int): Boolean {
+        override suspend fun tap(x: Int, y: Int): GestureActionResult {
             lastTap = x to y
-            return true
+            return tapResult
         }
 
-        override suspend fun scroll(selector: NodeSelector, direction: ScrollDirection): Boolean {
+        override suspend fun scrollNode(
+            selector: NodeSelector,
+            direction: ScrollDirection,
+        ): NodeActionResult {
+            if (!targetFound) return NodeActionResult.TargetNotFound
             lastScrollDirection = direction
-            return scrollResult
+            return scrollResult.toNodeActionResult()
         }
 
         override suspend fun swipe(
@@ -801,21 +1138,25 @@ class WorkflowExecutorTest {
             endX: Int,
             endY: Int,
             durationMillis: Long,
-        ) = true
+        ): GestureActionResult = swipeResult
 
         override suspend fun performSystemAction(action: SystemAction): Boolean {
             systemActionCount++
-            return true
+            return systemActionResult
         }
 
-        override suspend fun click(selector: NodeSelector): Boolean {
+        override suspend fun clickNode(selector: NodeSelector): NodeActionResult {
+            if (!targetFound) return NodeActionResult.TargetNotFound
             clickGate?.await()
             clickCount++
-            return clickResult && clickCount > failClicksBeforeSuccess
+            return (clickResult && clickCount > failClicksBeforeSuccess).toNodeActionResult()
         }
 
         override suspend fun clickImage(step: Step.ImageClick): ImageClickResult = imageClickResult
 
         override suspend fun nodeExists(selector: NodeSelector) = nodeExistsResult
+
+        private fun Boolean.toNodeActionResult(): NodeActionResult =
+            if (this) NodeActionResult.Succeeded else NodeActionResult.ActionFailed
     }
 }

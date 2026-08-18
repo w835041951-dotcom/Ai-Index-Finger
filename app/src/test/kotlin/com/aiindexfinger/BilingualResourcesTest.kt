@@ -40,6 +40,38 @@ class BilingualResourcesTest {
     }
 
     @Test
+    fun `english and simplified chinese plurals are compatible`() {
+        val defaultPlurals = plurals(File("src/main/res/values/strings.xml"))
+        val chinesePlurals = plurals(File("src/main/res/values-zh-rCN/strings.xml"))
+
+        assertEquals(defaultPlurals.keys, chinesePlurals.keys)
+        defaultPlurals.forEach { (key, defaultQuantities) ->
+            val chineseQuantities = chinesePlurals.getValue(key)
+            val defaultOther = defaultQuantities.getValue("other")
+            val chineseOther = chineseQuantities.getValue("other")
+            assertEquals(
+                "Placeholder mismatch for plural $key",
+                placeholders(defaultOther),
+                placeholders(chineseOther),
+            )
+            defaultQuantities.forEach { (quantity, value) ->
+                assertEquals(
+                    "Default placeholder mismatch for plural $key/$quantity",
+                    placeholders(defaultOther),
+                    placeholders(value),
+                )
+            }
+            chineseQuantities.forEach { (quantity, value) ->
+                assertEquals(
+                    "Chinese placeholder mismatch for plural $key/$quantity",
+                    placeholders(chineseOther),
+                    placeholders(value),
+                )
+            }
+        }
+    }
+
+    @Test
     fun `workflow example catalog is fully localized`() {
         val defaultStrings = strings(File("src/main/res/values/strings.xml"))
         val chineseStrings = strings(File("src/main/res/values-zh-rCN/strings.xml"))
@@ -50,7 +82,6 @@ class BilingualResourcesTest {
             "workflow_example_catalog_title",
             "workflow_example_search",
             "workflow_example_category_all",
-            "workflow_example_result_count",
             "workflow_example_no_results",
             "workflow_example_clear_filters",
             "workflow_example_details_title",
@@ -75,6 +106,16 @@ class BilingualResourcesTest {
             assertTrue("Missing default resource: $key", defaultStrings.containsKey(key))
             assertTrue("Missing Simplified Chinese resource: $key", chineseStrings.containsKey(key))
         }
+        assertTrue(
+            "Missing default plural: workflow_example_result_count",
+            plurals(File("src/main/res/values/strings.xml"))
+                .containsKey("workflow_example_result_count"),
+        )
+        assertTrue(
+            "Missing Simplified Chinese plural: workflow_example_result_count",
+            plurals(File("src/main/res/values-zh-rCN/strings.xml"))
+                .containsKey("workflow_example_result_count"),
+        )
 
         val englishTitles = WorkflowStarterTemplates.catalog.map { defaultStrings.getValue(it.titleResourceKey).trim() }
         val chineseTitles = WorkflowStarterTemplates.catalog.map { chineseStrings.getValue(it.titleResourceKey).trim() }
@@ -117,6 +158,26 @@ class BilingualResourcesTest {
             repeat(strings.length) { index ->
                 val element = strings.item(index) as Element
                 put(element.getAttribute("name"), element.textContent)
+            }
+        }
+    }
+
+    private fun plurals(file: File): Map<String, Map<String, String>> {
+        val document = document(file)
+        val plurals = document.getElementsByTagName("plurals")
+        return buildMap {
+            repeat(plurals.length) { index ->
+                val plural = plurals.item(index) as Element
+                val items = plural.getElementsByTagName("item")
+                put(
+                    plural.getAttribute("name"),
+                    buildMap {
+                        repeat(items.length) { itemIndex ->
+                            val item = items.item(itemIndex) as Element
+                            put(item.getAttribute("quantity"), item.textContent)
+                        }
+                    },
+                )
             }
         }
     }

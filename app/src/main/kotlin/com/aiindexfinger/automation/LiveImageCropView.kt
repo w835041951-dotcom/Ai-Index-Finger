@@ -12,9 +12,11 @@ import android.view.View
 internal class LiveImageCropView(
     context: Context,
     private val bitmap: Bitmap,
-    private val onCropSelected: (ImageCropBounds) -> Unit,
+    private val accessibilityCrop: ImageCropBounds,
+    private val onCropSelected: (ImageCropBounds, ScreenPoint) -> Unit,
 ) : View(context) {
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val bitmapDestination = RectF()
     private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(255, 200, 87)
         style = Paint.Style.STROKE
@@ -24,9 +26,11 @@ internal class LiveImageCropView(
     private var dragStartY: Float? = null
     private var dragEndX: Float? = null
     private var dragEndY: Float? = null
+    private var pendingCrop: ImageCropBounds? = null
 
     init {
         setBackgroundColor(Color.BLACK)
+        isClickable = true
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -37,10 +41,11 @@ internal class LiveImageCropView(
         val displayedHeight = bitmap.height * scale
         val left = (width - displayedWidth) / 2f
         val top = (height - displayedHeight) / 2f
+        bitmapDestination.set(left, top, left + displayedWidth, top + displayedHeight)
         canvas.drawBitmap(
             bitmap,
             null,
-            RectF(left, top, left + displayedWidth, top + displayedHeight),
+            bitmapDestination,
             bitmapPaint,
         )
         val startX = dragStartX
@@ -78,25 +83,30 @@ internal class LiveImageCropView(
             MotionEvent.ACTION_UP -> {
                 val start = dragStartX?.let { x -> dragStartY?.let { y -> mapToBitmap(x, y) } }
                 val end = mapToBitmap(event.x, event.y)
-                resetSelection()
-                performClick()
+                resetGesture()
                 if (start != null && end != null) {
-                    onCropSelected(
-                        ImageCropBounds(
-                            left = minOf(start.x, end.x),
-                            top = minOf(start.y, end.y),
-                            right = (maxOf(start.x, end.x) + 1).coerceAtMost(bitmap.width),
-                            bottom = (maxOf(start.y, end.y) + 1).coerceAtMost(bitmap.height),
-                        ),
+                    pendingCrop = ImageCropBounds(
+                        left = minOf(start.x, end.x),
+                        top = minOf(start.y, end.y),
+                        right = (maxOf(start.x, end.x) + 1).coerceAtMost(bitmap.width),
+                        bottom = (maxOf(start.y, end.y) + 1).coerceAtMost(bitmap.height),
                     )
+                    performClick()
                 }
             }
-            MotionEvent.ACTION_CANCEL -> resetSelection()
+            MotionEvent.ACTION_CANCEL -> resetGesture()
         }
         return true
     }
 
-    override fun performClick(): Boolean = super.performClick()
+    override fun performClick(): Boolean {
+        super.performClick()
+        if (bitmap.isRecycled) return false
+        val crop = pendingCrop ?: accessibilityCrop
+        pendingCrop = null
+        onCropSelected(crop, templateCenterRelativeToCrop(crop))
+        return true
+    }
 
     private fun mapToBitmap(x: Float, y: Float): ScreenPoint? = mapFitCenterTapToScreen(
         tapX = x,
@@ -107,7 +117,7 @@ internal class LiveImageCropView(
         imageHeight = bitmap.height,
     )
 
-    private fun resetSelection() {
+    private fun resetGesture() {
         dragStartX = null
         dragStartY = null
         dragEndX = null

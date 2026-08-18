@@ -17,7 +17,18 @@ data class WorkflowSchedule(
     val status: ScheduleStatus = ScheduleStatus.Pending,
     val recurrence: ScheduleRecurrence = ScheduleRecurrence.Once,
     val missedOccurrencePending: Boolean = false,
-)
+    val recurrenceLocalTimeMinutes: Int? = null,
+    val occurrenceId: String? = null,
+) {
+    init {
+        require(recurrenceLocalTimeMinutes == null || recurrenceLocalTimeMinutes in 0 until 24 * 60) {
+            "Recurrence local time must be a minute of day"
+        }
+        require(occurrenceId == null || occurrenceId.isNotBlank() && occurrenceId.length <= 128) {
+            "Occurrence ID must be non-blank and bounded"
+        }
+    }
+}
 
 @Serializable
 enum class ScheduleRecurrence {
@@ -38,7 +49,7 @@ class ScheduleStorageException(cause: Throwable) :
 class ScheduleStore private constructor(private val file: File) {
     constructor(context: Context) : this(File(context.filesDir, FILE_NAME))
 
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = Json
 
     fun load(): List<WorkflowSchedule> = synchronized(FILE_LOCK) {
         loadForMutation()
@@ -76,11 +87,28 @@ class ScheduleStore private constructor(private val file: File) {
         }
     }
 
+    internal fun discardOccurrence(
+        workflowId: String,
+        expectedAtMillis: Long,
+        expectedOccurrenceId: String?,
+    ): ScheduleDiscard = synchronized(FILE_LOCK) {
+        val discard = discardScheduleOccurrence(
+            load(),
+            workflowId,
+            expectedAtMillis,
+            expectedOccurrenceId,
+        )
+        if (discard.accepted) save(discard.schedules)
+        discard
+    }
+
     internal fun completeOccurrence(
         workflowId: String,
         expectedAtMillis: Long,
         completedAtMillis: Long,
         zoneId: ZoneId,
+        expectedOccurrenceId: String? = null,
+        nextOccurrenceId: String? = null,
     ): ScheduleCompletion = synchronized(FILE_LOCK) {
         val completion = completeScheduleOccurrence(
             load(),
@@ -88,6 +116,8 @@ class ScheduleStore private constructor(private val file: File) {
             expectedAtMillis,
             completedAtMillis,
             zoneId,
+            expectedOccurrenceId,
+            nextOccurrenceId,
         )
         if (completion.accepted) save(completion.schedules)
         completion
@@ -98,6 +128,8 @@ class ScheduleStore private constructor(private val file: File) {
         expectedAtMillis: Long,
         missedAtMillis: Long,
         zoneId: ZoneId,
+        expectedOccurrenceId: String? = null,
+        nextOccurrenceId: String? = null,
     ): ScheduleCompletion = synchronized(FILE_LOCK) {
         val completion = missScheduleOccurrence(
             load(),
@@ -105,6 +137,8 @@ class ScheduleStore private constructor(private val file: File) {
             expectedAtMillis,
             missedAtMillis,
             zoneId,
+            expectedOccurrenceId,
+            nextOccurrenceId,
         )
         if (completion.accepted) save(completion.schedules)
         completion
@@ -112,19 +146,34 @@ class ScheduleStore private constructor(private val file: File) {
 
     private fun save(schedules: List<WorkflowSchedule>) {
         if (schedules.isEmpty()) {
+            Files.deleteIfExists(File(file.parentFile, "${file.name}.tmp").toPath())
             Files.deleteIfExists(file.toPath())
             return
         }
+        val content = json.encodeToString(ListSerializer(WorkflowSchedule.serializer()), schedules)
+        require(content.toByteArray(Charsets.UTF_8).size <= MAX_SCHEDULE_BYTES) {
+            "Stored schedules are too large"
+        }
         AtomicFileWriter.write(
             file,
-            json.encodeToString(ListSerializer(WorkflowSchedule.serializer()), schedules),
+            content,
         )
     }
 
     private fun loadForMutation(): List<WorkflowSchedule> {
+        AtomicFileWriter.cleanupTemporary(file)
         if (!file.exists()) return emptyList()
+        if (file.length() > MAX_SCHEDULE_BYTES) {
+            throw ScheduleStorageException(IllegalStateException("Stored schedules are too large"))
+        }
         return try {
-            json.decodeFromString(ListSerializer(WorkflowSchedule.serializer()), file.readText())
+            json.decodeFromString(ListSerializer(WorkflowSchedule.serializer()), file.readText()).also { schedules ->
+                require(schedules.map(WorkflowSchedule::workflowId).distinct().size == schedules.size) {
+                    "Workflow schedule IDs must be unique"
+                }
+            }
+        } catch (error: StackOverflowError) {
+            throw ScheduleStorageException(error)
         } catch (exception: Exception) {
             throw ScheduleStorageException(exception)
         }
@@ -132,6 +181,7 @@ class ScheduleStore private constructor(private val file: File) {
 
     internal companion object {
         private const val FILE_NAME = "workflow-schedules.json"
+        private const val MAX_SCHEDULE_BYTES = 2L * 1024 * 1024
         private val FILE_LOCK = Any()
 
         fun forFile(file: File) = ScheduleStore(file)
@@ -144,27 +194,63 @@ internal data class ScheduleCompletion(
     val nextSchedule: WorkflowSchedule?,
 )
 
+internal data class ScheduleDiscard(
+    val accepted: Boolean,
+    val schedules: List<WorkflowSchedule>,
+)
+
+internal fun discardScheduleOccurrence(
+    schedules: List<WorkflowSchedule>,
+    workflowId: String,
+    expectedAtMillis: Long,
+    expectedOccurrenceId: String? = null,
+): ScheduleDiscard {
+    val current = schedules.firstOrNull { it.workflowId == workflowId }
+    if (current == null || current.scheduledAtMillis != expectedAtMillis ||
+        current.status != ScheduleStatus.Pending || current.occurrenceId != expectedOccurrenceId
+    ) {
+        return ScheduleDiscard(false, schedules)
+    }
+    return ScheduleDiscard(
+        accepted = true,
+        schedules = schedules.filterNot { it.workflowId == workflowId },
+    )
+}
+
 internal fun completeScheduleOccurrence(
     schedules: List<WorkflowSchedule>,
     workflowId: String,
     expectedAtMillis: Long,
     completedAtMillis: Long,
     zoneId: ZoneId,
+    expectedOccurrenceId: String? = null,
+    nextOccurrenceId: String? = null,
 ): ScheduleCompletion {
     val current = schedules.firstOrNull { it.workflowId == workflowId }
     if (current == null || current.scheduledAtMillis != expectedAtMillis ||
-        current.status != ScheduleStatus.Pending
+        current.status != ScheduleStatus.Pending || current.occurrenceId != expectedOccurrenceId
     ) {
         return ScheduleCompletion(false, schedules, null)
     }
+    val anchorMinutes = current.recurrenceLocalTimeMinutes ?: recurrenceLocalTimeMinutes(
+        current.scheduledAtMillis,
+        current.recurrence,
+        zoneId,
+    )
     val nextAtMillis = nextOccurrenceEpochMillis(
         current.scheduledAtMillis,
         current.recurrence,
         zoneId,
         completedAtMillis,
+        anchorMinutes,
     )
     val next = nextAtMillis?.let {
-        current.copy(scheduledAtMillis = it, status = ScheduleStatus.Pending)
+        current.copy(
+            scheduledAtMillis = it,
+            status = ScheduleStatus.Pending,
+            recurrenceLocalTimeMinutes = anchorMinutes,
+            occurrenceId = nextOccurrenceId ?: current.occurrenceId,
+        )
     }
     return ScheduleCompletion(
         accepted = true,
@@ -179,10 +265,12 @@ internal fun missScheduleOccurrence(
     expectedAtMillis: Long,
     missedAtMillis: Long,
     zoneId: ZoneId,
+    expectedOccurrenceId: String? = null,
+    nextOccurrenceId: String? = null,
 ): ScheduleCompletion {
     val current = schedules.firstOrNull { it.workflowId == workflowId }
     if (current == null || current.scheduledAtMillis != expectedAtMillis ||
-        current.status != ScheduleStatus.Pending
+        current.status != ScheduleStatus.Pending || current.occurrenceId != expectedOccurrenceId
     ) {
         return ScheduleCompletion(false, schedules, null)
     }
@@ -195,6 +283,11 @@ internal fun missScheduleOccurrence(
             nextSchedule = null,
         )
     }
+    val anchorMinutes = current.recurrenceLocalTimeMinutes ?: recurrenceLocalTimeMinutes(
+        current.scheduledAtMillis,
+        current.recurrence,
+        zoneId,
+    )
     val next = current.copy(
         scheduledAtMillis = requireNotNull(
             nextOccurrenceEpochMillis(
@@ -202,10 +295,13 @@ internal fun missScheduleOccurrence(
                 current.recurrence,
                 zoneId,
                 missedAtMillis,
+                anchorMinutes,
             ),
         ),
         status = ScheduleStatus.Pending,
         missedOccurrencePending = true,
+        recurrenceLocalTimeMinutes = anchorMinutes,
+        occurrenceId = nextOccurrenceId ?: current.occurrenceId,
     )
     return ScheduleCompletion(
         accepted = true,

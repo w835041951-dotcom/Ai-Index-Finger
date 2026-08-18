@@ -19,6 +19,7 @@ internal fun normalizeImportedWorkflows(
     existing: List<Workflow>,
     imported: List<Workflow>,
     newId: () -> String,
+    importedName: (String) -> String,
 ): List<Workflow> {
     val usedIds = existing.mapTo(mutableSetOf()) { it.id }
     return imported.map { workflow ->
@@ -26,7 +27,7 @@ internal fun normalizeImportedWorkflows(
             workflow
         } else {
             val replacementId = allocateUniqueId(usedIds, newId)
-            workflow.copy(id = replacementId, name = "${workflow.name} imported")
+            workflow.copy(id = replacementId, name = importedName(workflow.name))
         }
     }
 }
@@ -35,6 +36,7 @@ internal fun mergeImportedLibrary(
     existing: WorkflowLibrary,
     imported: WorkflowLibrary,
     newId: () -> String,
+    importedName: (String) -> String,
 ): WorkflowLibrary {
     val usedFolderIds = existing.folders.mapTo(mutableSetOf(), WorkflowFolder::id)
     val folders = existing.folders.toMutableList()
@@ -59,7 +61,10 @@ internal fun mergeImportedLibrary(
             allocateUniqueId(usedWorkflowIds, newId)
         }
         workflowIdMap[workflow.id] = targetId
-        if (targetId == workflow.id) workflow else workflow.copy(id = targetId, name = "${workflow.name} imported")
+        if (targetId == workflow.id) workflow else workflow.copy(
+            id = targetId,
+            name = importedName(workflow.name),
+        )
     }
     val importedAssignments = imported.workflowFolderIds.mapNotNull { (workflowId, folderId) ->
         val targetWorkflowId = workflowIdMap[workflowId] ?: return@mapNotNull null

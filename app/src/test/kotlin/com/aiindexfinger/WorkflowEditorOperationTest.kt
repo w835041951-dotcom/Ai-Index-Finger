@@ -45,4 +45,24 @@ class WorkflowEditorOperationTest {
         assertTrue(WorkflowEditorOperation.NodeCondition.isAvailable(true, true))
         assertTrue(WorkflowEditorOperation.ImageClick.isAvailable(false, false))
     }
+
+    @Test
+    fun chooserExplainsUnavailableOperations() {
+        assertEquals(
+            WorkflowOperationUnavailableReason.AutomationServiceRequired,
+            WorkflowEditorOperation.RecordedClick.unavailableReason(false, false),
+        )
+        listOf(
+            WorkflowEditorOperation.Repeat,
+            WorkflowEditorOperation.VariableCondition,
+            WorkflowEditorOperation.NodeCondition,
+        ).forEach { operation ->
+            assertEquals(
+                WorkflowOperationUnavailableReason.ExistingStepRequired,
+                operation.unavailableReason(false, true),
+            )
+            assertEquals(null, operation.unavailableReason(true, true))
+        }
+        assertEquals(null, WorkflowEditorOperation.Tap.unavailableReason(false, false))
+    }
 }

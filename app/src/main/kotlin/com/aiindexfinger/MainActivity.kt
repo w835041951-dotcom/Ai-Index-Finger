@@ -6,10 +6,13 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -38,6 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -66,6 +70,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
@@ -78,6 +83,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.testTag
@@ -88,6 +94,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
@@ -95,19 +102,30 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.aiindexfinger.automation.AutomationAccessibilityService
 import com.aiindexfinger.automation.LaunchableAppCatalog
+import com.aiindexfinger.automation.LaunchTargetStatus
+import com.aiindexfinger.automation.openRunningNotificationSettings
+import com.aiindexfinger.automation.runningNotificationReadiness
+import com.aiindexfinger.automation.WorkflowStartResult
+import com.aiindexfinger.automation.EXTRA_RUN_RECORD_ID
+import com.aiindexfinger.automation.normalizedLaunchTarget
 import com.aiindexfinger.automation.applyLiveActionHandoff
 import com.aiindexfinger.automation.cropBoundsOrNull
+import com.aiindexfinger.automation.mapBitmapCropToTargetScreen
 import com.aiindexfinger.automation.cropTemplate
 import com.aiindexfinger.automation.encodeTemplatePng
 import com.aiindexfinger.automation.decodeImageTemplate
+import com.aiindexfinger.automation.imageTemplateIsValid
 import com.aiindexfinger.automation.filterLaunchableApps
 import com.aiindexfinger.automation.ObservedNode
 import com.aiindexfinger.automation.SelectorRecommendations
 import com.aiindexfinger.automation.ScreenCaptureState
+import com.aiindexfinger.automation.ScreenBounds
 import com.aiindexfinger.automation.ScreenPoint
+import com.aiindexfinger.automation.mapBitmapPointToScreen
 import com.aiindexfinger.automation.mapFitCenterTapToScreen
 import com.aiindexfinger.automation.recommendedSelector
 import com.aiindexfinger.automation.selectCaptureNode
+import com.aiindexfinger.automation.templatePointRelativeToCrop
 import com.aiindexfinger.automation.PendingOverlayAction
 import com.aiindexfinger.automation.PreflightRecoveryAction
 import com.aiindexfinger.automation.WorkflowPreflightReport
@@ -117,6 +135,7 @@ import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.clearRunHistory
 import com.aiindexfinger.data.RunRecord
 import com.aiindexfinger.data.RunStepBranch
+import com.aiindexfinger.data.RunStepDiagnostic
 import com.aiindexfinger.data.RunStepLocation
 import com.aiindexfinger.data.uniqueRunLocationTo
 import com.aiindexfinger.data.runLocationsTo
@@ -124,11 +143,14 @@ import com.aiindexfinger.data.RunHistoryLoadResult
 import com.aiindexfinger.data.InvalidWorkflowException
 import com.aiindexfinger.data.RunStepOutcome
 import com.aiindexfinger.data.RunStatus
+import com.aiindexfinger.data.RUN_FAILURE_CONTROL_NOTIFICATION_UNAVAILABLE
 import com.aiindexfinger.data.filterRunRecords
 import com.aiindexfinger.data.WorkflowStore
 import com.aiindexfinger.data.WorkflowLoadResult
 import com.aiindexfinger.data.WorkflowLibrary
-import com.aiindexfinger.data.readAndCommitImportedLibrary
+import com.aiindexfinger.data.WorkflowImportSaveException
+import com.aiindexfinger.data.WorkflowLibraryCommit
+import com.aiindexfinger.data.WorkflowRollbackCommit
 import com.aiindexfinger.data.WorkflowFolder
 import com.aiindexfinger.data.WorkflowFolderSelection
 import com.aiindexfinger.data.filterWorkflows
@@ -140,6 +162,8 @@ import com.aiindexfinger.data.FilesWorkflowPack
 import com.aiindexfinger.data.AiIndexFingerSelfTestPack
 import com.aiindexfinger.data.sortedFolders
 import com.aiindexfinger.data.WorkflowTransfer
+import com.aiindexfinger.data.WorkflowTransferErrorCode
+import com.aiindexfinger.data.WorkflowTransferException
 import com.aiindexfinger.data.WorkflowVersion
 import com.aiindexfinger.data.resolveRunHistoryDestination
 import com.aiindexfinger.executor.RunResult
@@ -196,11 +220,15 @@ import com.aiindexfinger.scheduler.ScheduleNotificationAction
 import com.aiindexfinger.scheduler.ScheduleNotificationReadiness
 import com.aiindexfinger.scheduler.ScheduleRecurrence
 import com.aiindexfinger.scheduler.ScheduleStorageException
+import com.aiindexfinger.scheduler.ScheduleTimeError
+import com.aiindexfinger.scheduler.ScheduleTimeException
 import com.aiindexfinger.scheduler.ScheduledWorkflowEvent
 import com.aiindexfinger.scheduler.ScheduledWorkflowEventController
 import com.aiindexfinger.scheduler.WorkflowSchedule
+import com.aiindexfinger.scheduler.WorkflowScheduleValidationException
 import com.aiindexfinger.scheduler.WorkflowScheduler
 import com.aiindexfinger.scheduler.localScheduleEpochMillis
+import com.aiindexfinger.scheduler.runnableWorkflowsForScheduling
 import com.aiindexfinger.scheduler.missedSchedules
 import com.aiindexfinger.scheduler.scheduleDelayMillis
 import com.aiindexfinger.scheduler.scheduleNotificationAction
@@ -217,6 +245,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
@@ -228,16 +257,20 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     private val workflowPersistence by lazy { application as AiIndexFingerApplication }
     private val runHistoryStore by lazy { RunHistoryStore(this) }
-    private val workflowScheduler by lazy { WorkflowScheduler(this) }
     private val appPreferences by lazy { AppPreferences(this) }
     private val accessibilityDisclosurePreferences by lazy {
         AccessibilityDisclosurePreferences(this)
     }
     private val scheduledWorkflowEvents = ScheduledWorkflowEventController()
+    private var requestedRunRecordId by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            setRecentsScreenshotEnabled(false)
+        }
         scheduledWorkflowEvents.publish(intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID))
+        requestedRunRecordId = intent.getStringExtra(EXTRA_RUN_RECORD_ID)
         setContent {
             var appearanceMode by remember { mutableStateOf(appPreferences.appearanceMode()) }
             AiIndexFingerTheme(appearanceMode) {
@@ -251,30 +284,36 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     val scheduledWorkflowEvent by scheduledWorkflowEvents.event.collectAsStateWithLifecycle()
-                    val workflowPersistenceFailure by
-                        workflowPersistence.persistenceFailure.collectAsStateWithLifecycle()
+                    val initialRunMessage = state.loadMessageResources
+                        .map { resourceId -> stringResource(resourceId) }
+                        .joinToString("\n")
                     WorkflowApp(
                         initialLibrary = state.library,
                         initialRunRecords = state.runRecords,
                         initialRunHistoryCorrupt = state.runHistoryCorrupt,
                         initialSchedules = state.schedules,
-                        initialRunMessage = state.loadMessageRes?.let { stringResource(it) },
-                        workflowPersistenceFailure = workflowPersistenceFailure,
-                        onWorkflowPersistenceFailureConsumed =
-                            workflowPersistence::consumePersistenceFailure,
+                        initialRunMessage = initialRunMessage.ifBlank { null },
                         scheduledWorkflowEvent = scheduledWorkflowEvent,
                         onScheduledWorkflowEventConsumed = scheduledWorkflowEvents::consume,
-                        onSave = workflowPersistence::saveLibrary,
+                        requestedRunRecordId = requestedRunRecordId,
+                        onRunRecordRequestConsumed = { recordId ->
+                            if (requestedRunRecordId == recordId) requestedRunRecordId = null
+                            if (intent.getStringExtra(EXTRA_RUN_RECORD_ID) == recordId) {
+                                intent.removeExtra(EXTRA_RUN_RECORD_ID)
+                            }
+                        },
+                        onUpdateLibrary = workflowPersistence::updateLibrary,
+                        onDeleteWorkflow = workflowPersistence::deleteWorkflow,
                         onCommitWorkflow = workflowPersistence::commitWorkflow,
-                        onCommitImport = workflowPersistence::commitLibrary,
+                        onCommitImport = workflowPersistence::importLibrary,
                         onListVersions = workflowPersistence::listVersions,
                         onRollback = workflowPersistence::rollback,
                         onClearRunHistory = {
                             withContext(Dispatchers.IO) { runHistoryStore.clear() }
                         },
-                        onSchedule = workflowScheduler::schedule,
-                        onCancelSchedule = workflowScheduler::cancel,
-                        onReloadSchedules = workflowScheduler::load,
+                        onSchedule = workflowPersistence::scheduleWorkflow,
+                        onCancelSchedule = workflowPersistence::cancelWorkflowSchedule,
+                        onReloadSchedules = workflowPersistence::reloadWorkflowSchedules,
                         onOpenAccessibilitySettings = ::openAccessibilitySettings,
                         appearanceMode = appearanceMode,
                         onAppearanceModeChanged = { mode ->
@@ -291,14 +330,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadInitialState(): InitialAppState {
-        val workflowResult = workflowPersistence.loadLibrary()
+    override fun onPause() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
+    private suspend fun loadInitialState(): InitialAppState {
+        val workflowResult = workflowPersistence.loadCanonicalLibrary()
         val runHistoryResult = runHistoryStore.loadDetailed()
         val library = workflowResult.library
+        val runnableWorkflows = runnableWorkflowsForScheduling(workflowResult)
         val scheduleResult = runCatching {
-            workflowScheduler.load(
-                library.workflows.filter { it.isReadyToRun() }.map { it.id }.toSet()
-            )
+            if (runnableWorkflows == null) {
+                workflowPersistence.loadWorkflowSchedulesWithoutReconciliation()
+            } else {
+                workflowPersistence.reloadWorkflowSchedules(
+                    runnableWorkflows.mapTo(mutableSetOf(), Workflow::id),
+                )
+            }
         }
         scheduleResult.exceptionOrNull()?.let { error ->
             if (error !is ScheduleStorageException) throw error
@@ -306,26 +364,35 @@ class MainActivity : ComponentActivity() {
         val loadedSchedules = scheduleResult.getOrDefault(emptyList())
         val missed = missedSchedules(loadedSchedules)
         var schedules = loadedSchedules
-        missed.forEach { schedule -> schedules = workflowScheduler.consumeMissedOccurrence(schedule.workflowId) }
+        if (runnableWorkflows != null) {
+            missed.forEach { schedule ->
+                schedules = workflowPersistence.consumeMissedWorkflowSchedule(schedule.workflowId)
+            }
+        }
         val hasMissedSchedule = missed.isNotEmpty()
         return InitialAppState(
             library = library,
             runRecords = runHistoryResult.records,
             runHistoryCorrupt = runHistoryResult is RunHistoryLoadResult.Corrupt,
             schedules = schedules,
-            loadMessageRes = when (workflowResult) {
-                is WorkflowLoadResult.RecoveredFromBackup -> R.string.workflows_recovered_from_backup
-                is WorkflowLoadResult.Corrupt -> R.string.workflows_corrupt
-                is WorkflowLoadResult.UnsupportedVersion -> R.string.workflows_unsupported_version
-                else -> if (scheduleResult.exceptionOrNull() is ScheduleStorageException) {
-                    R.string.schedule_storage_corrupt
-                } else if (runHistoryResult is RunHistoryLoadResult.Corrupt) {
-                    R.string.run_history_storage_corrupt
-                } else if (hasMissedSchedule) {
-                    R.string.schedule_notification_missed
-                } else {
-                    null
+            loadMessageResources = buildList {
+                when (workflowResult) {
+                    is WorkflowLoadResult.RecoveredFromBackup -> add(R.string.workflows_recovered_from_backup)
+                    is WorkflowLoadResult.Corrupt -> add(R.string.workflows_corrupt)
+                    is WorkflowLoadResult.UnsupportedVersion -> add(R.string.workflows_unsupported_version)
+                    else -> Unit
                 }
+                if (scheduleResult.exceptionOrNull() is ScheduleStorageException) {
+                    add(R.string.schedule_storage_corrupt)
+                }
+                when (runHistoryResult) {
+                    is RunHistoryLoadResult.Corrupt -> add(R.string.run_history_storage_corrupt)
+                    is RunHistoryLoadResult.Loaded -> if (runHistoryResult.readOnly) {
+                        add(R.string.run_history_newer_read_only)
+                    }
+                    else -> Unit
+                }
+                if (hasMissedSchedule) add(R.string.schedule_notification_missed)
             },
         )
     }
@@ -334,6 +401,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         scheduledWorkflowEvents.publish(intent.getStringExtra(ScheduleNotificationWorker.EXTRA_WORKFLOW_ID))
+        requestedRunRecordId = intent.getStringExtra(EXTRA_RUN_RECORD_ID)
     }
 
     private fun openAccessibilitySettings() {
@@ -347,7 +415,7 @@ private data class InitialAppState(
     val runRecords: List<RunRecord>,
     val runHistoryCorrupt: Boolean,
     val schedules: List<WorkflowSchedule>,
-    val loadMessageRes: Int?,
+    val loadMessageResources: List<Int>,
 )
 
 @Composable
@@ -357,60 +425,77 @@ private fun WorkflowApp(
     initialRunHistoryCorrupt: Boolean,
     initialSchedules: List<WorkflowSchedule>,
     initialRunMessage: String?,
-    workflowPersistenceFailure: com.aiindexfinger.data.PersistenceFailureEvent?,
-    onWorkflowPersistenceFailureConsumed: (Long) -> Unit,
     scheduledWorkflowEvent: ScheduledWorkflowEvent?,
     onScheduledWorkflowEventConsumed: (Long) -> Unit,
-    onSave: (WorkflowLibrary) -> Unit,
-    onCommitWorkflow: suspend (Workflow?, Workflow) -> WorkflowLibrary,
-    onCommitImport: suspend (WorkflowLibrary) -> Unit,
+    requestedRunRecordId: String?,
+    onRunRecordRequestConsumed: (String) -> Unit,
+    onUpdateLibrary: suspend ((WorkflowLibrary) -> WorkflowLibrary) -> WorkflowLibrary,
+    onDeleteWorkflow: suspend (String) -> WorkflowLibraryCommit<List<WorkflowSchedule>>,
+    onCommitWorkflow: suspend (Workflow?, Workflow) -> WorkflowLibraryCommit<List<WorkflowSchedule>>,
+    onCommitImport: suspend (WorkflowLibrary) -> WorkflowLibrary,
         onListVersions: suspend (String) -> List<WorkflowVersion>,
-        onRollback: suspend (String, String) -> Workflow,
+        onRollback: suspend (String, String) -> WorkflowRollbackCommit<List<WorkflowSchedule>>,
     onClearRunHistory: suspend () -> Unit,
-    onSchedule: (Workflow, Long, ScheduleRecurrence) -> List<WorkflowSchedule>,
-    onCancelSchedule: (String) -> List<WorkflowSchedule>,
-    onReloadSchedules: (Set<String>) -> List<WorkflowSchedule>,
+    onSchedule: suspend (Workflow, Long, ScheduleRecurrence) -> List<WorkflowSchedule>,
+    onCancelSchedule: suspend (String) -> List<WorkflowSchedule>,
+    onReloadSchedules: suspend (Set<String>) -> List<WorkflowSchedule>,
     onOpenAccessibilitySettings: () -> Unit,
     appearanceMode: AppearanceMode,
     onAppearanceModeChanged: (AppearanceMode) -> Unit,
     accessibilityDisclosureAcknowledged: Boolean,
     onAccessibilityDisclosureAcknowledged: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var library by remember { mutableStateOf(initialLibrary) }
-    val canonicalLibrary by (LocalContext.current.applicationContext as AiIndexFingerApplication)
-        .library.collectAsStateWithLifecycle()
+    val workflowApplication = context.applicationContext as AiIndexFingerApplication
+    val canonicalLibrary by workflowApplication.library.collectAsStateWithLifecycle()
     LaunchedEffect(canonicalLibrary) {
         canonicalLibrary?.let { latest ->
             if (latest != library) library = latest
         }
     }
     val workflows = library.workflows
-    val persist: (WorkflowLibrary) -> Unit = { updated ->
-        val normalized = updated.normalized()
-        onSave(normalized)
-        library = normalized
-    }
+    val latestWorkflows = { workflowApplication.library.value?.workflows ?: workflows }
     var runRecords by remember { mutableStateOf(initialRunRecords) }
     var runHistoryCorrupt by remember { mutableStateOf(initialRunHistoryCorrupt) }
     var schedules by remember { mutableStateOf(initialSchedules) }
     var editingWorkflow by remember { mutableStateOf<Workflow?>(null) }
     var initialEditingStepPath by remember { mutableStateOf<StepPath?>(null) }
-    var showRunHistory by remember { mutableStateOf(false) }
+    var showRunHistory by rememberSaveable { mutableStateOf(false) }
+    var requestedHistoryRecordId by rememberSaveable { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var workflowComparison by remember { mutableStateOf<Pair<Workflow, Workflow>?>(null) }
         var versionHistory by remember { mutableStateOf<Pair<Workflow, List<WorkflowVersion>>?>(null) }
     var runMessage by remember { mutableStateOf(initialRunMessage) }
+    fun persist(
+        update: (WorkflowLibrary) -> WorkflowLibrary,
+        onSuccess: (WorkflowLibrary) -> Unit = {},
+    ) {
+        coroutineScope.launch {
+            try {
+                val persisted = onUpdateLibrary(update)
+                library = persisted
+                onSuccess(persisted)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                runMessage = context.getString(R.string.save_failed)
+            }
+        }
+    }
     var editorSaveError by remember { mutableStateOf<String?>(null) }
     var editorSaveInProgress by remember { mutableStateOf(false) }
+    LaunchedEffect(requestedRunRecordId) {
+        requestedRunRecordId?.let { recordId ->
+            requestedHistoryRecordId = recordId
+            showRunHistory = true
+            onRunRecordRequestConsumed(recordId)
+        }
+    }
     LaunchedEffect(editingWorkflow?.id) {
         editorSaveError = null
         editorSaveInProgress = false
-    }
-    LaunchedEffect(workflowPersistenceFailure?.sequence) {
-        workflowPersistenceFailure?.let { failure ->
-            runMessage = failure.message
-            onWorkflowPersistenceFailureConsumed(failure.sequence)
-        }
     }
     var preflightReport by remember { mutableStateOf<Pair<Workflow, WorkflowPreflightReport>?>(null) }
     val runningWorkflowId by AutomationAccessibilityService.runningWorkflowId.collectAsStateWithLifecycle()
@@ -418,8 +503,8 @@ private fun WorkflowApp(
     var pendingExport by remember { mutableStateOf<Workflow?>(null) }
     var pendingBundleExport by remember { mutableStateOf<WorkflowLibrary?>(null) }
     var importInProgress by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
-    val context = LocalContext.current
+    val currentLocale = LocalConfiguration.current.locales[0]
+    val preflightDisplaySize = currentDisplayPixelSize()
     val workflowTransfer = remember { WorkflowTransfer(context.contentResolver) }
     val requestClearRunHistory: () -> Unit = {
         coroutineScope.launch {
@@ -454,6 +539,19 @@ private fun WorkflowApp(
             AccessibilityDisclosureAction.StayInApp -> Unit
         }
     }
+    val openTutorial: () -> Unit = {
+        runCatching {
+            context.startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse(selectedTutorialUrl(currentLocale)),
+                ),
+            )
+        }.onFailure {
+            runMessage = context.getString(R.string.open_tutorial_failed)
+        }
+        Unit
+    }
     LaunchedEffect(scheduledWorkflowEvent?.sequence) {
         scheduledWorkflowEvent?.let { event ->
             val id = event.workflowId
@@ -476,71 +574,195 @@ private fun WorkflowApp(
             runRecords = (listOf(outcome.record) + runRecords)
                 .distinctBy { it.id }
                 .take(100)
-            runMessage = outcome.result.localizedMessage(context, outcome.record.failedStepLocation)
+            val outcomeMessage = when {
+                outcome.record.status == RunStatus.CompletedWithWarnings ->
+                    context.getString(R.string.run_completed_with_warnings)
+                outcome.record.failureCode == RUN_FAILURE_CONTROL_NOTIFICATION_UNAVAILABLE ->
+                    context.getString(R.string.run_cancelled_controls_unavailable)
+                else -> outcome.result.localizedMessage(context, outcome.record.failedStepLocation)
+            }
+            runMessage = if (outcome.historyWriteFailed) {
+                context.getString(R.string.run_result_history_not_saved, outcomeMessage)
+            } else {
+                outcomeMessage
+            }
         }
     }
     var pendingSchedule by remember { mutableStateOf<Triple<Workflow, Long, ScheduleRecurrence>?>(null) }
+    var pendingRunRequest by remember { mutableStateOf<Pair<Workflow, Boolean>?>(null) }
     var blockedNotificationReadiness by remember { mutableStateOf<ScheduleNotificationReadiness?>(null) }
-    val persistSchedule: (Triple<Workflow, Long, ScheduleRecurrence>) -> Unit = { request ->
-        runCatching { onSchedule(request.first, request.second, request.third) }
-            .onSuccess {
-                schedules = it
-                runMessage = context.getString(R.string.workflow_scheduled, request.first.name)
-            }
-            .onFailure { error ->
-                runMessage = context.getString(
-                    if (error is ScheduleStorageException) {
-                        R.string.schedule_storage_corrupt
-                    } else {
-                        R.string.schedule_failed
-                    },
-                )
-            }
+    var blockedRunNotificationReadiness by remember {
+        mutableStateOf<ScheduleNotificationReadiness?>(null)
+    }
+    val persistSchedule: suspend (Triple<Workflow, Long, ScheduleRecurrence>) -> ScheduleTimeError? = { request ->
+        try {
+            schedules = onSchedule(request.first, request.second, request.third)
+            runMessage = context.getString(R.string.workflow_scheduled, request.first.name)
+            null
+        } catch (error: ScheduleTimeException) {
+            runMessage = context.getString(error.error.messageResourceId())
+            error.error
+        } catch (error: WorkflowScheduleValidationException) {
+            runMessage = context.getString(
+                R.string.cannot_schedule,
+                error.issue.localizedMessage(context),
+            )
+            null
+        } catch (error: Exception) {
+            runMessage = context.getString(
+                if (error is ScheduleStorageException) {
+                    R.string.schedule_storage_corrupt
+                } else {
+                    R.string.schedule_failed
+                },
+            )
+            null
+        }
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         val request = pendingSchedule
         pendingSchedule = null
-        if (granted && request != null && request.first.isReadyToRun()) {
+        val currentWorkflow = request?.first?.id?.let { workflowId ->
+            latestWorkflows().firstOrNull { it.id == workflowId }
+        }
+        if (granted && request != null && currentWorkflow?.isReadyToRun() == true) {
             val readiness = scheduleNotificationReadiness(context)
             if (readiness == ScheduleNotificationReadiness.Ready) {
-                persistSchedule(request)
+                coroutineScope.launch { persistSchedule(request.copy(first = currentWorkflow)) }
             } else {
                 blockedNotificationReadiness = readiness
                 runMessage = context.getString(R.string.schedule_notifications_blocked)
             }
-        } else if (granted && request != null) {
+        } else if (granted && request != null && currentWorkflow == null) {
+            runMessage = context.getString(R.string.schedule_workflow_missing)
+        } else if (granted && request != null && currentWorkflow != null) {
             runMessage = context.getString(
                 R.string.cannot_schedule,
-                request.first.readinessIssues().first().localizedMessage(context),
+                currentWorkflow.readinessIssues().first().localizedMessage(context),
             )
         } else if (!granted) {
             blockedNotificationReadiness = ScheduleNotificationReadiness.RuntimePermissionRequired
             runMessage = context.getString(R.string.schedule_requires_notifications)
         }
     }
+    val startRunRequest: (Workflow, Boolean) -> Unit = { workflow, debug ->
+        val service = AutomationAccessibilityService.instance
+        if (service == null) {
+            runMessage = context.getString(R.string.enable_automation_before_run)
+            requestAccessibilitySetup()
+        } else {
+            runMessage = when (service.startWorkflowDetailed(workflow, debug)) {
+                WorkflowStartResult.Started -> if (debug) {
+                    context.getString(R.string.debugging_workflow, workflow.name)
+                } else {
+                    context.getString(R.string.running_workflow, workflow.name)
+                }
+                WorkflowStartResult.NotReady -> context.getString(
+                    R.string.cannot_run,
+                    workflow.readinessIssues().first().localizedMessage(context),
+                )
+                WorkflowStartResult.AlreadyRunning ->
+                    context.getString(R.string.another_workflow_running)
+                WorkflowStartResult.ControlsUnavailable ->
+                    context.getString(R.string.run_controls_unavailable)
+                WorkflowStartResult.ServiceUnavailable ->
+                    context.getString(R.string.enable_automation_before_run)
+            }
+        }
+    }
+    val runNotificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val request = pendingRunRequest
+        pendingRunRequest = null
+        val currentWorkflow = request?.first?.id?.let { workflowId ->
+            latestWorkflows().firstOrNull { it.id == workflowId }
+        }
+        when {
+            !granted -> {
+                blockedRunNotificationReadiness =
+                    ScheduleNotificationReadiness.RuntimePermissionRequired
+                runMessage = context.getString(R.string.run_requires_notifications)
+            }
+            request == null -> Unit
+            currentWorkflow == null ->
+                runMessage = context.getString(R.string.run_workflow_missing)
+            !currentWorkflow.isReadyToRun() -> runMessage = context.getString(
+                R.string.cannot_run,
+                currentWorkflow.readinessIssues().first().localizedMessage(context),
+            )
+            runningNotificationReadiness(context) != ScheduleNotificationReadiness.Ready ->
+                runMessage = context.getString(R.string.run_notifications_blocked)
+            else -> startRunRequest(currentWorkflow, request.second)
+        }
+    }
+    val requestWorkflowRun: (Workflow, Boolean) -> Unit = { workflow, debug ->
+        val currentWorkflow = latestWorkflows().firstOrNull { it.id == workflow.id }
+        val issue = currentWorkflow?.readinessIssues()?.firstOrNull()
+        when {
+            currentWorkflow == null ->
+                runMessage = context.getString(R.string.run_workflow_missing)
+            issue != null -> runMessage = context.getString(
+                R.string.cannot_run,
+                issue.localizedMessage(context),
+            )
+            AutomationAccessibilityService.instance == null -> {
+                runMessage = context.getString(R.string.enable_automation_before_run)
+                requestAccessibilitySetup()
+            }
+            else -> when (val readiness = runningNotificationReadiness(context)) {
+                ScheduleNotificationReadiness.Ready -> startRunRequest(currentWorkflow, debug)
+                ScheduleNotificationReadiness.RuntimePermissionRequired -> {
+                    pendingRunRequest = currentWorkflow to debug
+                    runNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                ScheduleNotificationReadiness.AppNotificationsDisabled,
+                ScheduleNotificationReadiness.ChannelDisabled -> {
+                    runMessage = context.getString(
+                        if (openRunningNotificationSettings(context, readiness)) {
+                            R.string.run_notifications_blocked
+                        } else {
+                            R.string.run_notification_settings_unavailable
+                        },
+                    )
+                }
+            }
+        }
+    }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        val workflow = pendingExport
+        val requestedWorkflow = pendingExport
         pendingExport = null
-        if (uri != null && workflow != null) {
+        val workflow = requestedWorkflow?.let { requested ->
+            canonicalWorkflowForExport(requested, workflowApplication.library.value)
+        }
+        if (uri != null && requestedWorkflow != null && workflow == null) {
+            runMessage = context.getString(R.string.export_workflow_missing)
+        } else if (uri != null && workflow != null) {
             coroutineScope.launch {
                 val outcome = withContext(Dispatchers.IO) {
                     runCatching { workflowTransfer.write(uri, workflow) }
                 }
                 outcome
                     .onSuccess { runMessage = context.getString(R.string.workflow_exported, workflow.name) }
-                    .onFailure { runMessage = context.getString(R.string.export_failed, it.message.orEmpty()) }
+                    .onFailure {
+                        runMessage = context.getString(
+                            R.string.export_failed,
+                            workflowTransferFailureMessage(context, it),
+                        )
+                    }
             }
         }
     }
     val bundleExportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
     ) { uri ->
-        val librarySnapshot = pendingBundleExport
+        val requestedSnapshot = pendingBundleExport
         pendingBundleExport = null
+        val librarySnapshot = canonicalLibraryForExport(requestedSnapshot, workflowApplication.library.value)
         if (uri != null && librarySnapshot != null) {
             coroutineScope.launch {
                 val outcome = withContext(Dispatchers.IO) {
@@ -548,12 +770,18 @@ private fun WorkflowApp(
                 }
                 outcome
                     .onSuccess {
-                        runMessage = context.getString(
-                            R.string.workflows_backed_up,
+                        runMessage = context.resources.getQuantityString(
+                            R.plurals.workflows_backed_up,
+                            librarySnapshot.workflows.size,
                             librarySnapshot.workflows.size,
                         )
                     }
-                    .onFailure { runMessage = context.getString(R.string.backup_failed, it.message.orEmpty()) }
+                    .onFailure {
+                        runMessage = context.getString(
+                            R.string.backup_failed,
+                            workflowTransferFailureMessage(context, it),
+                        )
+                    }
             }
         }
     }
@@ -564,30 +792,27 @@ private fun WorkflowApp(
             importInProgress = true
             coroutineScope.launch {
                 try {
-                    var currentWorkflowCount = 0
-                    val updated = readAndCommitImportedLibrary(
-                        readImported = {
-                            withContext(Dispatchers.IO) { workflowTransfer.readLibrary(uri) }
-                        },
-                        current = {
-                            library.also { currentWorkflowCount = it.workflows.size }
-                        },
-                        newId = ::newId,
-                        save = onCommitImport,
-                    )
+                    val imported = withContext(Dispatchers.IO) { workflowTransfer.readLibrary(uri) }
+                    val updated = onCommitImport(imported)
                     library = updated
-                    runMessage = context.getString(
-                        R.string.workflows_imported,
-                        updated.workflows.size - currentWorkflowCount,
+                    val importedCount = imported.workflows.size
+                    runMessage = context.resources.getQuantityString(
+                        R.plurals.workflows_imported,
+                        importedCount,
+                        importedCount,
                     )
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    val details = (error as? InvalidWorkflowException)
-                        ?.issue
-                        ?.localizedMessage(context)
-                        ?: error.message?.takeIf(String::isNotBlank)
-                        ?: context.getString(R.string.import_error_unknown)
+                    val details = if (error is InvalidWorkflowException ||
+                        error is WorkflowTransferException
+                    ) {
+                        workflowTransferFailureMessage(context, error)
+                    } else if (error is WorkflowImportSaveException) {
+                        context.getString(R.string.transfer_error_save_failed)
+                    } else {
+                        context.getString(R.string.transfer_error_unknown)
+                    }
                     runMessage = context.getString(R.string.import_failed, details)
                 } finally {
                     importInProgress = false
@@ -610,9 +835,10 @@ private fun WorkflowApp(
             initialEditingStepPath = initialEditingStepPath,
             saveInProgress = editorSaveInProgress,
             saveErrorMessage = editorSaveError,
+            onSetUpAutomation = requestAccessibilitySetup,
             onTest = { workflow ->
                 val service = AutomationAccessibilityService.instance
-                val notificationStatus = scheduleNotificationReadiness(context)
+                val notificationStatus = runningNotificationReadiness(context)
                 preflightReport = workflow to buildWorkflowPreflightReport(
                     workflow = workflow,
                     accessibilityConnected = service != null,
@@ -625,6 +851,9 @@ private fun WorkflowApp(
                     },
                     countMatches = { selector -> service?.countMatches(selector) ?: 0 },
                     imageCaptureSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
+                    displayWidth = preflightDisplaySize.width,
+                    displayHeight = preflightDisplaySize.height,
+                    isImageTemplateValid = ::imageTemplateIsValid,
                 )
             },
             onBack = {
@@ -638,17 +867,13 @@ private fun WorkflowApp(
                     coroutineScope.launch {
                         runCatching {
                             onCommitWorkflow(expected, workflow)
-                        }.onSuccess { updatedLibrary ->
-                            library = updatedLibrary
-                            if (!workflow.isReadyToRun()) {
-                                runCatching { onCancelSchedule(workflow.id) }
-                                    .onSuccess { schedules = it }
-                                    .onFailure { error ->
-                                        if (error !is ScheduleStorageException) throw error
-                                        runMessage = context.getString(
-                                            R.string.workflow_saved_schedule_cleanup_failed,
-                                        )
-                                    }
+                        }.onSuccess { commit ->
+                            library = commit.library
+                            commit.cleanupResult?.let { schedules = it }
+                            if (commit.cleanupError != null) {
+                                runMessage = context.getString(
+                                    R.string.workflow_saved_schedule_cleanup_failed,
+                                )
                             }
                             editingWorkflow = null
                             initialEditingStepPath = null
@@ -671,6 +896,7 @@ private fun WorkflowApp(
             appearanceMode = appearanceMode,
             onAppearanceModeChanged = onAppearanceModeChanged,
             onOpenAccessibilitySettings = requestAccessibilitySetup,
+            onOpenTutorial = openTutorial,
             onReviewAccessibilityDisclosure = {
                 if (accessibilityDisclosureGate.reviewDisclosure() ==
                     AccessibilityDisclosureAction.ShowDisclosure
@@ -685,10 +911,16 @@ private fun WorkflowApp(
             records = runRecords,
             historyCorrupt = runHistoryCorrupt,
             workflows = workflows,
+            requestedRecordId = requestedHistoryRecordId,
+            onRequestedRecordConsumed = { requestedHistoryRecordId = null },
             onBack = { showRunHistory = false },
             onOpenWorkflow = { workflow, stepPath ->
                 initialEditingStepPath = stepPath
                 editingWorkflow = workflow
+            },
+            onRetry = { workflow ->
+                showRunHistory = false
+                requestWorkflowRun(workflow, false)
             },
             onClear = requestClearRunHistory,
         )
@@ -697,10 +929,12 @@ private fun WorkflowApp(
             workflows = workflows,
             folders = library.folders,
             workflowFolderIds = library.workflowFolderIds,
-            onSaveFolder = { folder -> persist(library.withFolder(folder)) },
-            onDeleteFolder = { folderId -> persist(library.withoutFolder(folderId)) },
+            onSaveFolder = { folder -> persist(update = { latest -> latest.withFolder(folder) }) },
+            onDeleteFolder = { folderId ->
+                persist(update = { latest -> latest.withoutFolder(folderId) })
+            },
             onMoveWorkflow = { workflowId, folderId ->
-                persist(library.moveWorkflow(workflowId, folderId))
+                persist(update = { latest -> latest.moveWorkflow(workflowId, folderId) })
             },
             onInstallSettingsPack = {
                 val availablePacks = listOf(
@@ -756,23 +990,30 @@ private fun WorkflowApp(
                 ).filter { (pack) ->
                     context.packageManager.getLaunchIntentForPackage(pack.packageName) != null
                 }
-                var updatedLibrary = library
-                var addedCount = 0
-                availablePacks.forEach { (pack, folderNameRes, workflowNameResources) ->
-                    val result = pack.install(
-                        library = updatedLibrary,
-                        folderName = context.getString(folderNameRes),
-                        workflowNames = workflowNameResources.map(context::getString),
+                val packInputs = availablePacks.map { (pack, folderNameRes, workflowNameResources) ->
+                    Triple(
+                        pack,
+                        context.getString(folderNameRes),
+                        workflowNameResources.map(context::getString),
                     )
-                    updatedLibrary = result.library
-                    addedCount += result.addedWorkflowCount
                 }
-                persist(updatedLibrary)
-                runMessage = if (addedCount == 0) {
-                    context.getString(R.string.system_packs_already_installed)
-                } else {
-                    context.getString(R.string.system_packs_installed, addedCount)
-                }
+                var addedCount = 0
+                persist(
+                    update = { latest ->
+                        packInputs.fold(latest) { current, (pack, folderName, workflowNames) ->
+                            pack.install(current, folderName, workflowNames).also { result ->
+                                addedCount += result.addedWorkflowCount
+                            }.library
+                        }
+                    },
+                    onSuccess = {
+                        runMessage = if (addedCount == 0) {
+                            context.getString(R.string.system_packs_already_installed)
+                        } else {
+                            context.getString(R.string.system_packs_installed, addedCount)
+                        }
+                    },
+                )
             },
             runRecords = runRecords,
             runHistoryCorrupt = runHistoryCorrupt,
@@ -790,12 +1031,17 @@ private fun WorkflowApp(
             },
             importInProgress = importInProgress,
             onExportAll = {
-                pendingBundleExport = library
+                pendingBundleExport = workflowApplication.library.value ?: library
                 bundleExportLauncher.launch("ai-index-finger-backup.json")
             },
             onExport = { workflow ->
-                pendingExport = workflow
-                exportLauncher.launch(workflow.exportFileName())
+                val currentWorkflow = latestWorkflows().firstOrNull { it.id == workflow.id }
+                if (currentWorkflow == null) {
+                    runMessage = context.getString(R.string.export_workflow_missing)
+                } else {
+                    pendingExport = currentWorkflow
+                    exportLauncher.launch(currentWorkflow.exportFileName())
+                }
             },
             onDuplicate = { workflow ->
                 val duplicate = workflow.copy(
@@ -803,12 +1049,14 @@ private fun WorkflowApp(
                     name = context.getString(R.string.workflow_copy_name, workflow.name),
                 )
                 persist(
-                    library.copy(
-                        workflows = workflows + duplicate,
-                        workflowFolderIds = library.folderIdFor(workflow.id)?.let { folderId ->
-                            library.workflowFolderIds + (duplicate.id to folderId)
-                        } ?: library.workflowFolderIds,
-                    ),
+                    update = { latest ->
+                        latest.copy(
+                            workflows = latest.workflows + duplicate,
+                            workflowFolderIds = latest.folderIdFor(workflow.id)?.let { folderId ->
+                                latest.workflowFolderIds + (duplicate.id to folderId)
+                            } ?: latest.workflowFolderIds,
+                        )
+                    },
                 )
             },
             onCompare = { before, after -> workflowComparison = before to after },
@@ -819,104 +1067,94 @@ private fun WorkflowApp(
                                     .onFailure {
                                         runMessage = context.getString(R.string.workflow_versions_load_failed)
                                     }
+                                    Unit
                             }
                         },
             onDelete = { workflow ->
-                            runCatching { onCancelSchedule(workflow.id) }
-                                .onSuccess {
-                                    schedules = it
-                                    persist(library.copy(workflows = workflows.filterNot { it.id == workflow.id }))
+                            coroutineScope.launch {
+                                try {
+                                    val deletion = onDeleteWorkflow(workflow.id)
+                                    library = deletion.library
+                                    deletion.cleanupResult?.let { schedules = it }
+                                    if (deletion.cleanupError != null) {
+                                        runMessage = context.getString(
+                                            R.string.workflow_saved_schedule_cleanup_failed,
+                                        )
+                                    }
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    runMessage = context.getString(R.string.save_failed)
                                 }
-                                .onFailure { error ->
-                                    runMessage = context.getString(
-                                        if (error is ScheduleStorageException) {
-                                            R.string.schedule_storage_corrupt
-                                        } else {
-                                            R.string.schedule_failed
-                                        },
-                                    )
-                                }
+                            }
             },
             onSchedule = { workflow, targetEpochMillis, recurrence ->
-                if (!workflow.isReadyToRun()) {
+                val currentWorkflow = latestWorkflows().firstOrNull { it.id == workflow.id }
+                if (currentWorkflow == null) {
+                    runMessage = context.getString(R.string.schedule_workflow_missing)
+                } else if (!currentWorkflow.isReadyToRun()) {
                     runMessage = context.getString(
                         R.string.cannot_schedule,
-                        workflow.readinessIssues().first().localizedMessage(context),
+                        currentWorkflow.readinessIssues().first().localizedMessage(context),
                     )
+                    null
                 } else {
-                    val request = Triple(workflow, targetEpochMillis, recurrence)
+                    val request = Triple(currentWorkflow, targetEpochMillis, recurrence)
                     val readiness = scheduleNotificationReadiness(context)
                     when (scheduleNotificationAction(readiness)) {
-                        ScheduleNotificationAction.Schedule -> persistSchedule(request)
+                        ScheduleNotificationAction.Schedule -> {
+                            coroutineScope.launch { persistSchedule(request) }
+                            null
+                        }
                         ScheduleNotificationAction.RequestPermission -> {
                             pendingSchedule = request
                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            null
                         }
                         ScheduleNotificationAction.OpenSettings -> {
                             blockedNotificationReadiness = readiness
                             runMessage = context.getString(R.string.schedule_notifications_blocked)
+                            null
                         }
                     }
                 }
             },
             onCancelSchedule = { workflow ->
-                runCatching { onCancelSchedule(workflow.id) }
-                    .onSuccess {
-                        schedules = it
-                        runMessage = context.getString(R.string.workflow_schedule_cancelled, workflow.name)
-                    }
-                    .onFailure { error ->
-                        runMessage = context.getString(
-                            if (error is ScheduleStorageException) {
-                                R.string.schedule_storage_corrupt
-                            } else {
-                                R.string.schedule_failed
-                            },
-                        )
+                coroutineScope.launch {
+                    runCatching { onCancelSchedule(workflow.id) }
+                        .onSuccess {
+                            schedules = it
+                            runMessage = context.getString(
+                                R.string.workflow_schedule_cancelled,
+                                workflow.name,
+                            )
+                        }
+                        .onFailure { error ->
+                            runMessage = context.getString(
+                                if (error is ScheduleStorageException) {
+                                    R.string.schedule_storage_corrupt
+                                } else {
+                                    R.string.schedule_failed
+                                },
+                            )
+                        }
                     }
             },
             onClearRunHistory = requestClearRunHistory,
             onViewRunHistory = { showRunHistory = true },
             onOpenSettings = { showSettings = true },
+            onOpenTutorial = openTutorial,
             runningWorkflowId = runningWorkflowId,
             runMessage = runMessage,
             onRun = { workflow ->
-                val service = AutomationAccessibilityService.instance
-                val issue = workflow.readinessIssues().firstOrNull()
-                if (issue != null) {
-                    runMessage = context.getString(R.string.cannot_run, issue.localizedMessage(context))
-                } else if (service == null) {
-                    runMessage = context.getString(R.string.enable_automation_before_run)
-                    requestAccessibilitySetup()
-                } else {
-                    val started = service.startWorkflow(workflow)
-                    runMessage = if (started) {
-                        context.getString(R.string.running_workflow, workflow.name)
-                    } else {
-                        context.getString(R.string.another_workflow_running)
-                    }
-                }
+                requestWorkflowRun(workflow, false)
             },
             onDebug = { workflow ->
-                val service = AutomationAccessibilityService.instance
-                val issue = workflow.readinessIssues().firstOrNull()
-                if (issue != null) {
-                    runMessage = context.getString(R.string.cannot_run, issue.localizedMessage(context))
-                } else if (service == null) {
-                    runMessage = context.getString(R.string.enable_automation_before_run)
-                    requestAccessibilitySetup()
-                } else {
-                    val started = service.startWorkflow(workflow, debug = true)
-                    runMessage = if (started) {
-                        context.getString(R.string.debugging_workflow, workflow.name)
-                    } else {
-                        context.getString(R.string.another_workflow_running)
-                    }
-                }
+                requestWorkflowRun(workflow, true)
             },
             onPreflight = { workflow ->
                 val service = AutomationAccessibilityService.instance
-                val notificationStatus = scheduleNotificationReadiness(context)
+                val notificationStatus = runningNotificationReadiness(context)
                 preflightReport = workflow to buildWorkflowPreflightReport(
                     workflow = workflow,
                     accessibilityConnected = service != null,
@@ -929,6 +1167,9 @@ private fun WorkflowApp(
                     },
                     countMatches = { selector -> service?.countMatches(selector) ?: 0 },
                     imageCaptureSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
+                    displayWidth = preflightDisplaySize.width,
+                    displayHeight = preflightDisplaySize.height,
+                    isImageTemplateValid = ::imageTemplateIsValid,
                 )
             },
             onStop = { AutomationAccessibilityService.instance?.stopWorkflow() },
@@ -954,15 +1195,17 @@ private fun WorkflowApp(
             onRollback = { version ->
                 coroutineScope.launch {
                     runCatching { onRollback(current.id, version.versionId) }
-                        .onSuccess { restored ->
-                            library = library.copy(
-                                workflows = workflows.map { workflow ->
-                                    if (workflow.id == restored.id) restored else workflow
-                                },
-                            )
+                        .onSuccess { rollback ->
+                            val restored = rollback.workflow
+                            library = rollback.libraryCommit.library
+                            rollback.libraryCommit.cleanupResult?.let { schedules = it }
                             versionHistory = restored to runCatching { onListVersions(restored.id) }
                                 .getOrDefault(emptyList())
-                            runMessage = context.getString(R.string.workflow_rollback_complete, restored.name)
+                            runMessage = if (rollback.libraryCommit.cleanupError == null) {
+                                context.getString(R.string.workflow_rollback_complete, restored.name)
+                            } else {
+                                context.getString(R.string.workflow_saved_schedule_cleanup_failed)
+                            }
                         }
                         .onFailure {
                             runMessage = context.getString(R.string.workflow_rollback_failed)
@@ -1003,7 +1246,9 @@ private fun WorkflowApp(
                 when (action) {
                     PreflightRecoveryAction.SetUpAutomation -> requestAccessibilitySetup()
                     PreflightRecoveryAction.OpenNotificationSettings -> {
-                        openScheduleNotificationSettings(context, report.notificationStatus)
+                        if (!openRunningNotificationSettings(context, report.notificationStatus)) {
+                            runMessage = context.getString(R.string.notification_settings_unavailable)
+                        }
                     }
                 }
             },
@@ -1012,10 +1257,23 @@ private fun WorkflowApp(
     blockedNotificationReadiness?.let { readiness ->
         ScheduleNotificationRecoveryDialog(
             onOpenSettings = {
-                openScheduleNotificationSettings(context, readiness)
+                if (!openScheduleNotificationSettings(context, readiness)) {
+                    runMessage = context.getString(R.string.notification_settings_unavailable)
+                }
                 blockedNotificationReadiness = null
             },
             onDismiss = { blockedNotificationReadiness = null },
+        )
+    }
+    blockedRunNotificationReadiness?.let { readiness ->
+        RunNotificationRecoveryDialog(
+            onOpenSettings = {
+                if (!openRunningNotificationSettings(context, readiness)) {
+                    runMessage = context.getString(R.string.run_notification_settings_unavailable)
+                }
+                blockedRunNotificationReadiness = null
+            },
+            onDismiss = { blockedRunNotificationReadiness = null },
         )
     }
 
@@ -1038,6 +1296,34 @@ private fun WorkflowApp(
     }
 }
 
+internal fun workflowTransferFailureMessage(context: Context, error: Throwable): String = when (error) {
+    is InvalidWorkflowException -> error.issue.localizedMessage(context)
+    is WorkflowTransferException -> when (error.code) {
+        WorkflowTransferErrorCode.InvalidContent -> context.getString(R.string.transfer_error_invalid_content)
+        WorkflowTransferErrorCode.TooManyWorkflows -> context.getString(R.string.transfer_error_too_many_workflows)
+        WorkflowTransferErrorCode.TooManyFolders -> context.getString(R.string.transfer_error_too_many_folders)
+        WorkflowTransferErrorCode.DuplicateWorkflowIds ->
+            context.getString(R.string.transfer_error_duplicate_workflows)
+        WorkflowTransferErrorCode.DuplicateFolderIds ->
+            context.getString(R.string.transfer_error_duplicate_folder_ids)
+        WorkflowTransferErrorCode.RootNotObject -> context.getString(R.string.transfer_error_root_not_object)
+        WorkflowTransferErrorCode.UnsupportedBundleVersion -> context.getString(
+            R.string.transfer_error_unsupported_bundle_version,
+            error.arguments["version"].orEmpty(),
+        )
+        WorkflowTransferErrorCode.BlankFolderName -> context.getString(R.string.transfer_error_blank_folder)
+        WorkflowTransferErrorCode.DuplicateFolderNames ->
+            context.getString(R.string.transfer_error_duplicate_folder_names)
+        WorkflowTransferErrorCode.UnsupportedWorkflowVersion -> context.getString(
+            R.string.transfer_error_unsupported_workflow_version,
+            error.arguments["version"].orEmpty(),
+        )
+        WorkflowTransferErrorCode.FileUnavailable -> context.getString(R.string.transfer_error_file_unavailable)
+        WorkflowTransferErrorCode.FileTooLarge -> context.getString(R.string.transfer_error_file_too_large)
+    }
+    else -> context.getString(R.string.transfer_error_unknown)
+}
+
 @Composable
 internal fun ScheduleNotificationRecoveryDialog(
     onOpenSettings: () -> Unit,
@@ -1058,6 +1344,31 @@ internal fun ScheduleNotificationRecoveryDialog(
                 onClick = onOpenSettings,
                 modifier = Modifier.testTag(SCHEDULE_NOTIFICATION_SETTINGS_TAG),
             ) { Text(stringResource(R.string.open_notification_settings)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+@Composable
+internal fun RunNotificationRecoveryDialog(
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.run_notifications_blocked_title)) },
+        text = {
+            Text(
+                stringResource(R.string.run_notifications_blocked),
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onOpenSettings) {
+                Text(stringResource(R.string.open_notification_settings))
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
@@ -1092,6 +1403,7 @@ internal fun WorkflowHome(
     onClearRunHistory: () -> Unit,
     onViewRunHistory: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenTutorial: () -> Unit,
     runningWorkflowId: String?,
     runMessage: String?,
     onRun: (Workflow) -> Unit,
@@ -1136,8 +1448,8 @@ internal fun WorkflowHome(
             selectedFolderFilter = WorkflowFolderSelection.All
         }
     }
-    val visibleWorkflows = remember(workflows, workflowQuery, selectedFolderFilter, workflowFolderIds) {
-        filterWorkflows(workflows, workflowFolderIds, workflowQuery, selectedFolderFilter)
+    val visibleWorkflows = remember(workflows, folders, workflowQuery, selectedFolderFilter, workflowFolderIds) {
+        filterWorkflows(workflows, workflowFolderIds, folders, workflowQuery, selectedFolderFilter)
     }
     var elapsedMillis by remember { mutableLongStateOf(0L) }
     LaunchedEffect(workflowStartedAtMillis) {
@@ -1173,11 +1485,14 @@ internal fun WorkflowHome(
             Spacer(Modifier.height(24.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "AI Index Finger",
+                    stringResource(R.string.app_name),
                     modifier = Modifier.weight(1f),
                     fontSize = 30.sp,
                     fontWeight = FontWeight.Bold,
                 )
+                TextButton(onClick = onOpenTutorial) {
+                    Text(stringResource(R.string.tutorial_action))
+                }
                 TextButton(onClick = onOpenSettings) {
                     Text(stringResource(R.string.settings_title))
                 }
@@ -1250,7 +1565,12 @@ internal fun WorkflowHome(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    stringResource(R.string.workflow_count, workflows.size, visibleWorkflows.size),
+                    pluralStringResource(
+                        R.plurals.workflow_count,
+                        workflows.size,
+                        workflows.size,
+                        visibleWorkflows.size,
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
@@ -1293,11 +1613,23 @@ internal fun WorkflowHome(
             Spacer(Modifier.height(8.dp))
             HorizontalDivider()
             if (workflows.isEmpty()) {
-                Text(
-                    stringResource(R.string.no_workflows),
+                Column(
                     modifier = Modifier.padding(vertical = 24.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        stringResource(R.string.no_workflows),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        stringResource(R.string.no_workflows_tutorial_hint),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                    TextButton(onClick = onOpenTutorial) {
+                        Text(stringResource(R.string.tutorial_action))
+                    }
+                }
             } else if (visibleWorkflows.isEmpty()) {
                 Text(
                     stringResource(R.string.no_matching_workflows),
@@ -1416,7 +1748,12 @@ internal fun WorkflowHome(
                     if (affectedCount == 0) {
                         stringResource(R.string.delete_empty_folder_message, folder.name)
                     } else {
-                        stringResource(R.string.delete_folder_message, folder.name, affectedCount)
+                        pluralStringResource(
+                            R.plurals.delete_folder_message,
+                            affectedCount,
+                            folder.name,
+                            affectedCount,
+                        )
                     },
                 )
             },
@@ -1539,8 +1876,13 @@ internal fun WorkflowHome(
             workflowName = workflow.name,
             onDismiss = { workflowToSchedule = null },
             onSchedule = { targetEpochMillis, recurrence ->
-                onSchedule(workflow, targetEpochMillis, recurrence)
-                workflowToSchedule = null
+                try {
+                    onSchedule(workflow, targetEpochMillis, recurrence)
+                    workflowToSchedule = null
+                    null
+                } catch (error: ScheduleTimeException) {
+                    error.error
+                }
             },
         )
     }
@@ -1595,8 +1937,9 @@ private fun WorkflowFolderManagerDialog(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            stringResource(
-                                R.string.folder_item_count,
+                            pluralStringResource(
+                                R.plurals.folder_item_count,
+                                workflowFolderIds.count { it.value == folder.id },
                                 folder.name,
                                 workflowFolderIds.count { it.value == folder.id },
                             ),
@@ -1744,13 +2087,16 @@ private fun FolderDestinationRow(
 private fun ScheduleDialog(
     workflowName: String,
     onDismiss: () -> Unit,
-    onSchedule: (Long, ScheduleRecurrence) -> Unit,
+    onSchedule: (Long, ScheduleRecurrence) -> ScheduleTimeError?,
 ) {
     val context = LocalContext.current
     val initialDateTime = remember { LocalDateTime.now().plusMinutes(15).withSecond(0).withNano(0) }
     var selectedDate by remember { mutableStateOf(initialDateTime.toLocalDate()) }
     var selectedTime by remember { mutableStateOf(initialDateTime.toLocalTime()) }
     var recurrence by remember { mutableStateOf(ScheduleRecurrence.Once) }
+    var submissionError by remember(selectedDate, selectedTime) {
+        mutableStateOf<ScheduleTimeError?>(null)
+    }
     val targetResult = runCatching {
         localScheduleEpochMillis(selectedDate, selectedTime, ZoneId.systemDefault()).also {
             scheduleDelayMillis(it, System.currentTimeMillis())
@@ -1808,8 +2154,14 @@ private fun ScheduleDialog(
                         Text(option.localizedLabel())
                     }
                 }
-                targetResult.exceptionOrNull()?.message?.let { message ->
-                    Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                val timeError = (targetResult.exceptionOrNull() as? ScheduleTimeException)?.error
+                    ?: submissionError
+                timeError?.let { error ->
+                    Text(
+                        stringResource(error.messageResourceId()),
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
                 }
                 Text(
                     stringResource(R.string.schedule_delay_note),
@@ -1821,11 +2173,19 @@ private fun ScheduleDialog(
         confirmButton = {
             TextButton(
                 enabled = targetResult.isSuccess,
-                onClick = { onSchedule(targetResult.getOrThrow(), recurrence) },
+                onClick = {
+                    submissionError = onSchedule(targetResult.getOrThrow(), recurrence)
+                },
             ) { Text(stringResource(R.string.schedule)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+private fun ScheduleTimeError.messageResourceId(): Int = when (this) {
+    ScheduleTimeError.NonexistentLocalTime -> R.string.schedule_time_nonexistent
+    ScheduleTimeError.NotInFuture -> R.string.schedule_time_not_future
+    ScheduleTimeError.TooFarInFuture -> R.string.schedule_time_too_far
 }
 
 @Composable
@@ -1848,7 +2208,12 @@ private fun NodeInspectorDialog(nodes: List<ObservedNode>, onDismiss: () -> Unit
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    stringResource(R.string.element_count, nodes.size, visibleNodes.size),
+                    pluralStringResource(
+                        R.plurals.element_count,
+                        nodes.size,
+                        nodes.size,
+                        visibleNodes.size,
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
@@ -1860,7 +2225,10 @@ private fun NodeInspectorDialog(nodes: List<ObservedNode>, onDismiss: () -> Unit
                 }
                 visibleNodes.forEachIndexed { index, node ->
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("${index + 1}. ${node.displayName()}", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            stringResource(R.string.numbered_item, index + 1, node.displayName()),
+                            fontWeight = FontWeight.SemiBold,
+                        )
                         NodeProperty(stringResource(R.string.package_name), node.packageName)
                         NodeProperty(stringResource(R.string.resource_id), node.viewId)
                         NodeProperty(stringResource(R.string.text_label), node.text)
@@ -1871,10 +2239,10 @@ private fun NodeInspectorDialog(nodes: List<ObservedNode>, onDismiss: () -> Unit
                             stringResource(R.string.status),
                             stringResource(
                                 R.string.element_state,
-                                node.clickable,
-                                node.longClickable,
-                                node.scrollable,
-                                node.enabled,
+                                stringResource(if (node.clickable) R.string.value_yes else R.string.value_no),
+                                stringResource(if (node.longClickable) R.string.value_yes else R.string.value_no),
+                                stringResource(if (node.scrollable) R.string.value_yes else R.string.value_no),
+                                stringResource(if (node.enabled) R.string.value_yes else R.string.value_no),
                             ),
                         )
                     }
@@ -1896,7 +2264,11 @@ private fun ObservedNode.matchesQuery(query: String): Boolean {
 @Composable
 private fun NodeProperty(label: String, value: String?) {
     if (!value.isNullOrBlank()) {
-        Text("$label: $value", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+        Text(
+            stringResource(R.string.node_property, label, value),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+        )
     }
 }
 
@@ -1909,6 +2281,7 @@ internal fun WorkflowEditor(
     onCollapse: (() -> Unit)? = null,
     saveInProgress: Boolean = false,
     saveErrorMessage: String? = null,
+    onSetUpAutomation: () -> Unit = {},
     onTest: (Workflow) -> Unit,
     onBack: () -> Unit,
     onSave: (expected: Workflow?, candidate: Workflow) -> Unit,
@@ -2030,8 +2403,9 @@ internal fun WorkflowEditor(
             title = { Text(stringResource(R.string.click_recording_unrecognized_title)) },
             text = {
                 Text(
-                    stringResource(
-                        R.string.click_recording_unrecognized_message,
+                    pluralStringResource(
+                        R.plurals.click_recording_unrecognized_message,
+                        unrecognizedClickCount,
                         unrecognizedClickCount,
                     ),
                 )
@@ -2181,7 +2555,7 @@ internal fun WorkflowEditor(
                 TextButton(
                     onClick = requestBack,
                     modifier = Modifier.testTag(WORKFLOW_EDITOR_BACK_TAG),
-                ) { Text(stringResource(R.string.back)) }
+                ) { Text(stringResource(R.string.system_action_back)) }
                 Text(stringResource(R.string.workflow_editor), fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(16.dp))
@@ -2198,13 +2572,28 @@ internal fun WorkflowEditor(
                 onValueChange = { defaultTimeoutText = it },
                 label = { Text(stringResource(R.string.default_step_timeout)) },
                 isError = defaultTimeoutMillis == null || defaultTimeoutMillis <= 0,
+                supportingText = if (defaultTimeoutMillis == null || defaultTimeoutMillis <= 0) {
+                    {
+                        Text(
+                            stringResource(R.string.validation_non_positive_timeout),
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                    }
+                } else {
+                    null
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             if (validationIssues.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    stringResource(R.string.validation_issue_count, validationIssues.size),
+                    pluralStringResource(
+                        R.plurals.validation_issue_count,
+                        validationIssues.size,
+                        validationIssues.size,
+                    ),
                     color = MaterialTheme.colorScheme.error,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -2233,7 +2622,11 @@ internal fun WorkflowEditor(
                             if (showAllValidationIssues) {
                                 stringResource(R.string.collapse)
                             } else {
-                                stringResource(R.string.more_issues, validationIssues.size - 3)
+                                pluralStringResource(
+                                    R.plurals.more_issues,
+                                    validationIssues.size - 3,
+                                    validationIssues.size - 3,
+                                )
                             },
                         )
                     }
@@ -2352,6 +2745,13 @@ internal fun WorkflowEditor(
                 onClick = { AutomationAccessibilityService.instance?.startElementInspector() },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.inspect_element_overlay)) }
+            if (AutomationAccessibilityService.instance == null) {
+                Text(
+                    stringResource(R.string.overlay_actions_require_automation_service),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
             overlayStatus?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
             }
@@ -2400,7 +2800,7 @@ internal fun WorkflowEditor(
                         )
                     },
                     modifier = Modifier.weight(1f),
-                ) { Text(stringResource(R.string.home)) }
+                ) { Text(stringResource(R.string.system_action_home)) }
                 OutlinedButton(
                     onClick = {
                         steps = steps.insertStep(
@@ -2410,7 +2810,7 @@ internal fun WorkflowEditor(
                         )
                     },
                     modifier = Modifier.weight(1f),
-                ) { Text(stringResource(R.string.recents)) }
+                ) { Text(stringResource(R.string.system_action_recents)) }
             }
             Spacer(Modifier.height(16.dp))
             Text(stringResource(R.string.add_logic), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -2444,6 +2844,13 @@ internal fun WorkflowEditor(
                 onClick = { showNodeConditionDialog = true },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.element_exists_condition)) }
+            if (currentSteps.isEmpty()) {
+                Text(
+                    stringResource(R.string.operation_requires_existing_step),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
         }
     }
 
@@ -2524,6 +2931,7 @@ internal fun WorkflowEditor(
     }
     if (showSwipeDialog) {
         SwipeDialog(
+            onSetUpAutomation = onSetUpAutomation,
             onDismiss = { showSwipeDialog = false },
             onAdd = { startX, startY, endX, endY, duration ->
                 steps = steps.insertStep(
@@ -2537,6 +2945,7 @@ internal fun WorkflowEditor(
     }
     if (showTapDialog) {
         TapDialog(
+            onSetUpAutomation = onSetUpAutomation,
             onDismiss = { showTapDialog = false },
             onAdd = { x, y ->
                 steps = steps.insertStep(
@@ -2663,12 +3072,13 @@ internal fun WorkflowEditor(
                 },
             )
             is Step.RecordedClick -> RecordedClickDialog(
+                observedNodes = observedNodes,
                 initialStep = step,
                 onDismiss = { editingStepPath = null },
-                onSave = { targetMode, x, y ->
+                onSave = { targetMode, x, y, selector ->
                     steps = steps.replaceStep(
                         path,
-                        step.copy(targetMode = targetMode, x = x, y = y),
+                        step.copy(targetMode = targetMode, x = x, y = y, selector = selector),
                     )
                     editingStepPath = null
                 },
@@ -2765,6 +3175,7 @@ internal fun WorkflowEditor(
             is Step.Swipe -> SwipeDialog(
                 initialStep = step,
                 confirmLabelRes = R.string.save,
+                onSetUpAutomation = onSetUpAutomation,
                 onDismiss = { editingStepPath = null },
                 onAdd = { startX, startY, endX, endY, duration ->
                     steps = steps.replaceStep(
@@ -2783,6 +3194,7 @@ internal fun WorkflowEditor(
             is Step.Tap -> TapDialog(
                 initialStep = step,
                 confirmLabelRes = R.string.save,
+                onSetUpAutomation = onSetUpAutomation,
                 onDismiss = { editingStepPath = null },
                 onAdd = { x, y ->
                     steps = steps.replaceStep(path, step.copy(x = x, y = y))
@@ -2966,12 +3378,15 @@ private fun GlobalActionSettingsDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SystemAction.entries.forEach { action ->
                     val selected = action == current
+                    val modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { this.selected = selected }
                     if (selected) {
-                        Button(onClick = { onSelect(action) }, modifier = Modifier.fillMaxWidth()) {
+                        Button(onClick = { onSelect(action) }, modifier = modifier) {
                             Text(action.displayName())
                         }
                     } else {
-                        OutlinedButton(onClick = { onSelect(action) }, modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = { onSelect(action) }, modifier = modifier) {
                             Text(action.displayName())
                         }
                     }
@@ -2991,6 +3406,7 @@ private fun RepeatSettingsDialog(
 ) {
     var countText by remember(initialCount) { mutableStateOf(initialCount.toString()) }
     val count = countText.toIntOrNull()
+    val countValid = count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.repeat_settings)) },
@@ -3000,11 +3416,14 @@ private fun RepeatSettingsDialog(
                 { countText = it },
                 stringResource(R.string.repeat_count_range, Step.Repeat.MAX_REPEAT_COUNT),
                 true,
+                numeric = true,
+                errorText = stringResource(R.string.repeat_count_error, Step.Repeat.MAX_REPEAT_COUNT)
+                    .takeUnless { countValid },
             )
         },
         confirmButton = {
             TextButton(
-                enabled = count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT,
+                enabled = countValid,
                 onClick = { onSave(requireNotNull(count)) },
             ) { Text(stringResource(R.string.save)) }
         },
@@ -3025,8 +3444,8 @@ private fun ConditionSettingsDialog(
     var rightMode by remember(initialRight) { mutableStateOf(variableValueMode(initialRight)) }
     var rightText by remember(initialRight) { mutableStateOf(variableValueText(initialRight)) }
     var operator by remember(initialOperator) { mutableStateOf(initialOperator) }
-    val left = variableValueOrNull(leftMode, leftText)
-    val right = variableValueOrNull(rightMode, rightText)
+    val left = variableValueOrNull(leftMode, leftText, initialLeft)
+    val right = variableValueOrNull(rightMode, rightText, initialRight)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.condition_settings)) },
@@ -3071,13 +3490,15 @@ private fun FailurePolicyDialog(
     onSelect: (FailurePolicy, Long?) -> Unit,
 ) {
     val current = currentStep.failurePolicy
+    val currentChoice = failurePolicyChoice(current)
     var timeoutText by remember { mutableStateOf(currentStep.timeoutMillis?.toString().orEmpty()) }
     var retryAttempts by remember { mutableStateOf((current as? FailurePolicy.Retry)?.attempts?.toString() ?: "2") }
     var retryDelay by remember { mutableStateOf((current as? FailurePolicy.Retry)?.delayMillis?.toString() ?: "500") }
     val timeoutMillis = timeoutText.toLongOrNull()
-    val timeoutValid = timeoutText.isBlank() || (timeoutMillis != null && timeoutMillis > 0)
+    val timeoutValid = stepTimeoutCanSave(timeoutText)
     val attempts = retryAttempts.toIntOrNull()
     val delay = retryDelay.toLongOrNull()
+    val retryValid = retryPolicyCanSave(attempts, delay)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.step_settings_title)) },
@@ -3090,49 +3511,90 @@ private fun FailurePolicyDialog(
                     timeoutText,
                     { timeoutText = it },
                     stringResource(R.string.step_timeout_override, defaultTimeoutMillis),
+                    numeric = true,
+                    errorText = stringResource(R.string.validation_non_positive_timeout)
+                        .takeUnless { timeoutValid },
                 )
                 Text(stringResource(R.string.on_failure), fontWeight = FontWeight.SemiBold)
-                Button(
+                FailurePolicyChoiceButton(
+                    selected = currentChoice == FailurePolicyChoice.Stop,
                     enabled = timeoutValid,
                     onClick = { onSelect(FailurePolicy.Stop, timeoutMillis) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(stringResource(R.string.stop_workflow))
-                }
-                OutlinedButton(
+                    label = stringResource(R.string.stop_workflow),
+                )
+                FailurePolicyChoiceButton(
+                    selected = currentChoice == FailurePolicyChoice.Continue,
                     enabled = timeoutValid,
                     onClick = { onSelect(FailurePolicy.Continue, timeoutMillis) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.continue_next_step)) }
+                    label = stringResource(R.string.continue_next_step),
+                )
                 Text(stringResource(R.string.retry), fontWeight = FontWeight.SemiBold)
                 NodeField(
                     retryAttempts,
                     { retryAttempts = it },
                     stringResource(R.string.retry_attempts),
                     true,
+                    numeric = true,
+                    errorText = stringResource(R.string.retry_attempts_error)
+                        .takeUnless { attempts != null && attempts in 1..10 },
                 )
                 NodeField(
                     retryDelay,
                     { retryDelay = it },
                     stringResource(R.string.retry_delay_millis),
                     true,
+                    numeric = true,
+                    errorText = stringResource(R.string.retry_delay_error)
+                        .takeUnless { delay != null && delay >= 0 },
                 )
-                OutlinedButton(
-                    enabled = timeoutValid && attempts != null && attempts in 1..10 && delay != null && delay >= 0,
+                FailurePolicyChoiceButton(
+                    selected = currentChoice == FailurePolicyChoice.Retry,
+                    enabled = timeoutValid && retryValid,
                     onClick = {
                         onSelect(
                             FailurePolicy.Retry(requireNotNull(attempts), requireNotNull(delay)),
                             timeoutMillis,
                         )
                     },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.use_retry_policy)) }
+                    label = stringResource(R.string.use_retry_policy),
+                )
             }
         },
         confirmButton = {},
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
+
+internal enum class FailurePolicyChoice { Stop, Continue, Retry }
+
+internal fun failurePolicyChoice(policy: FailurePolicy): FailurePolicyChoice = when (policy) {
+    FailurePolicy.Stop -> FailurePolicyChoice.Stop
+    FailurePolicy.Continue -> FailurePolicyChoice.Continue
+    is FailurePolicy.Retry -> FailurePolicyChoice.Retry
+}
+
+@Composable
+private fun FailurePolicyChoiceButton(
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    label: String,
+) {
+    val modifier = Modifier
+        .fillMaxWidth()
+        .semantics { this.selected = selected }
+    if (selected) {
+        Button(enabled = enabled, onClick = onClick, modifier = modifier) { Text(label) }
+    } else {
+        OutlinedButton(enabled = enabled, onClick = onClick, modifier = modifier) { Text(label) }
+    }
+}
+
+internal fun stepTimeoutCanSave(value: String): Boolean =
+    value.isBlank() || value.toLongOrNull()?.let { it > 0 } == true
+
+internal fun retryPolicyCanSave(attempts: Int?, delayMillis: Long?): Boolean =
+    attempts != null && attempts in 1..10 && delayMillis != null && delayMillis >= 0
 
 @Composable
 private fun InputTextDialog(
@@ -3167,32 +3629,26 @@ private fun InputTextDialog(
                     recentTitle = stringResource(R.string.select_recent_text_field),
                     emptyMessage = stringResource(R.string.input_target_hint),
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            stringResource(
-                                if (useVariable) R.string.input_use_variable else R.string.input_use_fixed_text,
-                            ),
-                        )
-                        Text(
-                            stringResource(
-                                if (useVariable) {
-                                    R.string.input_variable_description
-                                } else {
-                                    R.string.input_fixed_text_description
-                                },
-                            ),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Switch(checked = useVariable, onCheckedChange = { useVariable = it })
-                }
+                SelectorToggleRow(
+                    label = stringResource(
+                        if (useVariable) R.string.input_use_variable else R.string.input_use_fixed_text,
+                    ),
+                    description = stringResource(
+                        if (useVariable) R.string.input_variable_description
+                        else R.string.input_fixed_text_description,
+                    ),
+                    checked = useVariable,
+                    onCheckedChange = { useVariable = it },
+                )
                 if (useVariable) {
-                    NodeField(variableName, { variableName = it }, stringResource(R.string.variable_name), true)
+                    NodeField(
+                        variableName,
+                        { variableName = it },
+                        stringResource(R.string.variable_name),
+                        true,
+                        errorText = stringResource(R.string.validation_blank_variable_name)
+                            .takeIf { variableName.isBlank() },
+                    )
                 } else {
                     OutlinedTextField(
                         value = inputText,
@@ -3201,37 +3657,20 @@ private fun InputTextDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            stringResource(
-                                if (inputMethod == TextInputMethod.Paste) {
-                                    R.string.input_method_paste
-                                } else {
-                                    R.string.input_method_set_text
-                                },
-                            ),
-                        )
-                        Text(
-                            if (inputMethod == TextInputMethod.Paste) {
-                                stringResource(R.string.input_method_paste_description)
-                            } else {
-                                stringResource(R.string.input_method_set_text_description)
-                            },
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Switch(
-                        checked = inputMethod == TextInputMethod.Paste,
-                        onCheckedChange = {
-                            inputMethod = if (it) TextInputMethod.Paste else TextInputMethod.SetText
-                        },
-                    )
-                }
+                SelectorToggleRow(
+                    label = stringResource(
+                        if (inputMethod == TextInputMethod.Paste) R.string.input_method_paste
+                        else R.string.input_method_set_text,
+                    ),
+                    description = stringResource(
+                        if (inputMethod == TextInputMethod.Paste) R.string.input_method_paste_description
+                        else R.string.input_method_set_text_description,
+                    ),
+                    checked = inputMethod == TextInputMethod.Paste,
+                    onCheckedChange = {
+                        inputMethod = if (it) TextInputMethod.Paste else TextInputMethod.SetText
+                    },
+                )
             }
         },
         confirmButton = {
@@ -3260,17 +3699,62 @@ private fun InputTextDialog(
 private fun SwipeDialog(
     initialStep: Step.Swipe? = null,
     confirmLabelRes: Int = R.string.add,
+    onSetUpAutomation: () -> Unit = {},
     onDismiss: () -> Unit,
     onAdd: (Int, Int, Int, Int, Long) -> Unit,
 ) {
-    var startX by remember(initialStep) { mutableStateOf(initialStep?.startX?.toString() ?: "540") }
-    var startY by remember(initialStep) { mutableStateOf(initialStep?.startY?.toString() ?: "1800") }
-    var endX by remember(initialStep) { mutableStateOf(initialStep?.endX?.toString() ?: "540") }
-    var endY by remember(initialStep) { mutableStateOf(initialStep?.endY?.toString() ?: "600") }
+    val displaySize = currentDisplayPixelSize()
+    val defaults = defaultSwipeCoordinates(displaySize.width, displaySize.height)
+    var startX by remember(initialStep) {
+        mutableStateOf(initialStep?.startX?.toString() ?: defaults.start.x.toString())
+    }
+    var startY by remember(initialStep) {
+        mutableStateOf(initialStep?.startY?.toString() ?: defaults.start.y.toString())
+    }
+    var endX by remember(initialStep) {
+        mutableStateOf(initialStep?.endX?.toString() ?: defaults.end.x.toString())
+    }
+    var endY by remember(initialStep) {
+        mutableStateOf(initialStep?.endY?.toString() ?: defaults.end.y.toString())
+    }
+    var previousDefaults by remember(initialStep) { mutableStateOf(defaults) }
     var duration by remember(initialStep) { mutableStateOf(initialStep?.durationMillis?.toString() ?: "400") }
+    LaunchedEffect(defaults, initialStep) {
+        if (initialStep == null) {
+            val currentStart = startX.toIntOrNull()?.let { x -> startY.toIntOrNull()?.let { y -> ScreenPoint(x, y) } }
+            val currentEnd = endX.toIntOrNull()?.let { x -> endY.toIntOrNull()?.let { y -> ScreenPoint(x, y) } }
+            val updatedStart = currentStart?.let {
+                updateAdaptiveCoordinateDefault(it, previousDefaults.start, defaults.start)
+            }
+            val updatedEnd = currentEnd?.let {
+                updateAdaptiveCoordinateDefault(it, previousDefaults.end, defaults.end)
+            }
+            if (updatedStart != null) {
+                startX = updatedStart.x.toString()
+                startY = updatedStart.y.toString()
+            }
+            if (updatedEnd != null) {
+                endX = updatedEnd.x.toString()
+                endY = updatedEnd.y.toString()
+            }
+            previousDefaults = defaults
+        }
+    }
     val values = listOf(startX, startY, endX, endY).map { it.toIntOrNull() }
+    val start = values[0]?.let { x -> values[1]?.let { y -> ScreenPoint(x, y) } }
+    val end = values[2]?.let { x -> values[3]?.let { y -> ScreenPoint(x, y) } }
+    val originalStart = initialStep?.let { ScreenPoint(it.startX, it.startY) }
+    val originalEnd = initialStep?.let { ScreenPoint(it.endX, it.endY) }
+    val startCanSave = coordinateCanSave(start, displaySize.width, displaySize.height, originalStart)
+    val endCanSave = coordinateCanSave(end, displaySize.width, displaySize.height, originalEnd)
+    val coordinatesInsideDisplay = start?.let {
+        coordinateInsideDisplay(it, displaySize.width, displaySize.height)
+    } == true && end?.let {
+        coordinateInsideDisplay(it, displaySize.width, displaySize.height)
+    } == true
     val durationValue = duration.toLongOrNull()
-    val valid = values.all { it != null && it >= 0 } && durationValue != null && durationValue in 1..10_000
+    val durationValid = durationValue != null && durationValue in 1..10_000
+    val valid = startCanSave && endCanSave && durationValid
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3282,6 +3766,7 @@ private fun SwipeDialog(
             ) {
                 ScreenshotCoordinatePicker(
                     mode = ScreenshotCoordinateMode.Swipe,
+                    onSetUpAutomation = onSetUpAutomation,
                     onSwipe = { start, end ->
                         startX = start.x.toString()
                         startY = start.y.toString()
@@ -3289,11 +3774,37 @@ private fun SwipeDialog(
                         endY = end.y.toString()
                     },
                 )
-                NodeField(startX, { startX = it }, stringResource(R.string.swipe_start_x), true)
-                NodeField(startY, { startY = it }, stringResource(R.string.swipe_start_y), true)
-                NodeField(endX, { endX = it }, stringResource(R.string.swipe_end_x), true)
-                NodeField(endY, { endY = it }, stringResource(R.string.swipe_end_y), true)
-                NodeField(duration, { duration = it }, stringResource(R.string.duration_millis), true)
+                NodeField(startX, { startX = it }, stringResource(R.string.swipe_start_x), true, numeric = true)
+                NodeField(startY, { startY = it }, stringResource(R.string.swipe_start_y), true, numeric = true)
+                NodeField(endX, { endX = it }, stringResource(R.string.swipe_end_x), true, numeric = true)
+                NodeField(endY, { endY = it }, stringResource(R.string.swipe_end_y), true, numeric = true)
+                NodeField(duration, { duration = it }, stringResource(R.string.duration_millis), true, numeric = true)
+                if (!startCanSave || !endCanSave) {
+                    Text(
+                        stringResource(
+                            R.string.coordinate_input_error,
+                            displaySize.width,
+                            displaySize.height,
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                } else if (!coordinatesInsideDisplay) {
+                    Text(
+                        stringResource(R.string.coordinate_imported_outside_display),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
+                if (!durationValid) {
+                    Text(
+                        stringResource(R.string.swipe_duration_error),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -3312,6 +3823,68 @@ private fun SwipeDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+internal data class SwipeCoordinateDefaults(
+    val start: ScreenPoint,
+    val end: ScreenPoint,
+)
+
+internal fun defaultTapCoordinate(displayWidth: Int, displayHeight: Int): ScreenPoint {
+    val width = displayWidth.coerceAtLeast(1)
+    val height = displayHeight.coerceAtLeast(1)
+    return ScreenPoint(
+        x = (width / 2).coerceAtMost(width - 1),
+        y = (height / 2).coerceAtMost(height - 1),
+    )
+}
+
+internal fun defaultSwipeCoordinates(displayWidth: Int, displayHeight: Int): SwipeCoordinateDefaults {
+    val center = defaultTapCoordinate(displayWidth, displayHeight)
+    val height = displayHeight.coerceAtLeast(1)
+    return SwipeCoordinateDefaults(
+        start = center.copy(y = ((height.toLong() * 3) / 4).toInt().coerceAtMost(height - 1)),
+        end = center.copy(y = (height / 4).coerceAtMost(height - 1)),
+    )
+}
+
+internal fun coordinateInsideDisplay(point: ScreenPoint, displayWidth: Int, displayHeight: Int): Boolean =
+    point.x in 0 until displayWidth && point.y in 0 until displayHeight
+
+internal fun captureBoundsMatchDisplay(
+    bounds: ScreenBounds,
+    displayWidth: Int,
+    displayHeight: Int,
+): Boolean = bounds.right - bounds.left == displayWidth &&
+    bounds.bottom - bounds.top == displayHeight
+
+internal fun coordinateCanSave(
+    point: ScreenPoint?,
+    displayWidth: Int,
+    displayHeight: Int,
+    original: ScreenPoint?,
+): Boolean = point != null && point.x >= 0 && point.y >= 0 &&
+    (coordinateInsideDisplay(point, displayWidth, displayHeight) || point == original)
+
+internal fun updateAdaptiveCoordinateDefault(
+    current: ScreenPoint,
+    previousDefault: ScreenPoint,
+    newDefault: ScreenPoint,
+): ScreenPoint = if (current == previousDefault) newDefault else current
+
+@Composable
+private fun currentDisplayPixelSize(): IntSize {
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    return remember(context, configuration) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = context.getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
+            IntSize(bounds.width().coerceAtLeast(1), bounds.height().coerceAtLeast(1))
+        } else {
+            val metrics = context.resources.displayMetrics
+            IntSize(metrics.widthPixels.coerceAtLeast(1), metrics.heightPixels.coerceAtLeast(1))
+        }
+    }
 }
 
 @Composable
@@ -3368,6 +3941,11 @@ private fun NodeSelectorEditor(
     }
     HorizontalDivider()
     Text(stringResource(R.string.element_attributes), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    Text(
+        stringResource(R.string.selector_matching_behavior),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+    )
     NodeField(
         draft.packageName,
         { onDraftChange(draft.copy(packageName = it)) },
@@ -3506,6 +4084,7 @@ private fun NodeSelectorEditor(
 @Composable
 private fun SelectorToggleRow(
     label: String,
+    description: String? = null,
     checked: Boolean,
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
@@ -3521,7 +4100,16 @@ private fun SelectorToggleRow(
             ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label)
+            description?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+            }
+        }
         Switch(checked = checked, enabled = enabled, onCheckedChange = null)
     }
 }
@@ -3530,13 +4118,34 @@ private fun SelectorToggleRow(
 private fun TapDialog(
     initialStep: Step.Tap? = null,
     confirmLabelRes: Int = R.string.add,
+    onSetUpAutomation: () -> Unit = {},
     onDismiss: () -> Unit,
     onAdd: (Int, Int) -> Unit,
 ) {
-    var xText by remember(initialStep) { mutableStateOf(initialStep?.x?.toString() ?: "540") }
-    var yText by remember(initialStep) { mutableStateOf(initialStep?.y?.toString() ?: "1200") }
+    val displaySize = currentDisplayPixelSize()
+    val default = defaultTapCoordinate(displaySize.width, displaySize.height)
+    var xText by remember(initialStep) { mutableStateOf(initialStep?.x?.toString() ?: default.x.toString()) }
+    var yText by remember(initialStep) { mutableStateOf(initialStep?.y?.toString() ?: default.y.toString()) }
+    var previousDefault by remember(initialStep) { mutableStateOf(default) }
+    LaunchedEffect(default, initialStep) {
+        if (initialStep == null) {
+            val current = xText.toIntOrNull()?.let { x -> yText.toIntOrNull()?.let { y -> ScreenPoint(x, y) } }
+            current?.let {
+                val updated = updateAdaptiveCoordinateDefault(it, previousDefault, default)
+                xText = updated.x.toString()
+                yText = updated.y.toString()
+            }
+            previousDefault = default
+        }
+    }
     val x = xText.toIntOrNull()
     val y = yText.toIntOrNull()
+    val point = x?.let { parsedX -> y?.let { parsedY -> ScreenPoint(parsedX, parsedY) } }
+    val original = initialStep?.let { ScreenPoint(it.x, it.y) }
+    val coordinateValid = coordinateCanSave(point, displaySize.width, displaySize.height, original)
+    val coordinateInsideDisplay = point?.let {
+        coordinateInsideDisplay(it, displaySize.width, displaySize.height)
+    } == true
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.tap_coordinates)) },
@@ -3547,18 +4156,37 @@ private fun TapDialog(
             ) {
                 ScreenshotCoordinatePicker(
                     mode = ScreenshotCoordinateMode.Tap,
+                    onSetUpAutomation = onSetUpAutomation,
                     onTap = { point ->
                         xText = point.x.toString()
                         yText = point.y.toString()
                     },
                 )
-                NodeField(xText, { xText = it }, stringResource(R.string.coordinate_x), true)
-                NodeField(yText, { yText = it }, stringResource(R.string.coordinate_y), true)
+                NodeField(xText, { xText = it }, stringResource(R.string.coordinate_x), true, numeric = true)
+                NodeField(yText, { yText = it }, stringResource(R.string.coordinate_y), true, numeric = true)
+                if (!coordinateValid) {
+                    Text(
+                        stringResource(
+                            R.string.coordinate_input_error,
+                            displaySize.width,
+                            displaySize.height,
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                } else if (!coordinateInsideDisplay) {
+                    Text(
+                        stringResource(R.string.coordinate_imported_outside_display),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = x != null && x >= 0 && y != null && y >= 0,
+                enabled = coordinateValid,
                 onClick = { onAdd(requireNotNull(x), requireNotNull(y)) },
             ) { Text(stringResource(confirmLabelRes)) }
         },
@@ -3568,15 +4196,35 @@ private fun TapDialog(
 
 @Composable
 private fun RecordedClickDialog(
+    observedNodes: List<ObservedNode>,
     initialStep: Step.RecordedClick,
     onDismiss: () -> Unit,
-    onSave: (RecordedClickTargetMode, Int, Int) -> Unit,
+    onSave: (RecordedClickTargetMode, Int, Int, NodeSelector?) -> Unit,
 ) {
+    val displaySize = currentDisplayPixelSize()
     var targetMode by remember(initialStep) { mutableStateOf(initialStep.targetMode) }
     var xText by remember(initialStep) { mutableStateOf(initialStep.x.toString()) }
     var yText by remember(initialStep) { mutableStateOf(initialStep.y.toString()) }
     val x = xText.toIntOrNull()
     val y = yText.toIntOrNull()
+    val point = x?.let { parsedX -> y?.let { parsedY -> ScreenPoint(parsedX, parsedY) } }
+    val originalPoint = ScreenPoint(initialStep.x, initialStep.y)
+    val coordinateValid = coordinateCanSave(
+        point,
+        displaySize.width,
+        displaySize.height,
+        originalPoint,
+    )
+    val coordinateInsideDisplay = point?.let {
+        coordinateInsideDisplay(it, displaySize.width, displaySize.height)
+    } == true
+    var selectorDraft by remember(initialStep) {
+        mutableStateOf(
+            initialStep.selector?.toDraft()
+                ?: NodeSelectorDraft(packageName = initialStep.control.packageName),
+        )
+    }
+    val selectedSelector = selectorDraft.toSelectorOrNull()
     val control = initialStep.control
     val unavailable = stringResource(R.string.element_monitor_not_available)
     AlertDialog(
@@ -3587,20 +4235,38 @@ private fun RecordedClickDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                Text(stringResource(R.string.recorded_click_selector_repair), fontWeight = FontWeight.Bold)
+                Text(
+                    stringResource(R.string.recorded_click_selector_repair_description),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                NodeSelectorEditor(
+                    draft = selectorDraft,
+                    onDraftChange = { selectorDraft = it },
+                    recentNodes = observedNodes,
+                    recentTitle = stringResource(R.string.select_recent_element),
+                    emptyMessage = stringResource(R.string.open_target_app_then_return),
+                )
+                HorizontalDivider()
                 Text(stringResource(R.string.recorded_click_target_mode), fontWeight = FontWeight.Bold)
                 RecordedClickTargetMode.entries.forEach { option ->
-                    val enabled = option != RecordedClickTargetMode.Control || initialStep.selector != null
+                    val enabled = option != RecordedClickTargetMode.Control || selectedSelector != null
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = enabled) { targetMode = option }
-                            .semantics { selected = targetMode == option },
+                            .selectable(
+                                selected = targetMode == option,
+                                enabled = enabled,
+                                role = Role.RadioButton,
+                                onClick = { targetMode = option },
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
                             selected = targetMode == option,
                             enabled = enabled,
-                            onClick = { targetMode = option },
+                            onClick = null,
                         )
                         Text(
                             stringResource(
@@ -3613,7 +4279,7 @@ private fun RecordedClickDialog(
                         )
                     }
                 }
-                if (initialStep.selector == null) {
+                if (selectedSelector == null) {
                     Text(
                         stringResource(initialStep.fallbackCause?.messageResourceId()
                             ?: R.string.recorded_click_control_unavailable),
@@ -3621,8 +4287,26 @@ private fun RecordedClickDialog(
                         fontSize = 12.sp,
                     )
                 }
-                NodeField(xText, { xText = it }, stringResource(R.string.coordinate_x), true)
-                NodeField(yText, { yText = it }, stringResource(R.string.coordinate_y), true)
+                NodeField(xText, { xText = it }, stringResource(R.string.coordinate_x), true, numeric = true)
+                NodeField(yText, { yText = it }, stringResource(R.string.coordinate_y), true, numeric = true)
+                if (!coordinateValid) {
+                    Text(
+                        stringResource(
+                            R.string.coordinate_input_error,
+                            displaySize.width,
+                            displaySize.height,
+                        ),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                } else if (!coordinateInsideDisplay) {
+                    Text(
+                        stringResource(R.string.coordinate_imported_outside_display),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                }
                 HorizontalDivider()
                 Text(stringResource(R.string.recorded_click_snapshot_title), fontWeight = FontWeight.Bold)
                 Text(stringResource(R.string.recorded_click_snapshot_package, control.packageName))
@@ -3647,10 +4331,10 @@ private fun RecordedClickDialog(
                 Text(
                     stringResource(
                         R.string.recorded_click_snapshot_capabilities,
-                        control.clickable,
-                        control.enabled,
-                        control.longClickable,
-                        control.scrollable,
+                        control.clickable.localizedBoolean(),
+                        control.enabled.localizedBoolean(),
+                        control.longClickable.localizedBoolean(),
+                        control.scrollable.localizedBoolean(),
                     ),
                 )
                 Text(
@@ -3662,14 +4346,26 @@ private fun RecordedClickDialog(
         },
         confirmButton = {
             TextButton(
-                enabled = x != null && x >= 0 && y != null && y >= 0 &&
-                    (targetMode != RecordedClickTargetMode.Control || initialStep.selector != null),
-                onClick = { onSave(targetMode, requireNotNull(x), requireNotNull(y)) },
+                enabled = recordedClickCanSave(targetMode, selectedSelector, coordinateValid),
+                onClick = {
+                    onSave(targetMode, requireNotNull(x), requireNotNull(y), selectedSelector)
+                },
             ) { Text(stringResource(R.string.save)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
+
+internal fun recordedClickCanSave(
+    targetMode: RecordedClickTargetMode,
+    selector: NodeSelector?,
+    coordinateValid: Boolean,
+): Boolean = coordinateValid && (targetMode != RecordedClickTargetMode.Control || selector != null)
+
+@Composable
+private fun Boolean.localizedBoolean(): String = stringResource(
+    if (this) R.string.value_yes else R.string.value_no,
+)
 
 private fun RecordedClickFallbackCause.messageResourceId(): Int = when (this) {
     RecordedClickFallbackCause.SourceUnavailable -> R.string.recorded_click_fallback_source_unavailable
@@ -3686,17 +4382,35 @@ private enum class ScreenshotCoordinateMode { Tap, Swipe }
 @Composable
 private fun ScreenshotCoordinatePicker(
     mode: ScreenshotCoordinateMode,
+    onSetUpAutomation: () -> Unit,
     onTap: (ScreenPoint) -> Unit = {},
     onSwipe: (ScreenPoint, ScreenPoint) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
+    val automationConnected by AutomationAccessibilityService.connected.collectAsStateWithLifecycle()
+    val displaySize = currentDisplayPixelSize()
+    var captureGeometryChanged by remember { mutableStateOf(false) }
     var captureSize by remember { mutableStateOf(IntSize.Zero) }
     var gestureStart by remember(captureState) { mutableStateOf<Offset?>(null) }
     var gestureEnd by remember(captureState) { mutableStateOf<Offset?>(null) }
 
     DisposableEffect(Unit) {
         onDispose { AutomationAccessibilityService.cancelPendingScreenCapture() }
+    }
+    LaunchedEffect(captureState, displaySize) {
+        val state = captureState as? ScreenCaptureState.Ready
+        if (state != null && !captureBoundsMatchDisplay(
+                state.screenBounds,
+                displaySize.width,
+                displaySize.height,
+            )
+        ) {
+            captureGeometryChanged = true
+            AutomationAccessibilityService.discardScreenCapture()
+        } else if (captureState is ScreenCaptureState.Armed) {
+            captureGeometryChanged = false
+        }
     }
 
     Text(
@@ -3710,6 +4424,14 @@ private fun ScreenshotCoordinatePicker(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
     )
+    if (captureGeometryChanged) {
+        Text(
+            stringResource(R.string.screenshot_display_changed),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+        )
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -3719,6 +4441,7 @@ private fun ScreenshotCoordinatePicker(
                 AutomationAccessibilityService.instance?.capturePreviousApp()
             },
             enabled = AutomationAccessibilityService.instance != null &&
+                automationConnected &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
                 captureState !is ScreenCaptureState.Armed,
             modifier = Modifier.weight(1f),
@@ -3739,9 +4462,14 @@ private fun ScreenshotCoordinatePicker(
     when (val state = captureState) {
         ScreenCaptureState.Armed -> Text(
             stringResource(R.string.capture_waiting),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             color = MaterialTheme.colorScheme.primary,
         )
-        is ScreenCaptureState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
+        is ScreenCaptureState.Error -> Text(
+            state.message,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.error,
+        )
         is ScreenCaptureState.Ready -> Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3807,12 +4535,23 @@ private fun ScreenshotCoordinatePicker(
                 }
             }
         }
-        ScreenCaptureState.Idle -> if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Text(
+        ScreenCaptureState.Idle -> when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.R -> Text(
                 stringResource(R.string.capture_requires_android_11),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
+            !automationConnected || AutomationAccessibilityService.instance == null -> {
+                Text(
+                    stringResource(R.string.coordinate_capture_requires_automation),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                OutlinedButton(
+                    onClick = onSetUpAutomation,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(stringResource(R.string.set_up_automation)) }
+            }
         }
     }
 }
@@ -3821,14 +4560,22 @@ private fun mapCaptureOffset(
     state: ScreenCaptureState.Ready,
     captureSize: IntSize,
     offset: Offset,
-): ScreenPoint? = mapFitCenterTapToScreen(
-    tapX = offset.x,
-    tapY = offset.y,
-    containerWidth = captureSize.width,
-    containerHeight = captureSize.height,
-    imageWidth = state.bitmap.width,
-    imageHeight = state.bitmap.height,
-)
+): ScreenPoint? {
+    val bitmapPoint = mapFitCenterTapToScreen(
+        tapX = offset.x,
+        tapY = offset.y,
+        containerWidth = captureSize.width,
+        containerHeight = captureSize.height,
+        imageWidth = state.bitmap.width,
+        imageHeight = state.bitmap.height,
+    ) ?: return null
+    return mapBitmapPointToScreen(
+        point = bitmapPoint,
+        bitmapWidth = state.bitmap.width,
+        bitmapHeight = state.bitmap.height,
+        screenBounds = state.screenBounds,
+    )
+}
 
 @Composable
 private fun ScrollStepDialog(
@@ -3862,18 +4609,20 @@ private fun ScrollStepDialog(
                     emptyMessage = stringResource(R.string.no_scrollable_elements),
                 )
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .toggleable(
+                            value = direction == ScrollDirection.Forward,
+                            role = Role.Switch,
+                            onValueChange = { forward ->
+                                direction = if (forward) ScrollDirection.Forward else ScrollDirection.Backward
+                            },
+                        ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            stringResource(
-                                if (direction == ScrollDirection.Forward) {
-                                    R.string.scroll_backward
-                                } else {
-                                    R.string.scroll_forward
-                                },
-                            ),
+                            stringResource(scrollDirectionLabelRes(direction)),
                         )
                         Text(
                             stringResource(
@@ -3889,9 +4638,7 @@ private fun ScrollStepDialog(
                     }
                     Switch(
                         checked = direction == ScrollDirection.Forward,
-                        onCheckedChange = {
-                            direction = if (it) ScrollDirection.Forward else ScrollDirection.Backward
-                        },
+                        onCheckedChange = null,
                     )
                 }
             }
@@ -3906,6 +4653,11 @@ private fun ScrollStepDialog(
     )
 }
 
+internal fun scrollDirectionLabelRes(direction: ScrollDirection): Int = when (direction) {
+    ScrollDirection.Forward -> R.string.scroll_forward
+    ScrollDirection.Backward -> R.string.scroll_backward
+}
+
 @Composable
 private fun NumberDialog(
     title: String,
@@ -3917,19 +4669,35 @@ private fun NumberDialog(
 ) {
     var value by remember { mutableStateOf(initialValue) }
     val number = value.toLongOrNull()
+    val valid = delayDurationCanSave(number)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
-        text = { NodeField(value, { value = it }, label, true) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                NodeField(value, { value = it }, label, true, numeric = true)
+                if (!valid) {
+                    Text(
+                        stringResource(R.string.delay_duration_error),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        },
         confirmButton = {
             TextButton(
-                enabled = number != null && number > 0,
+                enabled = valid,
                 onClick = { onAdd(requireNotNull(number)) },
             ) { Text(confirmLabel) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
+
+internal fun delayDurationCanSave(durationMillis: Long?): Boolean =
+    durationMillis != null && durationMillis >= 0
 
 @Composable
 private fun WaitNodeDialog(
@@ -3964,34 +4732,24 @@ private fun WaitNodeDialog(
                     recentTitle = stringResource(R.string.select_recent_element),
                     emptyMessage = stringResource(R.string.open_target_app_then_return),
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            stringResource(
-                                if (mustExist) R.string.wait_element_appear else R.string.wait_element_disappear,
-                            ),
-                        )
-                        Text(
-                            stringResource(
-                                if (mustExist) {
-                                    R.string.wait_element_appear_description
-                                } else {
-                                    R.string.wait_element_disappear_description
-                                },
-                            ),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp,
-                        )
-                    }
-                    Switch(checked = mustExist, onCheckedChange = { mustExist = it })
-                }
+                SelectorToggleRow(
+                    label = stringResource(
+                        if (mustExist) R.string.wait_element_appear else R.string.wait_element_disappear,
+                    ),
+                    description = stringResource(
+                        if (mustExist) R.string.wait_element_appear_description
+                        else R.string.wait_element_disappear_description,
+                    ),
+                    checked = mustExist,
+                    onCheckedChange = { mustExist = it },
+                )
                 NodeField(
                     timeout,
                     { timeout = it },
                     stringResource(R.string.wait_timeout_override),
+                    numeric = true,
+                    errorText = stringResource(R.string.validation_non_positive_timeout)
+                        .takeUnless { timeoutValid },
                 )
                 Text(
                     stringResource(R.string.wait_timeout_inherit_hint),
@@ -4023,13 +4781,22 @@ private fun SetVariableDialog(
     var variableName by remember(initialName) { mutableStateOf(initialName) }
     var valueMode by remember(initialValue) { mutableStateOf(variableValueMode(initialValue)) }
     var value by remember(initialValue) { mutableStateOf(variableValueText(initialValue)) }
-    val resolvedValue = variableValueOrNull(valueMode, value)
+    val resolvedValue = variableValueOrNull(valueMode, value, initialValue)
+    val variableNameValid = variableName.isNotBlank()
+    val valueReferenceValid = resolvedValue != null
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.set_variable)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                NodeField(variableName, { variableName = it }, stringResource(R.string.variable_name), true)
+                NodeField(
+                    variableName,
+                    { variableName = it },
+                    stringResource(R.string.variable_name),
+                    true,
+                    errorText = stringResource(R.string.validation_blank_variable_name)
+                        .takeUnless { variableNameValid },
+                )
                 VariableValueEditor(
                     title = stringResource(R.string.variable_value_source),
                     mode = valueMode,
@@ -4037,13 +4804,24 @@ private fun SetVariableDialog(
                     onModeChange = { valueMode = it },
                     onTextChange = { value = it },
                 )
+                if (!valueReferenceValid) {
+                    Text(
+                        stringResource(R.string.validation_blank_variable_name),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = variableName.isNotBlank() && resolvedValue != null,
+                enabled = variableNameValid && valueReferenceValid,
                 onClick = {
-                    onAdd(variableName.trim(), requireNotNull(resolvedValue))
+                    onAdd(
+                        preserveUnchangedOrTrim(variableName, initialName),
+                        requireNotNull(resolvedValue),
+                    )
                 },
             ) { Text(stringResource(confirmLabelRes)) }
         },
@@ -4061,15 +4839,18 @@ private fun VariableValueEditor(
 ) {
     Text(title, fontWeight = FontWeight.SemiBold)
     VariableValueMode.entries.forEach { option ->
+        val modifier = Modifier
+            .fillMaxWidth()
+            .semantics { selected = mode == option }
         if (mode == option) {
             Button(
                 onClick = { onModeChange(option) },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = modifier,
             ) { Text(stringResource(option.labelRes)) }
         } else {
             OutlinedButton(
                 onClick = { onModeChange(option) },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = modifier,
             ) { Text(stringResource(option.labelRes)) }
         }
     }
@@ -4108,10 +4889,21 @@ internal fun variableValueText(value: Value): String = when (value) {
     is Value.Template -> value.template
 }
 
-internal fun variableValueOrNull(mode: VariableValueMode, text: String): Value? = when (mode) {
-    VariableValueMode.Literal -> Value.Literal(text)
-    VariableValueMode.Variable -> text.trim().takeIf(String::isNotEmpty)?.let(Value::Variable)
-    VariableValueMode.Template -> Value.Template(text)
+internal fun variableValueOrNull(
+    mode: VariableValueMode,
+    text: String,
+    originalValue: Value? = null,
+): Value? {
+    if (originalValue != null && mode == variableValueMode(originalValue) &&
+        text == variableValueText(originalValue)
+    ) {
+        return originalValue
+    }
+    return when (mode) {
+        VariableValueMode.Literal -> Value.Literal(text)
+        VariableValueMode.Variable -> text.trim().takeIf(String::isNotEmpty)?.let(Value::Variable)
+        VariableValueMode.Template -> Value.Template(text)
+    }
 }
 
 @Composable
@@ -4126,6 +4918,7 @@ private fun WrapStepDialog(
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var value by remember { mutableStateOf(initialValue) }
     val count = value.toLongOrNull()
+    val countValid = count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT.toLong()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -4136,17 +4929,27 @@ private fun WrapStepDialog(
             ) {
                 Text(stringResource(R.string.select_step_to_wrap), fontWeight = FontWeight.SemiBold)
                 steps.forEachIndexed { index, step ->
-                    OutlinedButton(
-                        onClick = { selectedIndex = index },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("${index + 1}. ${step.title()}", modifier = Modifier.fillMaxWidth()) }
+                    SelectableStepButton(
+                        index = index,
+                        step = step,
+                        selected = selectedIndex == index,
+                        onSelect = { selectedIndex = index },
+                    )
                 }
-                NodeField(value, { value = it }, valueLabel, true)
+                NodeField(
+                    value,
+                    { value = it },
+                    valueLabel,
+                    true,
+                    numeric = true,
+                    errorText = stringResource(R.string.repeat_count_error, Step.Repeat.MAX_REPEAT_COUNT)
+                        .takeUnless { countValid },
+                )
             }
         },
         confirmButton = {
             TextButton(
-                enabled = selectedIndex != null && count != null && count in 1..Step.Repeat.MAX_REPEAT_COUNT.toLong(),
+                enabled = selectedIndex != null && countValid,
                 onClick = { onAdd(requireNotNull(selectedIndex), requireNotNull(count)) },
             ) { Text(stringResource(R.string.wrap_step)) }
         },
@@ -4194,10 +4997,12 @@ private fun ConditionDialog(
                 )
                 Text(stringResource(R.string.run_step_when_true), fontWeight = FontWeight.SemiBold)
                 steps.forEachIndexed { index, step ->
-                    OutlinedButton(
-                        onClick = { selectedIndex = index },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("${index + 1}. ${step.title()}", modifier = Modifier.fillMaxWidth()) }
+                    SelectableStepButton(
+                        index = index,
+                        step = step,
+                        selected = selectedIndex == index,
+                        onSelect = { selectedIndex = index },
+                    )
                 }
             }
         },
@@ -4214,19 +5019,57 @@ private fun ConditionDialog(
 }
 
 @Composable
+private fun SelectableStepButton(
+    index: Int,
+    step: Step,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    val modifier = Modifier
+        .fillMaxWidth()
+        .semantics { this.selected = selected }
+    if (selected) {
+        Button(onClick = onSelect, modifier = modifier) {
+            Text(
+                stringResource(R.string.numbered_step_label, index + 1, step.title()),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    } else {
+        OutlinedButton(onClick = onSelect, modifier = modifier) {
+            Text(
+                stringResource(R.string.numbered_step_label, index + 1, step.title()),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+@Composable
 private fun ComparisonOperatorSelector(
     selected: ComparisonOperator,
     onSelect: (ComparisonOperator) -> Unit,
 ) {
     ComparisonOperator.entries.forEach { operator ->
         Row(
-            modifier = Modifier.fillMaxWidth().clickable { onSelect(operator) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .selectable(
+                    selected = selected == operator,
+                    role = Role.RadioButton,
+                    onClick = { onSelect(operator) },
+                ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            RadioButton(selected = selected == operator, onClick = { onSelect(operator) })
+            RadioButton(selected = selected == operator, onClick = null)
             Text(operator.displayName())
         }
     }
+    Text(
+        stringResource(R.string.comparison_matching_behavior),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp,
+    )
 }
 
 @Composable
@@ -4277,9 +5120,11 @@ private fun com.aiindexfinger.model.SelectorRole.displayName(): String = stringR
 private fun RunStatus.localizedName(): String = stringResource(
     when (this) {
         RunStatus.Completed -> R.string.run_status_completed
+        RunStatus.CompletedWithWarnings -> R.string.run_status_completed_with_warnings
         RunStatus.Cancelled -> R.string.run_status_cancelled
         RunStatus.Failed -> R.string.run_status_failed
         RunStatus.Rejected -> R.string.run_status_rejected
+        RunStatus.Unknown -> R.string.run_status_unknown
     },
 )
 
@@ -4314,10 +5159,12 @@ private fun NodeConditionDialog(
                 steps?.let { availableSteps ->
                     Text(stringResource(R.string.run_step_when_element_exists), fontWeight = FontWeight.SemiBold)
                     availableSteps.forEachIndexed { index, step ->
-                        OutlinedButton(
-                            onClick = { selectedStepIndex = index },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("${index + 1}. ${step.title()}", modifier = Modifier.fillMaxWidth()) }
+                        SelectableStepButton(
+                            index = index,
+                            step = step,
+                            selected = selectedStepIndex == index,
+                            onSelect = { selectedStepIndex = index },
+                        )
                     }
                 }
             }
@@ -4357,16 +5204,27 @@ private fun ReadNodeTextDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                NodeField(variableName, { variableName = it }, stringResource(R.string.save_to_variable), true)
+                NodeField(
+                    variableName,
+                    { variableName = it },
+                    stringResource(R.string.save_to_variable),
+                    true,
+                    errorText = stringResource(R.string.validation_blank_variable_name)
+                        .takeIf { variableName.isBlank() },
+                )
                 Text(stringResource(R.string.attribute), fontWeight = FontWeight.SemiBold)
                 NodeAttribute.entries.forEach { option ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { attribute = option },
+                            .selectable(
+                                selected = attribute == option,
+                                role = Role.RadioButton,
+                                onClick = { attribute = option },
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        RadioButton(selected = attribute == option, onClick = { attribute = option })
+                        RadioButton(selected = attribute == option, onClick = null)
                         Text(option.displayName())
                     }
                 }
@@ -4464,6 +5322,21 @@ private fun LaunchAppDialog(
     var intentAction by remember(initialIntentAction) { mutableStateOf(initialIntentAction.orEmpty()) }
     var appQuery by remember { mutableStateOf("") }
     val matchingApps = filterLaunchableApps(launchableApps, appQuery)
+    val normalizedTarget = normalizedLaunchTarget(packageName, intentAction)
+    val normalizedPackageName = normalizedTarget?.packageName.orEmpty()
+    val normalizedIntentAction = normalizedTarget?.intentAction
+    val targetResolvable = normalizedTarget?.let { target ->
+        target.intentAction?.let { action ->
+            Intent(action).setPackage(target.packageName).resolveActivity(context.packageManager) != null
+        } ?: (context.packageManager.getLaunchIntentForPackage(target.packageName) != null)
+    } == true
+    val targetStatus = launchTargetEditorStatus(
+        packageName = packageName,
+        intentAction = intentAction,
+        initialPackageName = initialPackageName,
+        initialIntentAction = initialIntentAction,
+        isResolvable = targetResolvable,
+    )
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.launch_app)) },
@@ -4544,20 +5417,6 @@ private fun LaunchAppDialog(
                     stringResource(R.string.package_name),
                     true,
                 )
-                if (packageName.isNotBlank()) {
-                    val selectedApp = launchableApps.firstOrNull { it.packageName == packageName.trim() }
-                    Text(
-                        selectedApp?.let {
-                            stringResource(R.string.selected_launchable_app, it.label)
-                        } ?: stringResource(R.string.app_package_not_launchable),
-                        color = if (selectedApp != null) {
-                            Color(0xFF16815F)
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
-                        fontSize = 13.sp,
-                    )
-                }
                 HorizontalDivider()
                 NodeField(
                     intentAction,
@@ -4569,12 +5428,57 @@ private fun LaunchAppDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
+                if (targetStatus != LaunchTargetEditorStatus.MissingPackage) {
+                    val selectedApp = launchableApps.firstOrNull {
+                        it.packageName == normalizedPackageName
+                    }
+                    val statusText = when (targetStatus) {
+                        LaunchTargetEditorStatus.Resolvable -> when {
+                            normalizedIntentAction != null -> stringResource(
+                                R.string.launch_target_action_available,
+                                normalizedIntentAction,
+                            )
+                            selectedApp != null -> stringResource(
+                                R.string.selected_launchable_app,
+                                selectedApp.label,
+                            )
+                            else -> stringResource(R.string.launch_target_available)
+                        }
+                        LaunchTargetEditorStatus.Unverified ->
+                            stringResource(R.string.launch_target_unverified)
+                        LaunchTargetEditorStatus.PreservedUnavailable ->
+                            stringResource(R.string.launch_target_imported_unavailable)
+                        LaunchTargetEditorStatus.Unavailable ->
+                            stringResource(R.string.launch_target_unavailable)
+                        LaunchTargetEditorStatus.MissingPackage -> ""
+                    }
+                    Text(
+                        statusText,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = when (targetStatus) {
+                            LaunchTargetEditorStatus.Resolvable -> Color(0xFF16815F)
+                            LaunchTargetEditorStatus.Unverified ->
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            LaunchTargetEditorStatus.PreservedUnavailable ->
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            else -> MaterialTheme.colorScheme.error
+                        },
+                        fontSize = 13.sp,
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = packageName.isNotBlank(),
-                onClick = { onAdd(packageName.trim(), normalizedOptionalText(intentAction)) },
+                enabled = targetStatus == LaunchTargetEditorStatus.Resolvable ||
+                    targetStatus == LaunchTargetEditorStatus.Unverified ||
+                    targetStatus == LaunchTargetEditorStatus.PreservedUnavailable,
+                onClick = {
+                    onAdd(
+                        preserveUnchangedOrTrim(packageName, initialPackageName),
+                        preserveUnchangedOptionalText(intentAction, initialIntentAction),
+                    )
+                },
             ) { Text(stringResource(confirmLabelRes)) }
         },
         dismissButton = {
@@ -4583,7 +5487,37 @@ private fun LaunchAppDialog(
     )
 }
 
+internal enum class LaunchTargetEditorStatus {
+    MissingPackage,
+    Resolvable,
+    Unverified,
+    PreservedUnavailable,
+    Unavailable,
+}
+
+internal fun launchTargetEditorStatus(
+    packageName: String,
+    intentAction: String,
+    initialPackageName: String = "",
+    initialIntentAction: String? = null,
+    isResolvable: Boolean,
+): LaunchTargetEditorStatus {
+    val target = normalizedLaunchTarget(packageName, intentAction)
+        ?: return LaunchTargetEditorStatus.MissingPackage
+    if (isResolvable) return LaunchTargetEditorStatus.Resolvable
+    if (target.intentAction != null) return LaunchTargetEditorStatus.Unverified
+    val initialTarget = normalizedLaunchTarget(initialPackageName, initialIntentAction)
+    return if (initialTarget == target) {
+        LaunchTargetEditorStatus.PreservedUnavailable
+    } else {
+        LaunchTargetEditorStatus.Unavailable
+    }
+}
+
 internal fun normalizedOptionalText(value: String): String? = value.trim().ifBlank { null }
+
+internal fun preserveUnchangedOptionalText(value: String, original: String?): String? =
+    if (value == original.orEmpty()) original else normalizedOptionalText(value)
 
 internal fun preserveUnchangedOrTrim(value: String, original: String): String =
     if (value == original) original else value.trim()
@@ -4632,6 +5566,25 @@ private fun ClickStepDialog(
     }
     var matchResult by remember { mutableStateOf<String?>(null) }
     var matchSucceeded by remember { mutableStateOf(false) }
+    fun applyReplacementSelector(selector: NodeSelector) {
+        val draft = initialSelector?.toDraft()?.withReplacementSelector(selector) ?: selector.toDraft()
+        packageName = draft.packageName
+        viewId = draft.viewId
+        text = draft.text
+        textContains = draft.textMatchMode == TextMatchMode.Contains
+        description = draft.contentDescription
+        descriptionContains = draft.contentDescriptionMatchMode == TextMatchMode.Contains
+        className = draft.className
+        matchIndex = draft.matchIndex
+        useAncestor = draft.useAncestor
+        ancestorViewId = draft.ancestorViewId
+        ancestorText = draft.ancestorText
+        ancestorTextContains = draft.ancestorTextMatchMode == TextMatchMode.Contains
+        ancestorDescription = draft.ancestorContentDescription
+        ancestorDescriptionContains =
+            draft.ancestorContentDescriptionMatchMode == TextMatchMode.Contains
+        ancestorClassName = draft.ancestorClassName
+    }
     val hasAttribute = listOf(viewId, text, description, className).any { it.isNotBlank() }
     val hasAncestorAttribute = listOf(
         ancestorViewId,
@@ -4651,14 +5604,7 @@ private fun ClickStepDialog(
             ) {
                 VisualSelectorCapture(
                     onSelectorSelected = { selector ->
-                        packageName = selector.packageName
-                        viewId = selector.viewId.orEmpty()
-                        text = selector.text.orEmpty()
-                        textContains = false
-                        description = selector.contentDescription.orEmpty()
-                        descriptionContains = false
-                        className = selector.className.orEmpty()
-                        matchIndex = selector.matchIndex
+                        applyReplacementSelector(selector)
                         matchResult = context.getString(R.string.selector_selected_from_screenshot)
                         matchSucceeded = true
                     },
@@ -4679,14 +5625,7 @@ private fun ClickStepDialog(
                                 val candidates = SelectorRecommendations.candidates(node)
                                 val selector = candidates.firstOrNull { service?.countMatches(it) == 1 }
                                     ?: candidates.first()
-                                packageName = selector.packageName
-                                viewId = selector.viewId.orEmpty()
-                                text = selector.text.orEmpty()
-                                textContains = false
-                                description = selector.contentDescription.orEmpty()
-                                descriptionContains = false
-                                className = selector.className.orEmpty()
-                                matchIndex = selector.matchIndex
+                                applyReplacementSelector(selector)
                                 val count = service?.countMatches(selector) ?: 0
                                 matchResult = if (count == 1) {
                                     context.getString(R.string.selector_unique_auto_selected)
@@ -4720,38 +5659,26 @@ private fun ClickStepDialog(
                 )
                 NodeField(viewId, { viewId = it }, stringResource(R.string.resource_id))
                 NodeField(text, { text = it }, stringResource(R.string.selector_text))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.text_contains), modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = textContains,
-                        enabled = text.isNotBlank(),
-                        onCheckedChange = { textContains = it },
-                    )
-                }
+                SelectorToggleRow(
+                    label = stringResource(R.string.text_contains),
+                    checked = textContains,
+                    enabled = text.isNotBlank(),
+                    onCheckedChange = { textContains = it },
+                )
                 NodeField(description, { description = it }, stringResource(R.string.selector_content_description))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.description_contains), modifier = Modifier.weight(1f))
-                    Switch(
-                        checked = descriptionContains,
-                        enabled = description.isNotBlank(),
-                        onCheckedChange = { descriptionContains = it },
-                    )
-                }
+                SelectorToggleRow(
+                    label = stringResource(R.string.description_contains),
+                    checked = descriptionContains,
+                    enabled = description.isNotBlank(),
+                    onCheckedChange = { descriptionContains = it },
+                )
                 NodeField(className, { className = it }, stringResource(R.string.class_name))
                 MatchIndexControl(matchIndex) { matchIndex = it }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(stringResource(R.string.limit_to_ancestor), modifier = Modifier.weight(1f))
-                    Switch(checked = useAncestor, onCheckedChange = { useAncestor = it })
-                }
+                SelectorToggleRow(
+                    label = stringResource(R.string.limit_to_ancestor),
+                    checked = useAncestor,
+                    onCheckedChange = { useAncestor = it },
+                )
                 if (useAncestor) {
                     Text(
                         stringResource(R.string.ancestor_attributes),
@@ -4768,33 +5695,23 @@ private fun ClickStepDialog(
                         { ancestorText = it },
                         stringResource(R.string.ancestor_text),
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(stringResource(R.string.text_contains), modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = ancestorTextContains,
-                            enabled = ancestorText.isNotBlank(),
-                            onCheckedChange = { ancestorTextContains = it },
-                        )
-                    }
+                    SelectorToggleRow(
+                        label = stringResource(R.string.text_contains),
+                        checked = ancestorTextContains,
+                        enabled = ancestorText.isNotBlank(),
+                        onCheckedChange = { ancestorTextContains = it },
+                    )
                     NodeField(
                         ancestorDescription,
                         { ancestorDescription = it },
                         stringResource(R.string.ancestor_content_description),
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(stringResource(R.string.description_contains), modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = ancestorDescriptionContains,
-                            enabled = ancestorDescription.isNotBlank(),
-                            onCheckedChange = { ancestorDescriptionContains = it },
-                        )
-                    }
+                    SelectorToggleRow(
+                        label = stringResource(R.string.description_contains),
+                        checked = ancestorDescriptionContains,
+                        enabled = ancestorDescription.isNotBlank(),
+                        onCheckedChange = { ancestorDescriptionContains = it },
+                    )
                     NodeField(
                         ancestorClassName,
                         { ancestorClassName = it },
@@ -4836,19 +5753,26 @@ private fun ClickStepDialog(
                             ancestorDescription,
                             ancestorDescriptionContains,
                             ancestorClassName,
+                            initialSelector,
                         )
                         val count = selector?.let {
                             AutomationAccessibilityService.instance?.countMatches(it)
                         } ?: 0
                         matchResult = when (count) {
                             0 -> context.getString(R.string.selector_no_matches)
-                            in 1..matchIndex -> context.getString(
-                                R.string.selector_index_unavailable,
+                            in 1..matchIndex -> context.resources.getQuantityString(
+                                R.plurals.selector_index_unavailable,
+                                count,
                                 count,
                                 matchIndex + 1,
                             )
                             1 -> context.getString(R.string.selector_unique_ready)
-                            else -> context.getString(R.string.selector_match_available, count, matchIndex + 1)
+                            else -> context.resources.getQuantityString(
+                                R.plurals.selector_match_available,
+                                count,
+                                count,
+                                matchIndex + 1,
+                            )
                         }
                         matchSucceeded = count > matchIndex
                     },
@@ -4886,6 +5810,7 @@ private fun ClickStepDialog(
                                 ancestorDescription,
                                 ancestorDescriptionContains,
                                 ancestorClassName,
+                                initialSelector,
                             ),
                         ),
                     )
@@ -4897,6 +5822,14 @@ private fun ClickStepDialog(
         },
     )
 }
+
+private enum class ImageClickCaptureMode { Crop, ClickPoint }
+
+internal fun imageClickTemplateSelectionCanSave(
+    hasInitialTemplate: Boolean,
+    captureReady: Boolean,
+    replacementComplete: Boolean,
+): Boolean = replacementComplete || (hasInitialTemplate && !captureReady)
 
 @Composable
 private fun ImageClickStepDialog(
@@ -4914,6 +5847,8 @@ private fun ImageClickStepDialog(
     }
     val context = LocalContext.current
     val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
+    val displaySize = currentDisplayPixelSize()
+    var captureGeometryChanged by remember { mutableStateOf(false) }
     var packageName by remember(initialStep) { mutableStateOf(initialStep?.packageName.orEmpty()) }
     var captureSize by remember { mutableStateOf(IntSize.Zero) }
     var dragStart by remember { mutableStateOf<Offset?>(null) }
@@ -4922,6 +5857,14 @@ private fun ImageClickStepDialog(
     var cropTop by remember { mutableStateOf("") }
     var cropRight by remember { mutableStateOf("") }
     var cropBottom by remember { mutableStateOf("") }
+    var captureMode by remember { mutableStateOf(ImageClickCaptureMode.Crop) }
+    var replacementCapturePending by remember(initialStep) { mutableStateOf(false) }
+    var templateClickXText by remember(initialStep) {
+        mutableStateOf(initialStep?.templateClickX?.toString().orEmpty())
+    }
+    var templateClickYText by remember(initialStep) {
+        mutableStateOf(initialStep?.templateClickY?.toString().orEmpty())
+    }
     var minimumScorePercent by remember(initialStep) {
         mutableStateOf(imageMatchPercentText(initialStep?.minimumScorePermille ?: 920))
     }
@@ -4934,17 +5877,58 @@ private fun ImageClickStepDialog(
     var error by remember { mutableStateOf<String?>(null) }
     val minimumScorePermille = imageMatchPercentToPermille(minimumScorePercent)
     val ambiguityMarginPermille = imageMatchPercentToPermille(ambiguityMarginPercent)
+    val editableCrop = cropBoundsOrNull(cropLeft, cropTop, cropRight, cropBottom)
+    val editableTemplateWidth = editableCrop?.let { it.right - it.left } ?: initialStep?.templateWidth
+    val editableTemplateHeight = editableCrop?.let { it.bottom - it.top } ?: initialStep?.templateHeight
+    val templateClickPoint = templateClickXText.toIntOrNull()?.let { x ->
+        templateClickYText.toIntOrNull()?.let { y -> ScreenPoint(x, y) }
+    }
+    val clickPointFieldsBlank = templateClickXText.isBlank() && templateClickYText.isBlank()
+    val clickPointInputValid = templateClickPoint?.let { point ->
+        editableTemplateWidth?.let { width ->
+            editableTemplateHeight?.let { height ->
+                point.x in 0 until width && point.y in 0 until height
+            }
+        }
+    } == true
+
+    LaunchedEffect(captureState, displaySize) {
+        val state = captureState as? ScreenCaptureState.Ready
+        if (state != null && !captureBoundsMatchDisplay(
+                state.screenBounds,
+                displaySize.width,
+                displaySize.height,
+            )
+        ) {
+            captureGeometryChanged = true
+            AutomationAccessibilityService.discardScreenCapture()
+        } else if (captureState is ScreenCaptureState.Armed) {
+            captureGeometryChanged = false
+        }
+    }
 
     LaunchedEffect(captureState) {
-        val state = captureState as? ScreenCaptureState.Ready ?: return@LaunchedEffect
-        if (packageName.isBlank()) packageName = state.nodes.firstOrNull()?.packageName.orEmpty()
-        dragStart = null
-        dragEnd = null
-        cropLeft = ""
-        cropTop = ""
-        cropRight = ""
-        cropBottom = ""
-        error = null
+        val state = captureState
+        if (state is ScreenCaptureState.Ready) {
+            replacementCapturePending = initialStep != null
+            packageName = state.targetPackage
+            dragStart = null
+            dragEnd = null
+            cropLeft = ""
+            cropTop = ""
+            cropRight = ""
+            cropBottom = ""
+            captureMode = ImageClickCaptureMode.Crop
+            templateClickXText = ""
+            templateClickYText = ""
+            error = null
+        } else if (replacementCapturePending && initialStep != null) {
+            replacementCapturePending = false
+            packageName = initialStep.packageName
+            templateClickXText = initialStep.templateClickX?.toString().orEmpty()
+            templateClickYText = initialStep.templateClickY?.toString().orEmpty()
+            error = null
+        }
     }
 
     AlertDialog(
@@ -4960,18 +5944,27 @@ private fun ImageClickStepDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
+                Text(
+                    stringResource(R.string.image_click_template_privacy_notice),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
                 if (initialStep != null) {
                     Text(
                         stringResource(R.string.image_click_saved_template_title),
                         fontWeight = FontWeight.SemiBold,
                     )
                     if (savedTemplatePreview != null) {
-                        Image(
-                            bitmap = savedTemplatePreview.asImageBitmap(),
-                            contentDescription = stringResource(
-                                R.string.image_click_saved_template_description,
+                        ImageClickPointPicker(
+                            bitmap = savedTemplatePreview,
+                            selectedPoint = templateClickPoint ?: ScreenPoint(
+                                initialStep.templateWidth / 2,
+                                initialStep.templateHeight / 2,
                             ),
-                            contentScale = ContentScale.Fit,
+                            onPointSelected = {
+                                templateClickXText = it.x.toString()
+                                templateClickYText = it.y.toString()
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(180.dp)
@@ -4985,6 +5978,13 @@ private fun ImageClickStepDialog(
                             ),
                             fontSize = 12.sp,
                         )
+                        Text(
+                            templateClickPoint?.let {
+                                stringResource(R.string.image_click_point_selected, it.x, it.y)
+                            } ?: stringResource(R.string.image_click_point_legacy_center),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        )
                     } else {
                         Text(
                             stringResource(R.string.image_click_saved_template_invalid),
@@ -4994,6 +5994,32 @@ private fun ImageClickStepDialog(
                         )
                     }
                     HorizontalDivider()
+                }
+                Text(stringResource(R.string.image_click_point_coordinates), fontWeight = FontWeight.SemiBold)
+                Text(
+                    stringResource(R.string.image_click_point_coordinates_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                NodeField(
+                    templateClickXText,
+                    { templateClickXText = it },
+                    stringResource(R.string.image_click_point_x),
+                    true,
+                )
+                NodeField(
+                    templateClickYText,
+                    { templateClickYText = it },
+                    stringResource(R.string.image_click_point_y),
+                    true,
+                )
+                if (!clickPointFieldsBlank && !clickPointInputValid) {
+                    Text(
+                        stringResource(R.string.image_click_point_outside_crop),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
                 }
                 NodeField(packageName, { packageName = it }, stringResource(R.string.image_click_package), true)
                 HorizontalDivider()
@@ -5053,6 +6079,14 @@ private fun ImageClickStepDialog(
                     )
                 }
                 HorizontalDivider()
+                if (captureGeometryChanged) {
+                    Text(
+                        stringResource(R.string.screenshot_display_changed),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                }
                 OutlinedButton(
                     onClick = {
                         AutomationAccessibilityService.instance?.capturePreviousApp()
@@ -5076,9 +6110,57 @@ private fun ImageClickStepDialog(
                     ) { Text(stringResource(R.string.clear_screenshot)) }
                 }
                 when (val state = captureState) {
-                    ScreenCaptureState.Armed -> Text(stringResource(R.string.capture_waiting))
-                    is ScreenCaptureState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
+                    ScreenCaptureState.Armed -> Text(
+                        stringResource(R.string.capture_waiting),
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    is ScreenCaptureState.Error -> Text(
+                        state.message,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = MaterialTheme.colorScheme.error,
+                    )
                     is ScreenCaptureState.Ready -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            val cropSelected = captureMode == ImageClickCaptureMode.Crop
+                            if (cropSelected) {
+                                Button(
+                                    onClick = { captureMode = ImageClickCaptureMode.Crop },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text(stringResource(R.string.image_click_select_crop)) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { captureMode = ImageClickCaptureMode.Crop },
+                                    modifier = Modifier.weight(1f),
+                                ) { Text(stringResource(R.string.image_click_select_crop)) }
+                            }
+                            val pointEnabled = cropBoundsOrNull(cropLeft, cropTop, cropRight, cropBottom) != null
+                            if (captureMode == ImageClickCaptureMode.ClickPoint) {
+                                Button(
+                                    onClick = { captureMode = ImageClickCaptureMode.ClickPoint },
+                                    enabled = pointEnabled,
+                                    modifier = Modifier.weight(1f),
+                                ) { Text(stringResource(R.string.image_click_select_point)) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { captureMode = ImageClickCaptureMode.ClickPoint },
+                                    enabled = pointEnabled,
+                                    modifier = Modifier.weight(1f),
+                                ) { Text(stringResource(R.string.image_click_select_point)) }
+                            }
+                        }
+                        Text(
+                            stringResource(
+                                if (captureMode == ImageClickCaptureMode.Crop) {
+                                    R.string.image_click_crop_hint
+                                } else {
+                                    R.string.image_click_point_hint
+                                },
+                            ),
+                            fontSize = 12.sp,
+                        )
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -5094,42 +6176,76 @@ private fun ImageClickStepDialog(
                             Canvas(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .pointerInput(state, captureSize) {
-                                        detectDragGestures(
-                                            onDragStart = {
-                                                dragStart = it
-                                                dragEnd = it
-                                                error = null
-                                            },
-                                            onDrag = { change, _ ->
-                                                change.consume()
-                                                dragEnd = change.position
-                                                val first = dragStart?.let { start ->
-                                                    mapFitCenterTapToScreen(
-                                                        start.x,
-                                                        start.y,
+                                    .pointerInput(state, captureSize, captureMode) {
+                                        when (captureMode) {
+                                            ImageClickCaptureMode.Crop -> detectDragGestures(
+                                                onDragStart = {
+                                                    dragStart = it
+                                                    dragEnd = it
+                                                    templateClickXText = ""
+                                                    templateClickYText = ""
+                                                    error = null
+                                                },
+                                                onDrag = { change, _ ->
+                                                    change.consume()
+                                                    dragEnd = change.position
+                                                    val first = dragStart?.let { start ->
+                                                        mapFitCenterTapToScreen(
+                                                            start.x,
+                                                            start.y,
+                                                            captureSize.width,
+                                                            captureSize.height,
+                                                            state.bitmap.width,
+                                                            state.bitmap.height,
+                                                        )
+                                                    }
+                                                    val second = mapFitCenterTapToScreen(
+                                                        change.position.x,
+                                                        change.position.y,
                                                         captureSize.width,
                                                         captureSize.height,
                                                         state.bitmap.width,
                                                         state.bitmap.height,
                                                     )
-                                                }
-                                                val second = mapFitCenterTapToScreen(
-                                                    change.position.x,
-                                                    change.position.y,
+                                                    if (first != null && second != null) {
+                                                        cropLeft = minOf(first.x, second.x).toString()
+                                                        cropTop = minOf(first.y, second.y).toString()
+                                                        cropRight = (maxOf(first.x, second.x) + 1)
+                                                            .coerceAtMost(state.bitmap.width).toString()
+                                                        cropBottom = (maxOf(first.y, second.y) + 1)
+                                                            .coerceAtMost(state.bitmap.height).toString()
+                                                    }
+                                                },
+                                            )
+                                            ImageClickCaptureMode.ClickPoint -> detectTapGestures { offset ->
+                                                val screenshotPoint = mapFitCenterTapToScreen(
+                                                    offset.x,
+                                                    offset.y,
                                                     captureSize.width,
                                                     captureSize.height,
                                                     state.bitmap.width,
                                                     state.bitmap.height,
                                                 )
-                                                if (first != null && second != null) {
-                                                    cropLeft = minOf(first.x, second.x).toString()
-                                                    cropTop = minOf(first.y, second.y).toString()
-                                                    cropRight = maxOf(first.x, second.x).toString()
-                                                    cropBottom = maxOf(first.y, second.y).toString()
+                                                val bounds = cropBoundsOrNull(
+                                                    cropLeft,
+                                                    cropTop,
+                                                    cropRight,
+                                                    cropBottom,
+                                                )
+                                                val relativePoint = if (bounds != null && screenshotPoint != null) {
+                                                    templatePointRelativeToCrop(bounds, screenshotPoint)
+                                                } else {
+                                                    null
                                                 }
-                                            },
-                                        )
+                                                if (relativePoint == null) {
+                                                    error = context.getString(R.string.image_click_point_outside_crop)
+                                                } else {
+                                                    templateClickXText = relativePoint.x.toString()
+                                                    templateClickYText = relativePoint.y.toString()
+                                                    error = null
+                                                }
+                                            }
+                                        }
                                     },
                             ) {
                                 val start = dragStart
@@ -5146,9 +6262,38 @@ private fun ImageClickStepDialog(
                                         style = Stroke(width = 3.dp.toPx()),
                                     )
                                 }
+                                val point = templateClickPoint
+                                val bounds = cropBoundsOrNull(cropLeft, cropTop, cropRight, cropBottom)
+                                if (point != null && bounds != null) {
+                                    val scale = minOf(
+                                        size.width / state.bitmap.width,
+                                        size.height / state.bitmap.height,
+                                    )
+                                    val imageWidth = state.bitmap.width * scale
+                                    val imageHeight = state.bitmap.height * scale
+                                    val center = Offset(
+                                        x = (size.width - imageWidth) / 2f + (bounds.left + point.x + 0.5f) * scale,
+                                        y = (size.height - imageHeight) / 2f + (bounds.top + point.y + 0.5f) * scale,
+                                    )
+                                    drawCircle(Color(0xFFD04F3D), radius = 7.dp.toPx(), center = center)
+                                    drawLine(
+                                        Color.White,
+                                        center - Offset(9.dp.toPx(), 0f),
+                                        center + Offset(9.dp.toPx(), 0f),
+                                        strokeWidth = 2.dp.toPx(),
+                                    )
+                                    drawLine(
+                                        Color.White,
+                                        center - Offset(0f, 9.dp.toPx()),
+                                        center + Offset(0f, 9.dp.toPx()),
+                                        strokeWidth = 2.dp.toPx(),
+                                    )
+                                }
                             }
                         }
-                        Text(stringResource(R.string.image_click_crop_hint), fontSize = 12.sp)
+                        templateClickPoint?.let {
+                            Text(stringResource(R.string.image_click_point_selected, it.x, it.y), fontSize = 12.sp)
+                        }
                         Text(stringResource(R.string.image_click_crop_bounds), fontWeight = FontWeight.SemiBold)
                         NodeField(cropLeft, { cropLeft = it }, stringResource(R.string.crop_left), true)
                         NodeField(cropTop, { cropTop = it }, stringResource(R.string.crop_top), true)
@@ -5170,32 +6315,74 @@ private fun ImageClickStepDialog(
             }
         },
         confirmButton = {
+            val captureReady = captureState is ScreenCaptureState.Ready
+            val replacementComplete = captureReady && editableCrop != null && clickPointInputValid
             TextButton(
                 enabled = packageName.isNotBlank() && minimumScorePermille != null &&
-                    ambiguityMarginPermille != null && (initialStep != null ||
-                    captureState is ScreenCaptureState.Ready && cropBoundsOrNull(
-                        cropLeft,
-                        cropTop,
-                        cropRight,
-                        cropBottom,
-                    ) != null),
+                    ambiguityMarginPermille != null &&
+                    (clickPointFieldsBlank || clickPointInputValid) &&
+                    imageClickTemplateSelectionCanSave(
+                        hasInitialTemplate = initialStep != null,
+                        captureReady = captureReady,
+                        replacementComplete = replacementComplete,
+                    ),
                 onClick = {
                     val state = captureState as? ScreenCaptureState.Ready
                     val bounds = cropBoundsOrNull(cropLeft, cropTop, cropRight, cropBottom)
-                    if (state == null || bounds == null) {
+                    if (state != null && bounds == null) {
+                        error = context.getString(R.string.image_click_replacement_incomplete)
+                        return@TextButton
+                    }
+                    if (state == null) {
                         initialStep?.let {
+                            if (!clickPointFieldsBlank && !clickPointInputValid) {
+                                error = context.getString(R.string.image_click_point_outside_crop)
+                                return@TextButton
+                            }
                             onAdd(
                                 it.copy(
                                     packageName = packageName.trim(),
                                     minimumScorePermille = requireNotNull(minimumScorePermille),
                                     ambiguityMarginPermille = requireNotNull(ambiguityMarginPermille),
                                     scaleTolerancePermille = scaleTolerancePermille,
+                                    templateClickX = templateClickPoint?.x,
+                                    templateClickY = templateClickPoint?.y,
                                 ),
                             )
                         }
                         return@TextButton
                     }
-                    val crop = cropTemplate(state.bitmap, bounds)
+                    val replacementBounds = requireNotNull(bounds)
+                    if (packageName.trim() != state.targetPackage) {
+                        error = context.getString(
+                            R.string.image_click_capture_package_mismatch,
+                            state.targetPackage,
+                        )
+                        return@TextButton
+                    }
+                    val clickPoint = templateClickPoint
+                    if (clickPoint == null) {
+                        error = context.getString(R.string.image_click_point_required)
+                        return@TextButton
+                    }
+                    if (clickPoint.x !in 0 until (replacementBounds.right - replacementBounds.left) ||
+                        clickPoint.y !in 0 until (replacementBounds.bottom - replacementBounds.top)
+                    ) {
+                        error = context.getString(R.string.image_click_point_outside_crop)
+                        return@TextButton
+                    }
+                    if (mapBitmapCropToTargetScreen(
+                            crop = replacementBounds,
+                            bitmapWidth = state.bitmap.width,
+                            bitmapHeight = state.bitmap.height,
+                            screenBounds = state.screenBounds,
+                            targetBounds = state.targetBounds,
+                        ) == null
+                    ) {
+                        error = context.getString(R.string.live_action_image_outside_target)
+                        return@TextButton
+                    }
+                    val crop = cropTemplate(state.bitmap, replacementBounds)
                     if (crop == null) {
                         error = context.getString(
                             R.string.image_click_crop_too_small,
@@ -5219,6 +6406,8 @@ private fun ImageClickStepDialog(
                                     scaleTolerancePermille = scaleTolerancePermille,
                                     timeoutMillis = initialStep?.timeoutMillis,
                                     failurePolicy = initialStep?.failurePolicy ?: FailurePolicy.Stop,
+                                    templateClickX = clickPoint.x,
+                                    templateClickY = clickPoint.y,
                                 ),
                             )
                         }
@@ -5228,6 +6417,62 @@ private fun ImageClickStepDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
+}
+
+@Composable
+private fun ImageClickPointPicker(
+    bitmap: Bitmap,
+    selectedPoint: ScreenPoint,
+    onPointSelected: (ScreenPoint) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var previewSize by remember(bitmap) { mutableStateOf(IntSize.Zero) }
+    Box(modifier = modifier.onSizeChanged { previewSize = it }) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = stringResource(R.string.image_click_saved_template_description),
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(bitmap, previewSize) {
+                    detectTapGestures { offset ->
+                        mapFitCenterTapToScreen(
+                            tapX = offset.x,
+                            tapY = offset.y,
+                            containerWidth = previewSize.width,
+                            containerHeight = previewSize.height,
+                            imageWidth = bitmap.width,
+                            imageHeight = bitmap.height,
+                        )?.let(onPointSelected)
+                    }
+                },
+        ) {
+            if (selectedPoint.x !in 0 until bitmap.width || selectedPoint.y !in 0 until bitmap.height) return@Canvas
+            val scale = minOf(size.width / bitmap.width, size.height / bitmap.height)
+            val imageWidth = bitmap.width * scale
+            val imageHeight = bitmap.height * scale
+            val center = Offset(
+                x = (size.width - imageWidth) / 2f + (selectedPoint.x + 0.5f) * scale,
+                y = (size.height - imageHeight) / 2f + (selectedPoint.y + 0.5f) * scale,
+            )
+            drawCircle(Color(0xFFD04F3D), radius = 7.dp.toPx(), center = center)
+            drawLine(
+                Color.White,
+                center - Offset(9.dp.toPx(), 0f),
+                center + Offset(9.dp.toPx(), 0f),
+                strokeWidth = 2.dp.toPx(),
+            )
+            drawLine(
+                Color.White,
+                center - Offset(0f, 9.dp.toPx()),
+                center + Offset(0f, 9.dp.toPx()),
+                strokeWidth = 2.dp.toPx(),
+            )
+        }
+    }
 }
 
 internal fun imageMatchPercentText(permille: Int): String = "${permille / 10}.${permille % 10}"
@@ -5248,7 +6493,25 @@ private fun VisualSelectorCapture(
 ) {
     val context = LocalContext.current
     val captureState by AutomationAccessibilityService.screenCaptureState.collectAsStateWithLifecycle()
+    val automationConnected by AutomationAccessibilityService.connected.collectAsStateWithLifecycle()
+    val displaySize = currentDisplayPixelSize()
+    var captureGeometryChanged by remember { mutableStateOf(false) }
     var captureSize by remember { mutableStateOf(IntSize.Zero) }
+
+    LaunchedEffect(captureState, displaySize) {
+        val state = captureState as? ScreenCaptureState.Ready
+        if (state != null && !captureBoundsMatchDisplay(
+                state.screenBounds,
+                displaySize.width,
+                displaySize.height,
+            )
+        ) {
+            captureGeometryChanged = true
+            AutomationAccessibilityService.discardScreenCapture()
+        } else if (captureState is ScreenCaptureState.Armed) {
+            captureGeometryChanged = false
+        }
+    }
 
     Text(
         stringResource(R.string.select_from_screenshot),
@@ -5260,11 +6523,20 @@ private fun VisualSelectorCapture(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
     )
+    if (captureGeometryChanged) {
+        Text(
+            stringResource(R.string.screenshot_display_changed),
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 12.sp,
+        )
+    }
     OutlinedButton(
         onClick = {
             AutomationAccessibilityService.instance?.capturePreviousApp()
         },
         enabled = AutomationAccessibilityService.instance != null &&
+            automationConnected &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
             captureState !is ScreenCaptureState.Armed,
         modifier = Modifier.fillMaxWidth(),
@@ -5306,14 +6578,7 @@ private fun VisualSelectorCapture(
                     .onSizeChanged { captureSize = it }
                     .pointerInput(state, captureSize) {
                         detectTapGestures { offset ->
-                            val point = mapFitCenterTapToScreen(
-                                tapX = offset.x,
-                                tapY = offset.y,
-                                containerWidth = captureSize.width,
-                                containerHeight = captureSize.height,
-                                imageWidth = state.bitmap.width,
-                                imageHeight = state.bitmap.height,
-                            )
+                            val point = mapCaptureOffset(state, captureSize, offset)
                             val node = point?.let { selectCaptureNode(state.nodes, it) }
                             if (node == null) {
                                 onSelectionError(context.getString(R.string.no_accessible_element_at_position))
@@ -5328,9 +6593,14 @@ private fun VisualSelectorCapture(
                     },
             )
         }
-        ScreenCaptureState.Idle -> if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Text(
+        ScreenCaptureState.Idle -> when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.R -> Text(
                 stringResource(R.string.visual_capture_requires_android_11),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+            !automationConnected || AutomationAccessibilityService.instance == null -> Text(
+                stringResource(R.string.selector_capture_requires_automation),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
@@ -5338,7 +6608,7 @@ private fun VisualSelectorCapture(
     }
 }
 
-private fun nodeSelectorOrNull(
+internal fun nodeSelectorOrNull(
     packageName: String,
     viewId: String,
     text: String,
@@ -5354,47 +6624,34 @@ private fun nodeSelectorOrNull(
     ancestorDescription: String,
     ancestorDescriptionContains: Boolean,
     ancestorClassName: String,
-): NodeSelector? {
-    if (!selectorHasAttribute(viewId, text, description, className)) return null
-    val ancestor = if (useAncestor) {
-        if (!selectorHasAttribute(
-                ancestorViewId,
-                ancestorText,
-                ancestorDescription,
-                ancestorClassName,
-            )
-        ) return null
-        AncestorSelector(
-            viewId = ancestorViewId.trim().ifBlank { null },
-            text = ancestorText.trim().ifBlank { null },
-            textMatchMode = if (ancestorTextContains) TextMatchMode.Contains else TextMatchMode.Exact,
-            contentDescription = ancestorDescription.trim().ifBlank { null },
-            contentDescriptionMatchMode = if (ancestorDescriptionContains) {
-                TextMatchMode.Contains
-            } else {
-                TextMatchMode.Exact
-            },
-            className = ancestorClassName.trim().ifBlank { null },
-        )
-    } else {
-        null
-    }
-    return NodeSelector(
-        packageName = packageName.trim(),
-        viewId = viewId.trim().ifBlank { null },
-        text = text.trim().ifBlank { null },
+    originalSelector: NodeSelector? = null,
+): NodeSelector? = NodeSelectorDraft(
+        packageName = packageName,
+        viewId = viewId,
+        text = text,
         textMatchMode = if (textContains) TextMatchMode.Contains else TextMatchMode.Exact,
-        contentDescription = description.trim().ifBlank { null },
+        contentDescription = description,
         contentDescriptionMatchMode = if (descriptionContains) {
             TextMatchMode.Contains
         } else {
             TextMatchMode.Exact
         },
-        className = className.trim().ifBlank { null },
+        className = className,
         matchIndex = matchIndex,
-        ancestor = ancestor,
+        useAncestor = useAncestor,
+        ancestorViewId = ancestorViewId,
+        ancestorText = ancestorText,
+        ancestorTextMatchMode = if (ancestorTextContains) TextMatchMode.Contains else TextMatchMode.Exact,
+        ancestorContentDescription = ancestorDescription,
+        ancestorContentDescriptionMatchMode = if (ancestorDescriptionContains) {
+            TextMatchMode.Contains
+        } else {
+            TextMatchMode.Exact
+        },
+        ancestorClassName = ancestorClassName,
+        originalSelector = originalSelector,
     )
-}
+    .toSelectorOrNull()
 
 internal fun selectorHasAttribute(
     viewId: String,
@@ -5409,12 +6666,28 @@ private fun NodeField(
     onValueChange: (String) -> Unit,
     label: String,
     required: Boolean = false,
+    numeric: Boolean = false,
+    errorText: String? = null,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(if (required) "$label *" else label) },
+        isError = errorText != null,
+        supportingText = errorText?.let { message ->
+            {
+                Text(
+                    message,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+        },
         singleLine = true,
+        keyboardOptions = if (numeric) {
+            KeyboardOptions(keyboardType = KeyboardType.Number)
+        } else {
+            KeyboardOptions.Default
+        },
         modifier = Modifier.fillMaxWidth(),
     )
 }
@@ -5545,11 +6818,19 @@ private fun WorkflowOperationChooserDialog(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 WorkflowEditorOperation.entries.forEach { operation ->
+                    val unavailableReason = operation.unavailableReason(hasSteps, serviceConnected)
                     OutlinedButton(
-                        enabled = operation.isAvailable(hasSteps, serviceConnected),
+                        enabled = unavailableReason == null,
                         onClick = { onSelect(operation) },
                         modifier = Modifier.fillMaxWidth().testTag(workflowOperationTag(operation)),
-                    ) { Text(operation.localizedLabel()) }
+                    ) {
+                        Column(Modifier.fillMaxWidth()) {
+                            Text(operation.localizedLabel())
+                            unavailableReason?.let { reason ->
+                                Text(reason.localizedMessage(), fontSize = 12.sp)
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -5559,6 +6840,16 @@ private fun WorkflowOperationChooserDialog(
         },
     )
 }
+
+@Composable
+private fun WorkflowOperationUnavailableReason.localizedMessage(): String = stringResource(
+    when (this) {
+        WorkflowOperationUnavailableReason.AutomationServiceRequired ->
+            R.string.operation_requires_automation_service
+        WorkflowOperationUnavailableReason.ExistingStepRequired ->
+            R.string.operation_requires_existing_step
+    },
+)
 
 @Composable
 private fun WorkflowEditorOperation.localizedLabel(): String = stringResource(
@@ -5573,9 +6864,9 @@ private fun WorkflowEditorOperation.localizedLabel(): String = stringResource(
         WorkflowEditorOperation.InputText -> R.string.input_text
         WorkflowEditorOperation.Swipe -> R.string.swipe
         WorkflowEditorOperation.Delay -> R.string.wait_action
-        WorkflowEditorOperation.GlobalBack -> R.string.back
-        WorkflowEditorOperation.GlobalHome -> R.string.home
-        WorkflowEditorOperation.GlobalRecents -> R.string.recents
+        WorkflowEditorOperation.GlobalBack -> R.string.system_action_back
+        WorkflowEditorOperation.GlobalHome -> R.string.system_action_home
+        WorkflowEditorOperation.GlobalRecents -> R.string.system_action_recents
         WorkflowEditorOperation.WaitForNode -> R.string.wait_for_element
         WorkflowEditorOperation.SetVariable -> R.string.set_variable
         WorkflowEditorOperation.ReadNodeText -> R.string.read_element_attribute
@@ -5589,7 +6880,7 @@ private fun WorkflowEditorOperation.localizedLabel(): String = stringResource(
 private fun FailurePolicy.label(): String = when (this) {
     FailurePolicy.Stop -> stringResource(R.string.failure_policy_stop)
     FailurePolicy.Continue -> stringResource(R.string.failure_policy_continue)
-    is FailurePolicy.Retry -> stringResource(R.string.failure_policy_retry, attempts)
+    is FailurePolicy.Retry -> pluralStringResource(R.plurals.failure_policy_retry, attempts, attempts)
 }
 
 private fun Step.isActionEditable(): Boolean = when (this) {
@@ -5604,16 +6895,14 @@ private fun Step.isActionEditable(): Boolean = when (this) {
 @Composable
 private fun Step.title(): String = when (this) {
     is Step.Click -> stringResource(R.string.step_click_element)
-    is Step.RecordedClick -> stringResource(
-        if (targetMode == RecordedClickTargetMode.Control) {
-            R.string.recorded_click_step_control
-        } else {
-            R.string.recorded_click_step_coordinates
-        },
-        control.text ?: control.contentDescription ?: control.viewId ?: control.className.orEmpty(),
-        x,
-        y,
-    )
+    is Step.RecordedClick -> if (targetMode == RecordedClickTargetMode.Control) {
+        stringResource(
+            R.string.recorded_click_step_control,
+            control.text ?: control.contentDescription ?: control.viewId ?: control.className.orEmpty(),
+        )
+    } else {
+        stringResource(R.string.recorded_click_step_coordinates, x, y)
+    }
     is Step.ImageClick -> stringResource(R.string.image_click_step_title, templateWidth, templateHeight)
     is Step.Delay -> stringResource(R.string.step_delay, durationMillis)
     is Step.GlobalAction -> action.displayName()
@@ -5626,8 +6915,8 @@ private fun Step.title(): String = when (this) {
             ?: stringResource(R.string.literal_text)
         stringResource(if (inputMethod == TextInputMethod.Paste) R.string.step_paste else R.string.step_input, source)
     }
-    is Step.Repeat -> stringResource(R.string.step_repeat, times)
-    is Step.Scroll -> stringResource(if (direction == ScrollDirection.Forward) R.string.scroll_backward else R.string.scroll_forward)
+    is Step.Repeat -> pluralStringResource(R.plurals.step_repeat, times, times)
+    is Step.Scroll -> stringResource(scrollDirectionLabelRes(direction))
     is Step.LaunchApp -> stringResource(R.string.step_launch_app, packageName)
     is Step.LongClick -> stringResource(R.string.long_click_element)
     is Step.ReadNodeText -> stringResource(R.string.step_read_attribute, attribute.displayName(), variableName)
@@ -5817,8 +7106,9 @@ private fun WorkflowRow(
         Column(Modifier.weight(1f)) {
             Text(workflow.name, fontWeight = FontWeight.SemiBold)
             Text(
-                stringResource(
-                    R.string.workflow_row_summary,
+                pluralStringResource(
+                    R.plurals.workflow_row_summary,
+                    workflow.steps.size,
                     workflow.effectiveState().displayName(),
                     workflow.steps.size,
                 ),
@@ -5902,6 +7192,7 @@ internal const val WORKFLOW_EDITOR_BACK_TAG = "workflow-editor-back"
 internal const val SCHEDULE_NOTIFICATION_RECOVERY_TAG = "schedule-notification-recovery"
 internal const val SCHEDULE_NOTIFICATION_SETTINGS_TAG = "schedule-notification-settings"
 internal const val RUN_HISTORY_DETAILS_SCROLL_TAG = "run-history-details-scroll"
+private const val RUN_HISTORY_DEEP_LINK_SETTLE_MILLIS = 500L
 internal const val IMAGE_CLICK_SAVED_TEMPLATE_PREVIEW_TAG = "image-click-saved-template-preview"
 internal const val WORKFLOW_EDITOR_ADD_OPERATION_TAG = "workflow-editor-add-operation"
 internal fun workflowOperationTag(operation: WorkflowEditorOperation) =
@@ -6037,7 +7328,11 @@ private fun WorkflowComparisonScreen(
                 )
             } else {
                 Text(
-                    stringResource(R.string.workflow_difference_count, comparison.differences.size),
+                    pluralStringResource(
+                        R.plurals.workflow_difference_count,
+                        comparison.differences.size,
+                        comparison.differences.size,
+                    ),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                 )
@@ -6149,13 +7444,26 @@ private fun String.localizedStepType(): String = stringResource(
     },
 )
 
-private fun Workflow.exportFileName(): String {
+internal fun Workflow.exportFileName(): String {
     val safeName = name
-        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .trim()
+        .replace(Regex("[^\\p{L}\\p{M}\\p{N}._-]+"), "_")
+        .trim('.', '_')
         .take(60)
         .ifBlank { "workflow" }
     return "$safeName.aiflow.json"
 }
+
+internal fun canonicalWorkflowForExport(
+    requested: Workflow,
+    canonical: WorkflowLibrary?,
+): Workflow? = canonical?.workflows?.firstOrNull { it.id == requested.id }
+    ?: requested.takeIf { canonical == null }
+
+internal fun canonicalLibraryForExport(
+    requested: WorkflowLibrary?,
+    canonical: WorkflowLibrary?,
+): WorkflowLibrary? = canonical ?: requested
 
 @Composable
 internal fun PreflightReportDialog(
@@ -6174,6 +7482,11 @@ internal fun PreflightReportDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                Text(
+                    stringResource(R.string.workflow_check_read_only),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
                 Text(
                     stringResource(R.string.workflow_test_state, report.state.displayName()),
                     fontWeight = FontWeight.SemiBold,
@@ -6223,7 +7536,11 @@ internal fun PreflightReportDialog(
                     Text(stringResource(R.string.workflow_test_structure_valid), color = Color(0xFF16815F))
                 } else {
                     Text(
-                        stringResource(R.string.workflow_test_structure_issues, report.validationIssues.size),
+                        pluralStringResource(
+                            R.plurals.workflow_test_structure_issues,
+                            report.validationIssues.size,
+                            report.validationIssues.size,
+                        ),
                         color = Color(0xFFD04F3D),
                     )
                     report.validationIssues.forEach { issue ->
@@ -6275,14 +7592,77 @@ internal fun PreflightReportDialog(
                     ),
                     fontSize = 12.sp,
                 )
+                if (report.coordinateIssues.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text(
+                        stringResource(R.string.workflow_test_coordinate_issues),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    report.coordinateIssues.forEach { issue ->
+                        val location = workflow.steps.uniqueRunLocationTo(issue.stepId)
+                            ?.localizedName()
+                            ?: issue.stepId
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                stringResource(
+                                    R.string.workflow_test_coordinate_issue,
+                                    location,
+                                    issue.displayWidth,
+                                    issue.displayHeight,
+                                ),
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 12.sp,
+                            )
+                            workflow.steps.uniquePathTo(issue.stepId)?.let { path ->
+                                TextButton(onClick = { onEditStep(path) }) {
+                                    Text(stringResource(R.string.edit_step))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (report.imageTemplateIssues.isNotEmpty()) {
+                    HorizontalDivider()
+                    Text(
+                        stringResource(R.string.workflow_test_image_template_issues),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    report.imageTemplateIssues.forEach { issue ->
+                        val location = workflow.steps.uniqueRunLocationTo(issue.stepId)
+                            ?.localizedName()
+                            ?: issue.stepId
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                stringResource(
+                                    R.string.workflow_test_image_template_issue,
+                                    location,
+                                ),
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 12.sp,
+                            )
+                            workflow.steps.uniquePathTo(issue.stepId)?.let { path ->
+                                TextButton(onClick = { onEditStep(path) }) {
+                                    Text(stringResource(R.string.edit_step))
+                                }
+                            }
+                        }
+                    }
+                }
                 if (report.launchTargets.isNotEmpty()) {
                     HorizontalDivider()
                     Text(stringResource(R.string.workflow_test_launch_targets), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     report.launchTargets.forEach { target ->
                         Text(
                             stringResource(
-                                if (target.isLaunchable) R.string.workflow_test_target_available
-                                else R.string.workflow_test_target_unavailable,
+                                when (target.status) {
+                                    LaunchTargetStatus.Available -> R.string.workflow_test_target_available
+                                    LaunchTargetStatus.Unverified -> R.string.workflow_test_target_unverified
+                                    LaunchTargetStatus.Unavailable -> R.string.workflow_test_target_unavailable
+                                },
                                 target.packageName,
                             ),
                             fontSize = 12.sp,
@@ -6293,14 +7673,47 @@ internal fun PreflightReportDialog(
                     HorizontalDivider()
                     Text(stringResource(R.string.workflow_test_selector_snapshot), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     report.selectors.forEach { check ->
-                        val result = when (check.requiredMatchAvailable) {
-                            true -> stringResource(R.string.workflow_test_selector_available, check.matchCount ?: 0)
-                            false -> stringResource(
-                                R.string.workflow_test_selector_index_missing,
-                                check.matchCount ?: 0,
-                                check.use.selector.matchIndex,
-                            )
-                            null -> stringResource(R.string.workflow_test_selector_not_checked)
+                        val result = if (check.matchCount == null) {
+                            stringResource(R.string.workflow_test_selector_not_checked)
+                        } else when (check.expectation) {
+                            com.aiindexfinger.automation.SelectorPreflightExpectation.RequiredPresent -> {
+                                if (check.requirementSatisfied == true) {
+                                    pluralStringResource(
+                                        R.plurals.workflow_test_selector_available,
+                                        check.matchCount,
+                                        check.matchCount,
+                                    )
+                                } else {
+                                    pluralStringResource(
+                                        R.plurals.workflow_test_selector_index_missing,
+                                        check.matchCount,
+                                        check.matchCount,
+                                        check.use.selector.matchIndex + 1,
+                                    )
+                                }
+                            }
+                            com.aiindexfinger.automation.SelectorPreflightExpectation.RequiredAbsent -> {
+                                if (check.requirementSatisfied == true) {
+                                    stringResource(R.string.workflow_test_selector_absent)
+                                } else {
+                                    pluralStringResource(
+                                        R.plurals.workflow_test_selector_waiting_disappearance,
+                                        check.matchCount,
+                                        check.matchCount,
+                                    )
+                                }
+                            }
+                            com.aiindexfinger.automation.SelectorPreflightExpectation.ObserveOnly -> {
+                                if (check.matchCount > check.use.selector.matchIndex) {
+                                    pluralStringResource(
+                                        R.plurals.workflow_test_condition_currently_true,
+                                        check.matchCount,
+                                        check.matchCount,
+                                    )
+                                } else {
+                                    stringResource(R.string.workflow_test_condition_currently_false)
+                                }
+                            }
                         }
                         val location = workflow.steps.uniqueRunLocationTo(check.use.stepId)?.localizedName()
                             ?: check.use.stepId
@@ -6339,15 +7752,37 @@ private fun RunHistoryScreen(
     records: List<RunRecord>,
     historyCorrupt: Boolean,
     workflows: List<Workflow>,
+    requestedRecordId: String?,
+    onRequestedRecordConsumed: () -> Unit,
     onBack: () -> Unit,
     onOpenWorkflow: (Workflow, StepPath?) -> Unit,
+    onRetry: (Workflow) -> Unit,
     onClear: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<RunStatus?>(null) }
-    var selectedRecord by remember { mutableStateOf<RunRecord?>(null) }
+    var selectedRecordId by rememberSaveable { mutableStateOf<String?>(null) }
+    var requestedRecordMissing by rememberSaveable { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     val visibleRecords = filterRunRecords(records, query, status)
+    val selectedRecord = selectedRecordId?.let { recordId ->
+        records.firstOrNull { it.id == recordId }
+    }
+
+    LaunchedEffect(requestedRecordId, records) {
+        requestedRecordId?.let { recordId ->
+            requestedRecordMissing = false
+            val record = records.firstOrNull { it.id == recordId }
+            if (record == null) {
+                selectedRecordId = null
+                delay(RUN_HISTORY_DEEP_LINK_SETTLE_MILLIS)
+                requestedRecordMissing = true
+            } else {
+                selectedRecordId = record.id
+            }
+            onRequestedRecordConsumed()
+        }
+    }
 
     BackHandler(onBack = onBack)
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { contentPadding ->
@@ -6377,23 +7812,51 @@ private fun RunHistoryScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(stringResource(R.string.run_history_status), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            listOf<RunStatus?>(null, RunStatus.Completed, RunStatus.Failed)
+            if (requestedRecordMissing) {
+                Text(
+                    stringResource(R.string.run_history_record_missing),
+                    color = MaterialTheme.colorScheme.error,
+                    fontSize = 12.sp,
+                )
+            }
+            listOf<RunStatus?>(null, RunStatus.Completed, RunStatus.CompletedWithWarnings)
                 .chunked(3)
-                .plus(listOf(listOf(RunStatus.Cancelled, RunStatus.Rejected)))
+                .plus(
+                    listOf(
+                        listOf(RunStatus.Failed, RunStatus.Cancelled, RunStatus.Rejected),
+                        listOf(RunStatus.Unknown),
+                    ),
+                )
                 .forEach { options ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         options.forEach { option ->
-                            RadioButton(selected = status == option, onClick = { status = option })
-                            Text(
-                                option?.localizedName() ?: stringResource(R.string.run_history_status_all),
-                                modifier = Modifier.clickable { status = option },
-                                fontSize = 12.sp,
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .selectable(
+                                        selected = status == option,
+                                        role = Role.RadioButton,
+                                        onClick = { status = option },
+                                    ),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(selected = status == option, onClick = null)
+                                Text(
+                                    option?.localizedName()
+                                        ?: stringResource(R.string.run_history_status_all),
+                                    fontSize = 12.sp,
+                                )
+                            }
                         }
                     }
                 }
             Text(
-                stringResource(R.string.run_history_count, records.size, visibleRecords.size),
+                pluralStringResource(
+                    R.plurals.run_history_count,
+                    records.size,
+                    records.size,
+                    visibleRecords.size,
+                ),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
@@ -6411,7 +7874,7 @@ private fun RunHistoryScreen(
                 )
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(visibleRecords, key = { it.id }) { record ->
-                        Box(Modifier.clickable { selectedRecord = record }) {
+                        Box(Modifier.clickable { selectedRecordId = record.id }) {
                             RunRecordRow(record)
                         }
                         HorizontalDivider()
@@ -6426,10 +7889,14 @@ private fun RunHistoryScreen(
         RunRecordDetailsDialog(
             record = record,
             destination = destination,
-            onDismiss = { selectedRecord = null },
+            onDismiss = { selectedRecordId = null },
             onOpenWorkflow = { workflow, stepPath ->
-                selectedRecord = null
+                selectedRecordId = null
                 onOpenWorkflow(workflow, stepPath)
+            },
+            onRetry = { workflow ->
+                selectedRecordId = null
+                onRetry(workflow)
             },
         )
     }
@@ -6441,7 +7908,7 @@ private fun RunHistoryScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        selectedRecord = null
+                        selectedRecordId = null
                         confirmClear = false
                         onClear()
                     },
@@ -6460,6 +7927,7 @@ internal fun RunRecordDetailsDialog(
     destination: com.aiindexfinger.data.RunHistoryDestination?,
     onDismiss: () -> Unit,
     onOpenWorkflow: (Workflow, StepPath?) -> Unit,
+    onRetry: (Workflow) -> Unit = {},
 ) {
     val context = LocalContext.current
     AlertDialog(
@@ -6499,8 +7967,9 @@ internal fun RunRecordDetailsDialog(
                     )
                     record.diagnostics.sortedBy { it.sequence }.forEach { diagnostic ->
                         Text(
-                            stringResource(
-                                R.string.execution_diagnostic_row,
+                            pluralStringResource(
+                                R.plurals.execution_diagnostic_row,
+                                diagnostic.attemptCount,
                                 diagnostic.location?.localizedName() ?: diagnostic.stepId,
                                 diagnostic.outcome.localizedName(),
                                 diagnostic.durationMillis,
@@ -6508,6 +7977,26 @@ internal fun RunRecordDetailsDialog(
                             ),
                             fontSize = 12.sp,
                         )
+                        diagnostic.localizedFailureMessage(context)?.let { warning ->
+                            diagnostic.failedStepId?.let { failedStepId ->
+                                Text(
+                                    stringResource(
+                                        R.string.execution_diagnostic_failed_step,
+                                        diagnostic.failedStepLocation?.localizedName() ?: failedStepId,
+                                    ),
+                                    fontSize = 12.sp,
+                                )
+                            }
+                            Text(
+                                stringResource(R.string.run_failure_details, warning),
+                                color = if (diagnostic.outcome == RunStepOutcome.ContinuedAfterFailure) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    Color(0xFFD04F3D)
+                                },
+                                fontSize = 12.sp,
+                            )
+                        }
                     }
                 }
                 if (destination == null) {
@@ -6524,14 +8013,23 @@ internal fun RunRecordDetailsDialog(
             }
         },
         confirmButton = {
-            destination?.let {
-                TextButton(onClick = { onOpenWorkflow(it.workflow, it.stepPath) }) {
-                    Text(
-                        stringResource(
-                            if (it.stepPath == null) R.string.run_history_open_workflow
-                            else R.string.run_history_edit_failed_step,
-                        ),
-                    )
+            destination?.let { target ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (record.status == RunStatus.Failed ||
+                        record.status == RunStatus.CompletedWithWarnings
+                    ) {
+                        TextButton(onClick = { onRetry(target.workflow) }) {
+                            Text(stringResource(R.string.run_history_retry_current_version))
+                        }
+                    }
+                    TextButton(onClick = { onOpenWorkflow(target.workflow, target.stepPath) }) {
+                        Text(
+                            stringResource(
+                                if (target.stepPath == null) R.string.run_history_open_workflow
+                                else R.string.run_history_edit_failed_step,
+                            ),
+                        )
+                    }
                 }
             }
         },
@@ -6546,6 +8044,7 @@ private fun RunStepOutcome.localizedName(): String = stringResource(
         RunStepOutcome.ContinuedAfterFailure -> R.string.execution_outcome_continued
         RunStepOutcome.Failed -> R.string.execution_outcome_failed
         RunStepOutcome.Cancelled -> R.string.execution_outcome_cancelled
+        RunStepOutcome.Unknown -> R.string.execution_outcome_unknown
     },
 )
 
@@ -6578,21 +8077,44 @@ private fun RunRecordRow(record: RunRecord) {
                             failureMessage,
                         )
                     } ?: failureMessage,
-                    color = Color(0xFFD04F3D),
+                    color = if (record.status == RunStatus.CompletedWithWarnings) {
+                        MaterialTheme.colorScheme.tertiary
+                    } else {
+                        Color(0xFFD04F3D)
+                    },
                     fontSize = 12.sp,
                 )
             }
         }
         Text(
             record.status.localizedName(),
-            color = if (record.status == RunStatus.Completed) Color(0xFF16815F) else Color(0xFFD04F3D),
+            color = when (record.status) {
+                RunStatus.Completed -> Color(0xFF16815F)
+                RunStatus.CompletedWithWarnings -> MaterialTheme.colorScheme.tertiary
+                else -> Color(0xFFD04F3D)
+            },
             fontWeight = FontWeight.Medium,
         )
     }
 }
 
 private fun RunRecord.localizedFailureMessage(context: Context): String? {
-    val storedCode = failureCode ?: return failureMessage
+    return localizedStoredFailure(context, failureCode, failureArguments, failureMessage)
+}
+
+private fun RunStepDiagnostic.localizedFailureMessage(context: Context): String? =
+    localizedStoredFailure(context, failureCode, failureArguments)
+
+private fun localizedStoredFailure(
+    context: Context,
+    failureCode: String?,
+    failureArguments: Map<String, String>,
+    legacyMessage: String? = null,
+): String? {
+    val storedCode = failureCode ?: return legacyMessage
+    if (storedCode == RUN_FAILURE_CONTROL_NOTIFICATION_UNAVAILABLE) {
+        return context.getString(R.string.run_cancelled_controls_unavailable)
+    }
     val separator = storedCode.indexOf('.')
     if (separator <= 0 || separator == storedCode.lastIndex) {
         return context.getString(R.string.run_failure_unknown)
@@ -6674,22 +8196,67 @@ private fun ExecutionError.localizedMessage(context: Context): String = when (co
     ExecutionErrorCode.ImageTemplateAmbiguous -> context.getString(R.string.execution_error_image_ambiguous)
     ExecutionErrorCode.ScreenCaptureFailed -> context.getString(R.string.execution_error_capture_failed)
     ExecutionErrorCode.ImageGestureFailed -> context.getString(R.string.execution_error_image_gesture_failed)
-    ExecutionErrorCode.SystemActionFailed -> context.getString(R.string.execution_error_system_action_failed)
-    ExecutionErrorCode.TargetNotScrollable -> context.getString(R.string.execution_error_target_not_scrollable)
-    ExecutionErrorCode.AppLaunchFailed -> context.getString(R.string.execution_error_app_launch_failed)
+    ExecutionErrorCode.SystemActionFailed -> arguments["action"]?.let { action ->
+        context.getString(
+            R.string.execution_error_system_action_failed_for,
+            systemActionName(context, action),
+        )
+    } ?: context.getString(R.string.execution_error_system_action_failed)
+    ExecutionErrorCode.TargetNotScrollable -> arguments["direction"]?.let { direction ->
+        context.getString(
+            R.string.execution_error_scroll_failed_for,
+            context.getString(scrollDirectionLabelRes(ScrollDirection.valueOf(direction))),
+        )
+    } ?: context.getString(R.string.execution_error_target_not_scrollable)
+    ExecutionErrorCode.AppLaunchFailed -> arguments["packageName"]?.let { packageName ->
+        arguments["intentAction"]?.let { intentAction ->
+            context.getString(
+                R.string.execution_error_app_launch_action_failed,
+                packageName,
+                intentAction,
+            )
+        } ?: context.getString(R.string.execution_error_app_launch_package_failed, packageName)
+    } ?: context.getString(R.string.execution_error_app_launch_failed)
     ExecutionErrorCode.TargetNotLongClickable -> context.getString(R.string.execution_error_target_not_long_clickable)
+    ExecutionErrorCode.TargetNotFound -> context.getString(R.string.execution_error_target_not_found)
     ExecutionErrorCode.UndefinedVariable -> context.getString(
         R.string.execution_error_undefined_variable,
         arguments.getValue("variableName"),
     )
-    ExecutionErrorCode.TextInputFailed -> context.getString(R.string.execution_error_text_input_failed)
+    ExecutionErrorCode.TextInputFailed -> arguments["inputMethod"]?.let { inputMethod ->
+        context.getString(
+            R.string.execution_error_text_input_method_failed,
+            context.getString(
+                if (TextInputMethod.valueOf(inputMethod) == TextInputMethod.Paste) {
+                    R.string.input_method_paste
+                } else {
+                    R.string.input_method_set_text
+                },
+            ),
+        )
+    } ?: context.getString(R.string.execution_error_text_input_failed)
     ExecutionErrorCode.MissingNodeAttribute -> context.getString(
         R.string.execution_error_missing_node_attribute,
         nodeAttributeName(context, arguments.getValue("attribute")),
     )
     ExecutionErrorCode.SwipeFailed -> context.getString(R.string.execution_error_swipe_failed)
     ExecutionErrorCode.TapFailed -> context.getString(R.string.execution_error_tap_failed)
+    ExecutionErrorCode.CoordinatesOutOfBounds -> context.getString(
+        R.string.execution_error_coordinates_out_of_bounds,
+        arguments.getValue("displayWidth").toInt(),
+        arguments.getValue("displayHeight").toInt(),
+    )
+    ExecutionErrorCode.ClipboardUnavailable ->
+        context.getString(R.string.execution_error_clipboard_unavailable)
 }
+
+private fun systemActionName(context: Context, action: String): String = context.getString(
+    when (SystemAction.valueOf(action)) {
+        SystemAction.Back -> R.string.system_action_back
+        SystemAction.Home -> R.string.system_action_home
+        SystemAction.Recents -> R.string.system_action_recents
+    },
+)
 
 private fun nodeAttributeName(context: Context, attribute: String): String = context.getString(
     when (NodeAttribute.valueOf(attribute)) {
@@ -6785,7 +8352,11 @@ private fun WorkflowExampleCatalogDialog(
                     }
                 }
                 Text(
-                    stringResource(R.string.workflow_example_result_count, visibleExamples.size),
+                    pluralStringResource(
+                        R.plurals.workflow_example_result_count,
+                        visibleExamples.size,
+                        visibleExamples.size,
+                    ),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp,
                 )
@@ -6937,6 +8508,24 @@ private fun WorkflowExampleCapability.localizedName(): String = stringResource(
     },
 )
 
+private fun selectedTutorialUrl(locale: Locale): String =
+    if (locale.isSimplifiedChinese()) {
+        WORKFLOW_TUTORIAL_ZH_URL
+    } else {
+        WORKFLOW_TUTORIAL_EN_URL
+    }
+
+private fun Locale.isSimplifiedChinese(): Boolean =
+    language.equals("zh", ignoreCase = true) &&
+        !script.equals("Hant", ignoreCase = true) &&
+        country.uppercase(Locale.ROOT) !in setOf("TW", "HK", "MO")
+
+private const val WORKFLOW_TUTORIAL_ZH_URL =
+    "https://github.com/w835041951-dotcom/Ai-Index-Finger/blob/main/docs/WORKFLOW_TUTORIAL_ZH.md"
+
+private const val WORKFLOW_TUTORIAL_EN_URL =
+    "https://github.com/w835041951-dotcom/Ai-Index-Finger/blob/main/docs/WORKFLOW_TUTORIAL_EN.md"
+
 private const val VISIBLE_RUN_RECORDS = 10
 
 @Composable
@@ -6944,6 +8533,7 @@ private fun SettingsScreen(
     appearanceMode: AppearanceMode,
     onAppearanceModeChanged: (AppearanceMode) -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenTutorial: () -> Unit,
     onReviewAccessibilityDisclosure: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -7005,6 +8595,10 @@ private fun SettingsScreen(
                 onClick = onOpenAccessibilitySettings,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(stringResource(R.string.settings_open_accessibility)) }
+            OutlinedButton(
+                onClick = onOpenTutorial,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.tutorial_action)) }
             TextButton(
                 onClick = onReviewAccessibilityDisclosure,
                 modifier = Modifier.fillMaxWidth(),
@@ -7037,6 +8631,7 @@ internal fun AiIndexFingerTheme(
                 surface = Color(0xFF171D1A),
                 onSurface = Color(0xFFE1E9E4),
                 onSurfaceVariant = Color(0xFFBAC7C1),
+                tertiary = warningTextColor(darkTheme = true),
             )
         } else {
             lightColorScheme(
@@ -7046,11 +8641,15 @@ internal fun AiIndexFingerTheme(
                 surface = Color.White,
                 onSurface = Color(0xFF18201D),
                 onSurfaceVariant = Color(0xFF5B6863),
+                tertiary = warningTextColor(darkTheme = false),
             )
         },
         content = content,
     )
 }
+
+internal fun warningTextColor(darkTheme: Boolean): Color =
+    if (darkTheme) Color(0xFFFFCC66) else Color(0xFF7A4E00)
 
 internal fun AppearanceMode.usesDarkTheme(systemInDarkTheme: Boolean): Boolean = when (this) {
     AppearanceMode.System -> systemInDarkTheme

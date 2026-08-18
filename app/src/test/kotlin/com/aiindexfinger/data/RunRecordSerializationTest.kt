@@ -47,6 +47,41 @@ class RunRecordSerializationTest {
     }
 
     @Test
+    fun warningRecordKeepsPolicyOwnerAndFailedLeaf() {
+        val leafLocation = RunStepLocation(
+            listOf(RunStepLocationSegment(0, RunStepBranch.RepeatBody), RunStepLocationSegment(0)),
+        )
+        val record = RunRecord(
+            id = "warning",
+            workflowId = "workflow",
+            workflowName = "Warning",
+            startedAtMillis = 1,
+            durationMillis = 2,
+            status = RunStatus.CompletedWithWarnings,
+            failedStepId = "leaf",
+            failedStepLocation = leafLocation,
+            failureCode = "execution.TargetNotClickable",
+            diagnostics = listOf(
+                RunStepDiagnostic(
+                    sequence = 0,
+                    stepId = "repeat",
+                    durationMillis = 2,
+                    attemptCount = 1,
+                    outcome = RunStepOutcome.ContinuedAfterFailure,
+                    failureCode = "execution.TargetNotClickable",
+                    failedStepId = "leaf",
+                    failedStepLocation = leafLocation,
+                ),
+            ),
+        )
+
+        assertEquals(
+            record,
+            Json.decodeFromString(RunRecord.serializer(), Json.encodeToString(RunRecord.serializer(), record)),
+        )
+    }
+
+    @Test
     fun legacyFailureMessageRemainsReadable() {
         val encoded = """{"id":"old","workflowId":"workflow","workflowName":"Old","startedAtMillis":1,"durationMillis":2,"status":"Failed","failureMessage":"Legacy failure"}"""
 

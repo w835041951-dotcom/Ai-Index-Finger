@@ -99,14 +99,60 @@ class WorkflowFileStoreTest {
     }
 
     @Test
-    fun deletingWorkflowSnapshotsItsLastValue() = withTemporaryDirectory { directory ->
+    fun deletingWorkflowPurgesVersionsAndBackup() = withTemporaryDirectory { directory ->
         val store = WorkflowFileStore(directory) { 100L }
-        val workflow = workflow("one")
-        store.save(listOf(workflow))
+        store.save(listOf(workflow("one", "Sensitive")))
+        store.save(listOf(workflow("one", "Current")))
+        assertTrue(store.listVersions("one").isNotEmpty())
 
         store.save(emptyList())
+        directory.resolve("workflows.json").writeText("corrupt")
 
-        assertEquals(listOf(workflow), store.listVersions("one").map { it.workflow })
+        assertTrue(store.listVersions("one").isEmpty())
+        assertTrue(store.loadDetailed() is WorkflowLoadResult.RecoveredFromBackup)
+        assertTrue(store.load().isEmpty())
+    }
+
+    @Test
+    fun deletingWorkflowPurgesFolderAssignmentAfterProcessRestart() = withTemporaryDirectory { directory ->
+        val folder = WorkflowFolder("private", "Private")
+        val store = WorkflowFileStore(directory) { 100L }
+        store.saveLibrary(
+            WorkflowLibrary(
+                workflows = listOf(workflow("one", "Sensitive")),
+                folders = listOf(folder),
+                workflowFolderIds = mapOf("one" to folder.id),
+            ),
+        )
+        store.saveLibrary(
+            WorkflowLibrary(
+                workflows = listOf(workflow("one", "Current")),
+                folders = listOf(folder),
+                workflowFolderIds = mapOf("one" to folder.id),
+            ),
+        )
+
+        store.saveLibrary(WorkflowLibrary(folders = listOf(folder)))
+
+        assertEquals(
+            WorkflowLoadResult.Loaded(WorkflowLibrary(folders = listOf(folder))),
+            store.loadDetailed(),
+        )
+        assertTrue(
+            directory.resolve("workflow-versions").walkTopDown().none { it.isFile },
+        )
+        directory.resolve("workflows.json").writeText("corrupt")
+
+        val restartedStore = WorkflowFileStore(directory)
+        val recovered = restartedStore.loadDetailed()
+
+        assertEquals(
+            WorkflowLoadResult.RecoveredFromBackup(WorkflowLibrary(folders = listOf(folder))),
+            recovered,
+        )
+        assertTrue(restartedStore.listVersions("one").isEmpty())
+        assertEquals(listOf(folder), restartedStore.loadLibrary().folders)
+        assertTrue(restartedStore.loadLibrary().workflowFolderIds.isEmpty())
     }
 
     @Test
@@ -216,20 +262,42 @@ class WorkflowFileStoreTest {
     }
 
     @Test
-    fun corruptPrimaryFallsBackToPreviousValidSave() = withTemporaryDirectory { directory ->
+    fun loadRemovesInterruptedWorkflowTemporaryFiles() = withTemporaryDirectory { directory ->
         val store = WorkflowFileStore(directory)
-        val first = workflow("first")
-        val second = workflow("second")
-        store.save(listOf(first))
-        store.save(listOf(second))
+        store.save(listOf(workflow("one")))
+        val primaryTemporary = directory.resolve("workflows.json.tmp").apply {
+            writeText("orphaned sensitive workflow")
+        }
+        val backupTemporary = directory.resolve("workflows.backup.json.tmp").apply {
+            writeText("orphaned sensitive backup")
+        }
+        val versionTemporary = directory.resolve("workflow-versions/stale/1-0.json.tmp").apply {
+            requireNotNull(parentFile).mkdirs()
+            writeText("orphaned sensitive version")
+        }
+
+        assertEquals(listOf("one"), WorkflowFileStore(directory).load().map(Workflow::id))
+        assertFalse(primaryTemporary.exists())
+        assertFalse(backupTemporary.exists())
+        assertFalse(versionTemporary.exists())
+    }
+
+    @Test
+    fun corruptPrimaryRecoversPreviousRetainedWorkflowWithoutDeletedWorkflow() =
+        withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+        val deleted = workflow("deleted")
+        val retained = workflow("retained", "Before")
+        store.save(listOf(deleted, retained))
+        store.save(listOf(workflow("retained", "After")))
         directory.resolve("workflows.json").writeText("{truncated")
 
-        assertEquals(listOf(first), store.load())
+        assertEquals(listOf(retained), store.load())
         assertEquals(
-            WorkflowLoadResult.RecoveredFromBackup(WorkflowLibrary(workflows = listOf(first))),
+            WorkflowLoadResult.RecoveredFromBackup(WorkflowLibrary(workflows = listOf(retained))),
             store.loadDetailed(),
         )
-    }
+        }
 
     @Test
     fun missingFilesAreDistinguishedFromCorruptFiles() = withTemporaryDirectory { directory ->
@@ -245,6 +313,81 @@ class WorkflowFileStoreTest {
             store.save(listOf(workflow("replacement")))
         }
         assertEquals("{truncated", directory.resolve("workflows.json").readText())
+    }
+
+    @Test
+    fun futureSchemaWithUnknownStepIsUnsupportedRatherThanCorrupt() =
+        withTemporaryDirectory { directory ->
+            val file = directory.resolve("workflows.json")
+            val content = """[{"schemaVersion":999,"id":"future","name":"Future","steps":[{"type":"future_action","id":"future-step"}]}]"""
+            file.writeText(content)
+
+            val result = WorkflowFileStore(directory).loadDetailed()
+
+            assertEquals(WorkflowLoadResult.UnsupportedVersion(999), result)
+            assertEquals(content, file.readText())
+        }
+
+    @Test
+    fun duplicateStoredIdentitiesAreCorruptAndCannotBeOverwritten() =
+        withTemporaryDirectory { directory ->
+            val file = directory.resolve("workflows.json")
+            val duplicateContent = """{"workflows":[{"id":"same","name":"One","steps":[]},{"id":"same","name":"Two","steps":[]}],"folders":[{"id":"folder","name":"One"},{"id":"folder","name":"Two"}]}"""
+            file.writeText(duplicateContent)
+            val store = WorkflowFileStore(directory)
+
+            assertTrue(store.loadDetailed() is WorkflowLoadResult.Corrupt)
+            assertThrows(IllegalStateException::class.java) {
+                store.save(listOf(workflow("replacement")))
+            }
+            assertEquals(duplicateContent, file.readText())
+        }
+
+    @Test
+    fun structurallyUnsafeStoredDraftIsCorruptAndCannotBeOverwritten() =
+        withTemporaryDirectory { directory ->
+            val file = directory.resolve("workflows.json")
+            val unsafeContent = """[{"id":"unsafe","name":"Unsafe","state":"Draft","steps":[{"type":"delay","id":"same","durationMillis":1},{"type":"delay","id":"same","durationMillis":2}]}]"""
+            file.writeText(unsafeContent)
+            val store = WorkflowFileStore(directory)
+
+            assertTrue(store.loadDetailed() is WorkflowLoadResult.Corrupt)
+            assertThrows(IllegalStateException::class.java) {
+                store.save(listOf(workflow("replacement")))
+            }
+            assertEquals(unsafeContent, file.readText())
+        }
+
+    @Test
+    fun oversizedWorkflowLibraryIsPreservedAsCorruptWithoutReadingIt() =
+        withTemporaryDirectory { directory ->
+            val file = directory.resolve("workflows.json")
+            java.io.RandomAccessFile(file, "rw").use { it.setLength(64L * 1024 * 1024 + 1) }
+            val store = WorkflowFileStore(directory)
+
+            assertTrue(store.loadDetailed() is WorkflowLoadResult.Corrupt)
+            assertThrows(IllegalStateException::class.java) {
+                store.save(listOf(workflow("replacement")))
+            }
+            assertEquals(64L * 1024 * 1024 + 1, file.length())
+        }
+
+    @Test
+    fun deeplyNestedWorkflowJsonIsPreservedAsCorrupt() = withTemporaryDirectory { directory ->
+        val file = directory.resolve("workflows.json")
+        val content = buildString {
+            append("""[{"id":"deep","name":"Deep","state":"Draft","steps":[""")
+            repeat(2_000) { index ->
+                append("""{"type":"repeat","id":"repeat-$index","times":1,"steps":[""")
+            }
+            append("""{"type":"delay","id":"leaf","durationMillis":1}""")
+            repeat(2_000) { append("]}") }
+            append("]}]")
+        }
+        file.writeText(content)
+
+        assertTrue(WorkflowFileStore(directory).loadDetailed() is WorkflowLoadResult.Corrupt)
+        assertEquals(content, file.readText())
     }
 
     @Test

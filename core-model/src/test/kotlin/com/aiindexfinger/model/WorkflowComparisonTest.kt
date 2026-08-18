@@ -6,6 +6,31 @@ import kotlin.test.assertTrue
 
 class WorkflowComparisonTest {
     @Test
+    fun `reports image click point changes`() {
+        val before = workflow(steps = listOf(
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24),
+        ))
+        val after = workflow(steps = listOf(
+            Step.ImageClick(
+                "image",
+                "com.example",
+                "aGVsbG8=",
+                24,
+                24,
+                templateClickX = 4,
+                templateClickY = 8,
+            ),
+        ))
+
+        assertEquals(
+            listOf(WorkflowDifference.StepChanged(
+                rootPath(0), StepComparisonField.Configuration, "image_click", "image_click",
+            )),
+            compareWorkflows(before, after).differences,
+        )
+    }
+
+    @Test
     fun `reports recorded click fallback cause changes`() {
         val control = RecordedControl(
             packageName = "com.example",

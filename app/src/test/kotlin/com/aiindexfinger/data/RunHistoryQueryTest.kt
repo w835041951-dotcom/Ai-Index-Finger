@@ -6,6 +6,7 @@ import org.junit.Test
 class RunHistoryQueryTest {
     private val records = listOf(
         record("newest", "Daily Check", RunStatus.Completed),
+        record("warning", "Daily Warning", RunStatus.CompletedWithWarnings),
         record("middle", "Account Login", RunStatus.Failed),
         record("oldest", "daily archive", RunStatus.Failed),
     )
@@ -13,8 +14,16 @@ class RunHistoryQueryTest {
     @Test
     fun nameFilterIsTrimmedAndCaseInsensitive() {
         assertEquals(
-            listOf("newest", "oldest"),
+            listOf("newest", "warning", "oldest"),
             filterRunRecords(records, "  DAILY ", null).map { it.id },
+        )
+    }
+
+    @Test
+    fun warningStatusCanBeFilteredIndependently() {
+        assertEquals(
+            listOf("warning"),
+            filterRunRecords(records, "", RunStatus.CompletedWithWarnings).map { it.id },
         )
     }
 

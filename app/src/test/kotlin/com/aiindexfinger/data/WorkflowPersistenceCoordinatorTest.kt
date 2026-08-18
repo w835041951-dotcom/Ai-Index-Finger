@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -67,6 +68,62 @@ class WorkflowPersistenceCoordinatorTest {
     }
 
     @Test
+    fun queuedLibraryTransformReadsThePrecedingEditorSave() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
+        val coordinator = WorkflowPersistenceCoordinator(scope)
+        val editorStarted = CompletableDeferred<Unit>()
+        val allowEditorSave = CompletableDeferred<Unit>()
+        var stored = WorkflowLibrary(workflows = listOf(workflow("existing")))
+
+        val editorSave = coordinator.submit {
+            editorStarted.complete(Unit)
+            allowEditorSave.await()
+            stored = stored.withWorkflow(workflow("edited"))
+        }
+        editorStarted.await()
+        val folderUpdate = coordinator.submit {
+            commitLibraryUpdate(
+                current = { stored },
+                update = { latest -> latest.withFolder(WorkflowFolder("folder", "Folder")) },
+                save = { stored = it },
+            )
+        }
+
+        allowEditorSave.complete(Unit)
+        editorSave.await()
+
+        assertEquals(
+            setOf("existing", "edited"),
+            folderUpdate.await().workflows.mapTo(mutableSetOf()) { it.id },
+        )
+        assertEquals(listOf(WorkflowFolder("folder", "Folder")), stored.folders)
+        scope.cancel()
+    }
+
+    @Test
+    fun queuedLoadObservesThePrecedingSave() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
+        val coordinator = WorkflowPersistenceCoordinator(scope)
+        val saveStarted = CompletableDeferred<Unit>()
+        val allowSave = CompletableDeferred<Unit>()
+        var stored = "old"
+
+        val save = coordinator.submit {
+            saveStarted.complete(Unit)
+            allowSave.await()
+            stored = "new"
+        }
+        saveStarted.await()
+        val load = coordinator.submit { stored }
+
+        allowSave.complete(Unit)
+        save.await()
+
+        assertEquals("new", load.await())
+        scope.cancel()
+    }
+
+    @Test
     fun awaitedOperationPropagatesItsOriginalFailure() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val coordinator = WorkflowPersistenceCoordinator(scope)
@@ -118,6 +175,31 @@ class WorkflowPersistenceCoordinatorTest {
         scope.cancel()
     }
 
+    @Test
+    fun cancellingAwaiterDoesNotCancelApplicationScopedOperation() = runBlocking {
+        val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val coordinator = WorkflowPersistenceCoordinator(applicationScope)
+        val operationStarted = CompletableDeferred<Unit>()
+        val allowOperation = CompletableDeferred<Unit>()
+        var saved = false
+        val operation = coordinator.submit {
+            operationStarted.complete(Unit)
+            allowOperation.await()
+            saved = true
+        }
+        operationStarted.await()
+        val activityAwaiter = launch { operation.await() }
+
+        activityAwaiter.cancel()
+        activityAwaiter.join()
+
+        assertFalse(operation.isCancelled)
+        allowOperation.complete(Unit)
+        operation.await()
+        assertTrue(saved)
+        applicationScope.cancel()
+    }
+
     private class LifoDispatcher : CoroutineDispatcher() {
         private val tasks = ArrayDeque<Runnable>()
 
@@ -133,4 +215,10 @@ class WorkflowPersistenceCoordinatorTest {
             while (tasks.isNotEmpty()) runNewest()
         }
     }
+
+    private fun workflow(id: String) = com.aiindexfinger.model.Workflow(
+        id = id,
+        name = id,
+        steps = listOf(com.aiindexfinger.model.Step.Delay("step-$id", 1)),
+    )
 }

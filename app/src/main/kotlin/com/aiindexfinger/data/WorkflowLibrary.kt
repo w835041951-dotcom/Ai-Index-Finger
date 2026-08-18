@@ -103,18 +103,26 @@ fun sortedFolders(
 fun filterWorkflows(
     workflows: List<Workflow>,
     workflowFolderIds: Map<String, String>,
+    folders: List<WorkflowFolder> = emptyList(),
     query: String,
     selection: WorkflowFolderSelection,
     locale: Locale = Locale.getDefault(),
 ): List<Workflow> {
     val collator = primaryCollator(locale)
+    val folderNamesById = folders.associate { folder -> folder.id to folder.name }
     return workflows.filter { workflow ->
         val matchesFolder = when (selection) {
             WorkflowFolderSelection.All -> true
             WorkflowFolderSelection.Unfiled -> workflowFolderIds[workflow.id] == null
             is WorkflowFolderSelection.Folder -> workflowFolderIds[workflow.id] == selection.id
         }
-        matchesFolder && workflow.matchesSearch(query)
+        val searchableWorkflow = workflowFolderIds[workflow.id]
+            ?.let(folderNamesById::get)
+            ?.let { folderName ->
+                workflow.copy(name = workflow.name + "\n" + folderName)
+            }
+            ?: workflow
+        matchesFolder && searchableWorkflow.matchesSearch(query)
     }
         .sortedWith { left, right ->
             compareDisplayText(collator, left.name, right.name)

@@ -49,6 +49,22 @@ class RunHistoryNavigationTest {
         assertNull(resolveRunHistoryDestination(record("top"), emptyList()))
     }
 
+    @Test
+    fun `warning run opens the nested root cause action`() {
+        val workflow = workflowWithNestedStep()
+        val warning = record("nested").copy(status = RunStatus.CompletedWithWarnings)
+
+        assertEquals(
+            StepPath(
+                StepListPath()
+                    .child("repeat", StepBranch.RepeatBody)
+                    .child("if", StepBranch.IfFalse),
+                0,
+            ),
+            resolveRunHistoryDestination(warning, listOf(workflow))?.stepPath,
+        )
+    }
+
     private fun workflowWithNestedStep() = Workflow(
         id = "workflow",
         name = "Workflow",

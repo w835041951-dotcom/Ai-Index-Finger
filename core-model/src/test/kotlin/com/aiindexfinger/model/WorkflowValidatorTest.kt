@@ -7,6 +7,31 @@ import kotlin.test.assertTrue
 
 class WorkflowValidatorTest {
     @Test
+    fun `structural issues exclude ordinary incomplete draft problems`() {
+        val incomplete = Workflow(
+            id = "draft",
+            name = "Draft",
+            steps = listOf(
+                Step.InputText(
+                    id = "input",
+                    selector = NodeSelector("com.example", text = "Input"),
+                    text = "",
+                    variableName = "missing",
+                ),
+            ),
+            state = WorkflowState.Draft,
+        )
+        val duplicate = incomplete.copy(
+            steps = listOf(Step.Delay("same", 1), Step.Delay("same", 2)),
+        )
+
+        assertTrue(WorkflowValidator.structuralIssues(incomplete).isEmpty())
+        assertEquals(
+            listOf(ValidationIssueCode.DuplicateStepId),
+            WorkflowValidator.structuralIssues(duplicate).map(ValidationIssue::code),
+        )
+    }
+    @Test
     fun `legacy valid workflow is ready while invalid legacy workflow becomes draft`() {
         val valid = Workflow(
             schemaVersion = 12,
@@ -159,6 +184,41 @@ class WorkflowValidatorTest {
         )
 
         assertTrue(WorkflowValidator.validate(workflow).isEmpty())
+    }
+
+    @Test
+    fun `continue policy does not guarantee variables from a failed producer`() {
+        val selector = NodeSelector("com.example", text = "Result")
+        val direct = Workflow(
+            id = "continued-read",
+            name = "Continued read",
+            steps = listOf(
+                Step.ReadNodeText(
+                    "read",
+                    selector,
+                    "result",
+                    NodeAttribute.Text,
+                    failurePolicy = FailurePolicy.Continue,
+                ),
+                Step.InputText("consume", selector, text = "", variableName = "result"),
+            ),
+        )
+        val nested = Workflow(
+            id = "continued-repeat",
+            name = "Continued repeat",
+            steps = listOf(
+                Step.Repeat(
+                    "repeat",
+                    times = 1,
+                    steps = listOf(Step.SetVariable("set", "result", Value.Literal("ready"))),
+                    failurePolicy = FailurePolicy.Continue,
+                ),
+                Step.InputText("consume", selector, text = "", variableName = "result"),
+            ),
+        )
+
+        assertEquals(ValidationIssueCode.UndefinedVariable, WorkflowValidator.validate(direct).single().code)
+        assertEquals(ValidationIssueCode.UndefinedVariable, WorkflowValidator.validate(nested).single().code)
     }
 
     @Test

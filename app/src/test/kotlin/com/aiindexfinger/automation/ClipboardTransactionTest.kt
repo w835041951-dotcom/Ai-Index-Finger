@@ -9,6 +9,13 @@ import org.junit.Test
 
 class ClipboardTransactionTest {
     @Test
+    fun hiddenClipboardIsUnavailableOnAndroidTenAndNewer() {
+        assertEquals(ClipboardSnapshot.Empty, missingClipboardSnapshot(androidSdk = 28))
+        assertEquals(ClipboardSnapshot.Unavailable, missingClipboardSnapshot(androidSdk = 29))
+        assertEquals(ClipboardSnapshot.Unavailable, missingClipboardSnapshot(androidSdk = 36))
+    }
+
+    @Test
     fun successfulPasteRestoresOriginalClipboard() {
         val adapter = FakeClipboardAdapter(ClipboardSnapshot.Content(FakeClip("original")))
         val transaction = ClipboardTransaction(adapter) { "operation-1" }
@@ -77,6 +84,16 @@ class ClipboardTransactionTest {
 
         assertFalse(pasteAttempted)
         assertEquals(0, adapter.setCount)
+    }
+
+    @Test
+    fun unavailableClipboardHasDistinctPasteResult() {
+        val adapter = FakeClipboardAdapter(ClipboardSnapshot.Unavailable)
+
+        assertEquals(
+            ClipboardPasteResult.ClipboardUnavailable,
+            ClipboardTransaction(adapter).pasteResult("workflow text") { true },
+        )
     }
 
     @Test

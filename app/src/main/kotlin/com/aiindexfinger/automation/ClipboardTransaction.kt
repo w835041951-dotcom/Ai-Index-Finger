@@ -1,6 +1,7 @@
 package com.aiindexfinger.automation
 
 import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.os.Build
 import android.os.PersistableBundle
@@ -12,6 +13,9 @@ internal sealed interface ClipboardSnapshot<out T> {
     data class Content<T>(val clip: T) : ClipboardSnapshot<T>
 }
 
+internal fun missingClipboardSnapshot(androidSdk: Int): ClipboardSnapshot<Nothing> =
+    if (androidSdk >= Build.VERSION_CODES.Q) ClipboardSnapshot.Unavailable else ClipboardSnapshot.Empty
+
 internal interface ClipboardAdapter<T> {
     fun capture(): ClipboardSnapshot<T>
     fun temporaryClip(text: String, token: String): T
@@ -20,18 +24,27 @@ internal interface ClipboardAdapter<T> {
     fun clearPrimaryClip()
 }
 
+internal enum class ClipboardPasteResult {
+    Succeeded,
+    ClipboardUnavailable,
+    ActionFailed,
+}
+
 internal class ClipboardTransaction<T>(
     private val adapter: ClipboardAdapter<T>,
     private val tokenFactory: () -> String = { UUID.randomUUID().toString() },
 ) {
-    fun paste(text: String, action: () -> Boolean): Boolean {
+    fun paste(text: String, action: () -> Boolean): Boolean =
+        pasteResult(text, action) == ClipboardPasteResult.Succeeded
+
+    fun pasteResult(text: String, action: () -> Boolean): ClipboardPasteResult {
         val original = adapter.capture()
-        if (original == ClipboardSnapshot.Unavailable) return false
+        if (original == ClipboardSnapshot.Unavailable) return ClipboardPasteResult.ClipboardUnavailable
 
         val token = tokenFactory()
         adapter.setPrimaryClip(adapter.temporaryClip(text, token))
         return try {
-            action()
+            if (action()) ClipboardPasteResult.Succeeded else ClipboardPasteResult.ActionFailed
         } finally {
             if (adapter.primaryClipToken() == token) {
                 when (original) {
@@ -49,7 +62,7 @@ internal class AndroidClipboardAdapter(
     private val clipLabel: String,
 ) : ClipboardAdapter<ClipData> {
     override fun capture(): ClipboardSnapshot<ClipData> {
-        if (!clipboardManager.hasPrimaryClip()) return ClipboardSnapshot.Empty
+        if (!clipboardManager.hasPrimaryClip()) return missingClipboardSnapshot(Build.VERSION.SDK_INT)
         val currentClip = clipboardManager.primaryClip ?: return ClipboardSnapshot.Unavailable
         return ClipboardSnapshot.Content(ClipData(currentClip))
     }
@@ -58,6 +71,9 @@ internal class AndroidClipboardAdapter(
         ClipData.newPlainText(clipLabel, text).apply {
             description.extras = PersistableBundle().apply {
                 putString(CLIP_TOKEN_KEY, token)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                }
             }
         }
 

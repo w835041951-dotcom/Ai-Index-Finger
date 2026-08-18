@@ -1,37 +1,32 @@
 package com.aiindexfinger
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.aiindexfinger.model.Step
-import com.aiindexfinger.model.Workflow
-import com.aiindexfinger.model.WorkflowState
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
-class WorkflowConcurrentRunUiTest {
+class WorkflowHomeTutorialEntryTest {
     @get:Rule
     val composeRule = createComposeRule()
 
     @Test
-    fun activeRunDisablesRunAndDebugForOtherWorkflow() {
+    fun emptyWorkflowStateShowsTutorialActionAndInvokesCallback() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        val running = readyWorkflow(RUNNING_ID, "Running workflow")
-        val waiting = readyWorkflow(WAITING_ID, "Waiting workflow")
+        val tutorialLabel = context.getString(R.string.tutorial_action)
+        var tutorialClicks = 0
 
         composeRule.setContent {
             MaterialTheme {
                 WorkflowHome(
-                    workflows = listOf(running, waiting),
+                    workflows = emptyList(),
                     folders = emptyList(),
                     workflowFolderIds = emptyMap(),
                     onSaveFolder = {},
@@ -56,8 +51,8 @@ class WorkflowConcurrentRunUiTest {
                     onClearRunHistory = {},
                     onViewRunHistory = {},
                     onOpenSettings = {},
-                    onOpenTutorial = {},
-                    runningWorkflowId = RUNNING_ID,
+                    onOpenTutorial = { tutorialClicks += 1 },
+                    runningWorkflowId = null,
                     runMessage = null,
                     onRun = {},
                     onDebug = {},
@@ -69,28 +64,9 @@ class WorkflowConcurrentRunUiTest {
             }
         }
 
-        composeRule.onNodeWithTag(workflowRunTag(RUNNING_ID))
-            .performScrollTo()
-            .assertIsEnabled()
-            .assertTextContains(context.getString(R.string.stop))
-        composeRule.onNodeWithTag(workflowRunTag(WAITING_ID))
-            .performScrollTo()
-            .assertIsNotEnabled()
-        composeRule.onNodeWithTag(workflowDebugTag(WAITING_ID)).assertIsNotEnabled()
-        composeRule.onNodeWithText(context.getString(R.string.another_workflow_running))
-            .performScrollTo()
-            .assertExists()
-    }
-
-    private fun readyWorkflow(id: String, name: String) = Workflow(
-        id = id,
-        name = name,
-        steps = listOf(Step.Delay("$id-step", 100)),
-        state = WorkflowState.Ready,
-    )
-
-    private companion object {
-        const val RUNNING_ID = "running-workflow"
-        const val WAITING_ID = "waiting-workflow"
+        composeRule.onNodeWithText(tutorialLabel).assertIsDisplayed().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, tutorialClicks)
+        }
     }
 }

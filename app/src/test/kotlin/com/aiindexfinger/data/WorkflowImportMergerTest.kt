@@ -13,10 +13,15 @@ class WorkflowImportMergerTest {
         val conflicting = workflow("same", "Imported")
         val unique = workflow("unique", "Unique")
 
-        val normalized = normalizeImportedWorkflows(existing, listOf(conflicting, unique)) { "new-id" }
+        val normalized = normalizeImportedWorkflows(
+            existing,
+            listOf(conflicting, unique),
+            newId = { "new-id" },
+            importedName = { "$it (imported)" },
+        )
 
         assertEquals("new-id", normalized[0].id)
-        assertEquals("Imported imported", normalized[0].name)
+        assertEquals("Imported (imported)", normalized[0].name)
         assertEquals(unique, normalized[1])
     }
 
@@ -35,7 +40,12 @@ class WorkflowImportMergerTest {
             workflowFolderIds = mapOf("same" to "imported-personal"),
         )
 
-        val merged = mergeImportedLibrary(existing, imported) { "new-workflow" }
+        val merged = mergeImportedLibrary(
+            existing,
+            imported,
+            newId = { "new-workflow" },
+            importedName = { "$it (imported)" },
+        )
 
         assertEquals(listOf("existing-folder", "empty"), merged.folders.map(WorkflowFolder::id))
         assertEquals("existing-folder", merged.folderIdFor("new-workflow"))
@@ -47,10 +57,12 @@ class WorkflowImportMergerTest {
         val normalized = normalizeImportedWorkflows(
             existing = listOf(workflow("same", "Existing")),
             imported = listOf(workflow("same", "Imported")),
-        ) {
-            attempts++
-            if (attempts < MAX_UNIQUE_ID_ATTEMPTS) "same" else "unique"
-        }
+            newId = {
+                attempts++
+                if (attempts < MAX_UNIQUE_ID_ATTEMPTS) "same" else "unique"
+            },
+            importedName = { "$it (imported)" },
+        )
 
         assertEquals(MAX_UNIQUE_ID_ATTEMPTS, attempts)
         assertEquals("unique", normalized.single().id)
@@ -64,10 +76,12 @@ class WorkflowImportMergerTest {
             normalizeImportedWorkflows(
                 existing = listOf(workflow("same", "Existing")),
                 imported = listOf(workflow("same", "Imported")),
-            ) {
-                attempts++
-                "same"
-            }
+                newId = {
+                    attempts++
+                    "same"
+                },
+                importedName = { "$it (imported)" },
+            )
         }
 
         assertEquals(MAX_UNIQUE_ID_ATTEMPTS, attempts)
@@ -86,10 +100,15 @@ class WorkflowImportMergerTest {
         )
         var attempts = 0
 
-        val merged = mergeImportedLibrary(existing, imported) {
-            attempts++
-            if (attempts < 3) "same-folder" else "new-folder"
-        }
+        val merged = mergeImportedLibrary(
+            existing,
+            imported,
+            newId = {
+                attempts++
+                if (attempts < 3) "same-folder" else "new-folder"
+            },
+            importedName = { "$it (imported)" },
+        )
 
         assertEquals(3, attempts)
         assertEquals("new-folder", merged.folderIdFor("imported-workflow"))
@@ -109,10 +128,15 @@ class WorkflowImportMergerTest {
         var attempts = 0
 
         assertThrows(IllegalStateException::class.java) {
-            mergeImportedLibrary(existing, imported) {
-                attempts++
-                "same-folder"
-            }
+            mergeImportedLibrary(
+                existing,
+                imported,
+                newId = {
+                    attempts++
+                    "same-folder"
+                },
+                importedName = { "$it (imported)" },
+            )
         }
 
         assertEquals(MAX_UNIQUE_ID_ATTEMPTS, attempts)
@@ -126,10 +150,15 @@ class WorkflowImportMergerTest {
         var attempts = 0
 
         assertThrows(IllegalStateException::class.java) {
-            mergeImportedLibrary(existing, imported) {
-                attempts++
-                "same"
-            }
+            mergeImportedLibrary(
+                existing,
+                imported,
+                newId = {
+                    attempts++
+                    "same"
+                },
+                importedName = { "$it (imported)" },
+            )
         }
 
         assertEquals(MAX_UNIQUE_ID_ATTEMPTS, attempts)

@@ -59,6 +59,34 @@ class RunResultMappingTest {
     }
 
     @Test
+    fun missingControlNotificationAddsStableCancellationReasonOnlyToCancelledRun() {
+        val cancelled = RunResult.Cancelled
+            .toRunRecord(workflow, startedAtMillis = 100, finishedAtMillis = 110)
+        val completed = RunResult.Completed
+            .toRunRecord(workflow, startedAtMillis = 100, finishedAtMillis = 110)
+
+        assertEquals(
+            RUN_FAILURE_CONTROL_NOTIFICATION_UNAVAILABLE,
+            cancelled.withControlNotificationCancellation(
+                RunResult.Cancelled,
+                controlsUnavailable = true,
+            ).failureCode,
+        )
+        assertNull(
+            cancelled.withControlNotificationCancellation(
+                RunResult.Cancelled,
+                controlsUnavailable = false,
+            ).failureCode,
+        )
+        assertNull(
+            completed.withControlNotificationCancellation(
+                RunResult.Completed,
+                controlsUnavailable = true,
+            ).failureCode,
+        )
+    }
+
+    @Test
     fun executorDiagnosticsMapWithoutSensitiveStepData() {
         val record = RunResult.Completed.toRunRecord(
             workflow,
@@ -73,6 +101,31 @@ class RunResultMappingTest {
             listOf(RunStepDiagnostic(0, "input", 20, 1, RunStepOutcome.Completed)),
             record.diagnostics,
         )
+    }
+
+    @Test
+    fun completedRunWithContinuedFailureMapsToWarningStatus() {
+        val record = RunResult.Completed.toRunRecord(
+            workflow,
+            startedAtMillis = 100,
+            finishedAtMillis = 120,
+            diagnostics = listOf(
+                StepExecutionDiagnostic(
+                    sequence = 0,
+                    stepId = "step-2",
+                    durationMillis = 20,
+                    attemptCount = 1,
+                    outcome = StepExecutionOutcome.ContinuedAfterFailure,
+                    error = ExecutionError(ExecutionErrorCode.TargetNotClickable),
+                ),
+            ),
+        )
+
+        assertEquals(RunStatus.CompletedWithWarnings, record.status)
+        assertEquals("step-2", record.failedStepId)
+        assertEquals("execution.TargetNotClickable", record.failureCode)
+        assertEquals("execution.TargetNotClickable", record.diagnostics.single().failureCode)
+        assertEquals(RunStepOutcome.ContinuedAfterFailure, record.diagnostics.single().outcome)
     }
 
     @Test

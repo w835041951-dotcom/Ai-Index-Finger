@@ -13,8 +13,15 @@ class WorkflowScheduleTimingTest {
 
     @Test
     fun `rejects current and past targets`() {
-        assertThrows(IllegalArgumentException::class.java) { scheduleDelayMillis(100, 100) }
-        assertThrows(IllegalArgumentException::class.java) { scheduleDelayMillis(99, 100) }
+        val current = assertThrows(ScheduleTimeException::class.java) {
+            scheduleDelayMillis(100, 100)
+        }
+        val past = assertThrows(ScheduleTimeException::class.java) {
+            scheduleDelayMillis(99, 100)
+        }
+
+        assertEquals(ScheduleTimeError.NotInFuture, current.error)
+        assertEquals(ScheduleTimeError.NotInFuture, past.error)
     }
 
     @Test
@@ -23,11 +30,13 @@ class WorkflowScheduleTimingTest {
             MAX_SCHEDULE_DELAY_MILLIS,
             scheduleDelayMillis(MAX_SCHEDULE_DELAY_MILLIS + 100, 100),
         )
-        assertThrows(IllegalArgumentException::class.java) {
+        val overLimit = assertThrows(ScheduleTimeException::class.java) {
             scheduleDelayMillis(MAX_SCHEDULE_DELAY_MILLIS + 101, 100)
         }
-        assertThrows(IllegalArgumentException::class.java) {
+        val extreme = assertThrows(ScheduleTimeException::class.java) {
             scheduleDelayMillis(Long.MAX_VALUE, 100)
         }
+        assertEquals(ScheduleTimeError.TooFarInFuture, overLimit.error)
+        assertEquals(ScheduleTimeError.TooFarInFuture, extreme.error)
     }
 }

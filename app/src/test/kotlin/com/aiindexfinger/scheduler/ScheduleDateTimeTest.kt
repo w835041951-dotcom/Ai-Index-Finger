@@ -24,13 +24,15 @@ class ScheduleDateTimeTest {
 
     @Test
     fun `rejects a local time skipped by daylight saving`() {
-        assertThrows(IllegalArgumentException::class.java) {
+        val error = assertThrows(ScheduleTimeException::class.java) {
             localScheduleEpochMillis(
                 LocalDate.of(2025, 3, 9),
                 LocalTime.of(2, 30),
                 newYork,
             )
         }
+
+        assertEquals(ScheduleTimeError.NonexistentLocalTime, error.error)
     }
 
     @Test
@@ -53,6 +55,20 @@ class ScheduleDateTimeTest {
         )
 
         assertEquals(Instant.parse("2025-01-16T14:30:00Z").toEpochMilli(), next)
+    }
+
+    @Test
+    fun `recurring schedule captures its local minute of day`() {
+        val scheduledAt = Instant.parse("2025-01-15T14:30:00Z").toEpochMilli()
+
+        assertEquals(
+            9 * 60 + 30,
+            recurrenceLocalTimeMinutes(scheduledAt, ScheduleRecurrence.Daily, newYork),
+        )
+        assertEquals(
+            null,
+            recurrenceLocalTimeMinutes(scheduledAt, ScheduleRecurrence.Once, newYork),
+        )
     }
 
     @Test

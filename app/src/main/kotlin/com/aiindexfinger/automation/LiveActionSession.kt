@@ -18,6 +18,8 @@ sealed interface LiveActionCandidate {
         val templatePngBase64: String,
         val templateWidth: Int,
         val templateHeight: Int,
+        val templateClickX: Int? = null,
+        val templateClickY: Int? = null,
     ) : LiveActionCandidate
 }
 
@@ -29,6 +31,8 @@ internal fun LiveActionCandidate.toStep(id: String): Step = when (this) {
         templatePngBase64 = templatePngBase64,
         templateWidth = templateWidth,
         templateHeight = templateHeight,
+        templateClickX = templateClickX,
+        templateClickY = templateClickY,
     )
 }
 

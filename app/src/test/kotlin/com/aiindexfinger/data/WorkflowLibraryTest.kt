@@ -146,6 +146,7 @@ class WorkflowLibraryTest {
         val result = filterWorkflows(
             library.workflows,
             library.workflowFolderIds,
+            library.folders,
             "morning",
             WorkflowFolderSelection.Folder("personal"),
         )
@@ -156,6 +157,7 @@ class WorkflowLibraryTest {
             filterWorkflows(
                 library.workflows,
                 library.workflowFolderIds,
+                library.folders,
                 "missing",
                 WorkflowFolderSelection.Folder("personal"),
             ),
@@ -173,21 +175,103 @@ class WorkflowLibraryTest {
 
         assertEquals(
             listOf(alphaUpper, alphaLower, bravo, zulu),
-            filterWorkflows(stored, folderIds, "", WorkflowFolderSelection.All, Locale.ENGLISH),
+            filterWorkflows(stored, folderIds, emptyList(), "", WorkflowFolderSelection.All, Locale.ENGLISH),
         )
         assertEquals(
             listOf(alphaUpper, alphaLower),
-            filterWorkflows(stored, folderIds, "task", WorkflowFolderSelection.Unfiled, Locale.ENGLISH),
+            filterWorkflows(
+                stored,
+                folderIds,
+                emptyList(),
+                "task",
+                WorkflowFolderSelection.Unfiled,
+                Locale.ENGLISH,
+            ),
         )
         assertEquals(
             listOf(bravo, zulu),
-            filterWorkflows(stored, folderIds, "task", WorkflowFolderSelection.Folder("work"), Locale.ENGLISH),
+            filterWorkflows(
+                stored,
+                folderIds,
+                emptyList(),
+                "task",
+                WorkflowFolderSelection.Folder("work"),
+                Locale.ENGLISH,
+            ),
         )
         assertEquals(
             listOf(zulu),
-            filterWorkflows(stored, folderIds, "zulu", WorkflowFolderSelection.All, Locale.ENGLISH),
+            filterWorkflows(stored, folderIds, emptyList(), "zulu", WorkflowFolderSelection.All, Locale.ENGLISH),
         )
         assertEquals(listOf(zulu, alphaLower, bravo, alphaUpper), stored)
+    }
+
+    @Test
+    fun workflowSearchMatchesFolderName() {
+        val personal = workflow().copy(name = "Morning")
+        val work = workflow().copy(id = "work", name = "Report")
+        val folders = listOf(
+            WorkflowFolder("personal", "Personal"),
+            WorkflowFolder("work-folder", "Work"),
+        )
+        val folderIds = mapOf(personal.id to "personal", work.id to "work-folder")
+
+        val result = filterWorkflows(
+            workflows = listOf(personal, work),
+            workflowFolderIds = folderIds,
+            folders = folders,
+            query = "personal",
+            selection = WorkflowFolderSelection.All,
+            locale = Locale.ENGLISH,
+        )
+
+        assertEquals(listOf(personal), result)
+    }
+
+    @Test
+    fun orphanFolderIdDoesNotMatchFolderNameSearchOrFolderSelection() {
+        val lone = workflow().copy(name = "Morning")
+        val result = filterWorkflows(
+            workflows = listOf(lone),
+            workflowFolderIds = mapOf(lone.id to "missing-folder"),
+            folders = listOf(WorkflowFolder("personal", "Personal")),
+            query = "personal",
+            selection = WorkflowFolderSelection.All,
+            locale = Locale.ENGLISH,
+        )
+
+        assertEquals(emptyList<Workflow>(), result)
+        assertEquals(
+            emptyList<Workflow>(),
+            filterWorkflows(
+                workflows = listOf(lone),
+                workflowFolderIds = mapOf(lone.id to "missing-folder"),
+                folders = listOf(WorkflowFolder("personal", "Personal")),
+                query = "",
+                selection = WorkflowFolderSelection.Unfiled,
+                locale = Locale.ENGLISH,
+            ),
+        )
+    }
+
+    @Test
+    fun emptyQueryKeepsDeterministicOrderWithFolderMetadata() {
+        val zulu = workflow().copy(id = "zulu", name = "Zulu")
+        val alpha = workflow().copy(id = "alpha", name = "Alpha")
+        val folders = listOf(WorkflowFolder("personal", "Personal"))
+        val folderIds = mapOf(zulu.id to "personal")
+
+        assertEquals(
+            listOf(alpha, zulu),
+            filterWorkflows(
+                workflows = listOf(zulu, alpha),
+                workflowFolderIds = folderIds,
+                folders = folders,
+                query = "",
+                selection = WorkflowFolderSelection.All,
+                locale = Locale.ENGLISH,
+            ),
+        )
     }
 
     @Test

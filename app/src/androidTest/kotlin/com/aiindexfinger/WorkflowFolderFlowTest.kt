@@ -74,6 +74,7 @@ class WorkflowFolderFlowTest {
                     onClearRunHistory = {},
                     onViewRunHistory = {},
                     onOpenSettings = {},
+                    onOpenTutorial = {},
                     runningWorkflowId = null,
                     runMessage = null,
                     onRun = {},

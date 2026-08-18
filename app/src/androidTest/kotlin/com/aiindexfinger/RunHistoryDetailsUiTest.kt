@@ -87,8 +87,48 @@ class RunHistoryDetailsUiTest {
         }
     }
 
-    private fun diagnosticRow(index: Int): String = context.getString(
-        R.string.execution_diagnostic_row,
+    @Test
+    fun failedRecordCanRetryCurrentWorkflowVersion() {
+        val workflow = Workflow(
+            id = "retry-workflow",
+            name = "Retry workflow",
+            steps = listOf(Step.Delay("delay", 100)),
+        )
+        val record = RunRecord(
+            id = "failed-history",
+            workflowId = workflow.id,
+            workflowName = workflow.name,
+            startedAtMillis = 1,
+            durationMillis = 1_000,
+            status = RunStatus.Failed,
+            failedStepId = "delay",
+        )
+        var retriedWorkflow: Workflow? = null
+
+        composeRule.setContent {
+            MaterialTheme {
+                RunRecordDetailsDialog(
+                    record = record,
+                    destination = RunHistoryDestination(workflow, null),
+                    onDismiss = {},
+                    onOpenWorkflow = { _, _ -> },
+                    onRetry = { retriedWorkflow = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(context.getString(R.string.run_history_retry_current_version))
+            .assertIsDisplayed()
+            .performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(workflow, retriedWorkflow)
+        }
+    }
+
+    private fun diagnosticRow(index: Int): String = context.resources.getQuantityString(
+        R.plurals.execution_diagnostic_row,
+        1,
         diagnosticStepId(index),
         context.getString(R.string.execution_outcome_completed),
         index.toLong(),

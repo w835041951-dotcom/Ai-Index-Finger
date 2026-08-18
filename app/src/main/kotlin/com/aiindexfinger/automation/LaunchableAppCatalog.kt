@@ -10,6 +10,36 @@ data class LaunchableApp(
     val packageName: String,
 )
 
+internal data class LaunchTargetSpec(
+    val packageName: String,
+    val intentAction: String?,
+)
+
+internal sealed interface LaunchIntentStrategy {
+    data object PackageManagerFrontDoor : LaunchIntentStrategy
+    data class PackageScopedAction(val action: String) : LaunchIntentStrategy
+}
+
+internal fun launchIntentStrategy(target: LaunchTargetSpec): LaunchIntentStrategy =
+    target.intentAction?.let(LaunchIntentStrategy::PackageScopedAction)
+        ?: LaunchIntentStrategy.PackageManagerFrontDoor
+
+internal fun normalizedLaunchTarget(
+    packageName: String,
+    intentAction: String?,
+): LaunchTargetSpec? {
+    val normalizedPackage = packageName.trim().takeIf(String::isNotEmpty) ?: return null
+    return LaunchTargetSpec(
+        packageName = normalizedPackage,
+        intentAction = intentAction?.trim()?.takeIf(String::isNotEmpty),
+    )
+}
+
+internal fun launchTargetIntent(target: LaunchTargetSpec, launcherIntent: Intent?): Intent? =
+    target.intentAction?.let { action ->
+    Intent(action).setPackage(target.packageName)
+} ?: launcherIntent
+
 internal fun sortLaunchableApps(apps: List<LaunchableApp>): List<LaunchableApp> = apps.sortedWith(
     compareBy<LaunchableApp, String>(String.CASE_INSENSITIVE_ORDER) { it.label }
         .thenBy(LaunchableApp::label)

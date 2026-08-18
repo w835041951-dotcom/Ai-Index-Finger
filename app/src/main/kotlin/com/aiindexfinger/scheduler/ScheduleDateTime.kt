@@ -6,6 +6,16 @@ import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 
+internal enum class ScheduleTimeError {
+    NonexistentLocalTime,
+    NotInFuture,
+    TooFarInFuture,
+}
+
+internal class ScheduleTimeException(
+    val error: ScheduleTimeError,
+) : IllegalArgumentException(error.name)
+
 internal fun localScheduleEpochMillis(
     date: LocalDate,
     time: LocalTime,
@@ -13,8 +23,22 @@ internal fun localScheduleEpochMillis(
 ): Long {
     val localDateTime = LocalDateTime.of(date, time)
     val validOffsets = zoneId.rules.getValidOffsets(localDateTime)
-    require(validOffsets.isNotEmpty()) { "由于夏令时调整，所选本地时间不存在" }
+    if (validOffsets.isEmpty()) {
+        throw ScheduleTimeException(ScheduleTimeError.NonexistentLocalTime)
+    }
     return localDateTime.atOffset(validOffsets.first()).toInstant().toEpochMilli()
+}
+
+internal fun recurrenceLocalTimeMinutes(
+    scheduledAtMillis: Long,
+    recurrence: ScheduleRecurrence,
+    zoneId: ZoneId,
+): Int? = if (recurrence == ScheduleRecurrence.Once) {
+    null
+} else {
+    Instant.ofEpochMilli(scheduledAtMillis).atZone(zoneId).let { local ->
+        local.hour * 60 + local.minute
+    }
 }
 
 internal fun nextOccurrenceEpochMillis(
@@ -22,9 +46,17 @@ internal fun nextOccurrenceEpochMillis(
     recurrence: ScheduleRecurrence,
     zoneId: ZoneId,
     afterEpochMillis: Long = previousEpochMillis,
+    recurrenceLocalTimeMinutes: Int? = null,
 ): Long? {
     if (recurrence == ScheduleRecurrence.Once) return null
     var nextLocal = Instant.ofEpochMilli(previousEpochMillis).atZone(zoneId).toLocalDateTime()
+    recurrenceLocalTimeMinutes?.let { minuteOfDay ->
+        require(minuteOfDay in 0 until 24 * 60)
+        nextLocal = LocalDateTime.of(
+            nextLocal.toLocalDate(),
+            LocalTime.of(minuteOfDay / 60, minuteOfDay % 60),
+        )
+    }
     while (true) {
         nextLocal = when (recurrence) {
             ScheduleRecurrence.Once -> return null

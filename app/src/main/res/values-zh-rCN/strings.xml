@@ -4,7 +4,7 @@
     <string name="accessibility_service_label">AI Index Finger 自动化服务</string>
     <string name="accessibility_service_description">查找用户选择的界面元素，仅在用户请求可视化选择时截取屏幕，并在明确设置后执行工作流操作。</string>
     <string name="image_click">按截图点击</string>
-    <string name="image_click_instructions">截取目标应用后，在截图上拖出要识别的区域。运行时仅在唯一匹配时点击。</string>
+    <string name="image_click_instructions">截取目标应用后，拖动选择原始尺寸识别区域，再指定点击位置。精确尺寸只按 1:1 查找；仅在你启用容差后才查找其他尺寸。</string>
     <string name="image_click_package">目标应用包名</string>
     <string name="image_click_matching_settings">匹配设置</string>
     <string name="image_click_minimum_similarity">最低相似度（%）</string>
@@ -12,17 +12,18 @@
     <string name="image_click_uniqueness_margin">领先第二匹配的差值（%）</string>
     <string name="image_click_uniqueness_margin_hint">第二匹配与最佳匹配的差距小于此值时不会点击。降低该值可接受更接近的备选结果。默认值：2.5%。</string>
     <string name="image_click_scale_tolerance">目标尺寸容差</string>
-    <string name="image_click_scale_exact">精确尺寸</string>
+    <string name="image_click_scale_exact">精确尺寸（1:1）</string>
     <string name="image_click_scale_five_percent" formatted="false">采样 95%、100%、105%</string>
     <string name="image_click_scale_ten_percent" formatted="false">采样 90%、95%、100%、105%、110%</string>
     <string name="image_click_scale_tolerance_hint">采样尺寸越多，越能适应常见的显示或缩放变化，但匹配耗时也会增加。不包含中间尺寸和旋转匹配。</string>
     <string name="image_click_percentage_error">请输入 0.0 到 100.0 之间的数值，最多保留一位小数。</string>
     <string name="capture_previous_app">截取上一个应用</string>
     <string name="recapture">重新截取</string>
+    <string name="screenshot_display_changed">显示尺寸已变化，之前的截图已清除。请重新截取。</string>
     <string name="clear_screenshot">清除截图</string>
     <string name="capture_waiting">正在等待目标应用稳定……</string>
-    <string name="tap_screenshot_instructions">截取一次后，点击截图即可设置坐标。截图会保留供其他步骤使用，直到重新截取或清除。</string>
-    <string name="swipe_screenshot_instructions">截取一次后，在截图上拖动即可设置滑动轨迹。截图会保留供其他步骤使用，直到重新截取或清除。</string>
+    <string name="tap_screenshot_instructions">截取一次后，点击截图即可设置坐标。关闭此选择器时会清除完整截图。</string>
+    <string name="swipe_screenshot_instructions">截取一次后，在截图上拖动即可设置滑动轨迹。关闭此选择器时会清除完整截图。</string>
     <string name="tap_screenshot_description">目标应用截图，点击以选择坐标。</string>
     <string name="swipe_screenshot_description">目标应用截图，拖动以选择滑动轨迹。</string>
     <string name="coordinate_x">X 坐标</string>
@@ -32,15 +33,33 @@
     <string name="swipe_end_x">终点 X</string>
     <string name="swipe_end_y">终点 Y</string>
     <string name="duration_millis">持续时间（毫秒）</string>
+    <string name="delay_duration_error">请输入大于或等于 0 毫秒的延迟。</string>
+    <string name="coordinate_input_error">请输入当前 %1$d×%2$d 像素显示范围内的整数坐标。</string>
+    <string name="coordinate_imported_outside_display">这些未修改的导入坐标超出当前显示范围。为兼容旧工作流已予保留；请使用截图选择器适配此设备。</string>
+    <string name="swipe_duration_error">请输入 1 到 10000 毫秒的滑动持续时间。</string>
     <string name="select_from_screenshot">从截图选取</string>
-    <string name="visual_selector_instructions">截取上一个应用，然后点击截图中的对象。图像仅保存在内存中，直到重新截取或清除。</string>
+    <string name="visual_selector_instructions">截取上一个应用，然后点击截图中的对象。关闭此元素选择器时会清除完整截图。</string>
     <string name="tap_object_to_select">点击对象以选择</string>
     <string name="visual_selector_capture_description">目标应用截图，点击对象即可选择。</string>
     <string name="no_accessible_element_at_position">该位置没有可访问元素，请尝试其他对象或使用“点击坐标”步骤。</string>
     <string name="visual_capture_requires_android_11">可视化截取需要 Android 11 或更高版本，仍可使用下方的最近元素。</string>
-    <string name="accessibility_disclosure_screenshot">请求截图选择时，应用会截取目标屏幕，供你直观选择元素、设置坐标手势或生成识图点击模板。完整截图仅保存在内存中，直到完成或取消、重新截取或清除、关闭无障碍服务或结束应用进程，不会保存或上传。</string>
-    <string name="image_click_capture_description">目标应用截图，拖动以选择识别区域。</string>
+    <string name="selector_capture_requires_automation">请启用自动化服务以从截图选择元素。你仍可在下方手动输入选择器属性。</string>
+    <string name="accessibility_disclosure_screenshot">请求截图选择时，应用会截取目标屏幕，供你直观选择元素、设置坐标手势或生成识图点击模板。完整截图仅保存在内存中，直到完成或取消、重新截取或清除、关闭无障碍服务或结束应用进程，不会保存或上传。使用识图点击时，仅你选中的裁剪区域会保存在工作流中并包含在导出文件内。</string>
+    <string name="image_click_capture_description">目标应用截图。请选择原始尺寸识别区域和点击位置。</string>
+    <string name="image_click_template_privacy_notice">所选裁剪区域会保存在此工作流中，并包含在工作流或工作流库导出文件内；完整截图仅保留在内存中。</string>
     <string name="image_click_crop_hint">拖动黄色矩形框选对象，建议包含清晰边缘并避免大块纯色。</string>
+    <string name="image_click_select_crop">1. 识别区域</string>
+    <string name="image_click_select_point">2. 点击位置</string>
+    <string name="image_click_point_hint">请在所选识别区域内点击运行时实际要点击的位置。</string>
+    <string name="image_click_point_coordinates">模板点击坐标</string>
+    <string name="image_click_point_coordinates_hint">可输入模板原始像素坐标，便于键盘或屏幕阅读器操作。仅旧工作流可将两项留空并继续点击中心。</string>
+    <string name="image_click_point_x">模板 X</string>
+    <string name="image_click_point_y">模板 Y</string>
+    <string name="image_click_point_selected">模板点击位置：(%1$d, %2$d)</string>
+    <string name="image_click_point_legacy_center">点击位置：模板中心（旧工作流默认值）。点击预览可修改。</string>
+    <string name="image_click_point_required">请在识别区域内选择点击位置。</string>
+    <string name="image_click_point_outside_crop">点击位置必须位于识别区域内。</string>
+    <string name="image_click_replacement_incomplete">请完成新的识别区域和点击位置，或清除新截图以保留已保存模板。</string>
     <string name="image_click_crop_bounds">截图像素裁剪边界</string>
     <string name="crop_left">左边界</string>
     <string name="crop_top">上边界</string>
@@ -48,10 +67,11 @@
     <string name="crop_bottom">下边界</string>
     <string name="image_click_saved_template">已保存 %1$d×%2$d 模板；可直接保存或重新截取。</string>
     <string name="image_click_saved_template_title">已保存的识图模板</string>
-    <string name="image_click_saved_template_description">已保存的截图点击识图模板预览</string>
+    <string name="image_click_saved_template_description">已保存的原始尺寸识图点击模板。点击可选择点击位置。</string>
     <string name="image_click_saved_template_invalid">无法预览已保存模板。请重新截取，或取消且不保存。</string>
     <string name="image_click_crop_too_small">选区至少需要 %1$d×%1$d 像素。</string>
     <string name="image_click_template_too_large">模板图片过大，请选择更小或更简单的区域。</string>
+    <string name="image_click_capture_package_mismatch">此截图来自 %1$s。请使用该目标包名，或重新截取。</string>
     <string name="image_click_step_title">按截图点击 %1$d×%2$d</string>
     <string name="image_click_preflight_supported">截图识别：支持</string>
     <string name="image_click_preflight_unsupported">截图识别：需要 Android 11 或更高版本</string>
@@ -61,8 +81,10 @@
     <string name="workflows_unsupported_version">工作流数据由较新的应用版本创建，已保留且不会被覆盖。</string>
     <string name="schedule_storage_corrupt">无法读取计划数据。损坏的文件已保留，应用不会自动覆盖它。</string>
     <string name="run_history_storage_corrupt">无法读取运行历史。损坏的文件已保留，应用不会自动覆盖它。如需重新开始，请清除运行历史。</string>
+    <string name="run_history_newer_read_only">运行历史包含由较新应用版本创建的数据。你可以在此查看，但新的运行不会覆盖它。如需重新开始，请清除运行历史。</string>
     <string name="schedule_notification_missed">无法显示计划提醒。请检查通知权限后重新安排。</string>
     <string name="capture_requires_android_11">屏幕截取需要 Android 11 或更高版本。</string>
+    <string name="coordinate_capture_requires_automation">请启用自动化服务以从截图选择坐标。你仍可在下方手动输入坐标。</string>
     <string name="capture_timed_out">截取超时，请打开目标应用后重试。</string>
     <string name="capture_unreadable">无法读取截取的屏幕。</string>
     <string name="capture_failed">屏幕截取失败（%1$d），受保护的界面无法截取。</string>
@@ -76,7 +98,9 @@
     <string name="floating_editor_restore_description">恢复已隐藏的悬浮工作流编辑器</string>
     <string name="floating_editor_title">悬浮工作流编辑器</string>
     <string name="floating_editor_description">选择已有工作流或新建草稿。这里提供全部工作流操作，编辑时不会运行任何步骤。</string>
-    <string name="floating_editor_workflow_summary">%1$s · %2$d 个步骤</string>
+    <plurals name="floating_editor_workflow_summary">
+        <item quantity="other">%1$s · %2$d 个步骤</item>
+    </plurals>
     <string name="floating_editor_no_target">请先打开目标应用，然后返回并打开悬浮工作流编辑器。</string>
     <string name="floating_editor_start_failed">无法打开悬浮工作流编辑器。</string>
     <string name="floating_editor_saving">正在保存工作流</string>
@@ -91,6 +115,7 @@
     <string name="live_action_coordinate">指定坐标</string>
     <string name="live_action_coordinate_description">指定屏幕坐标且不激活目标应用</string>
     <string name="live_action_coordinate_instruction">点击要添加的坐标。此次触摸不会激活目标应用。</string>
+    <string name="live_action_coordinate_picker_accessibility">点击目标应用中的坐标进行选择。使用无障碍点击操作可选择目标应用最大窗口的中心。</string>
     <string name="live_action_coordinate_selected">已选择坐标：(%1$d, %2$d)。请选择“添加动作”确认，或重新选择。</string>
     <string name="live_action_coordinate_outside_target">请选择目标应用窗口内的坐标。</string>
     <string name="live_action_image">截图识图</string>
@@ -98,10 +123,10 @@
     <string name="live_action_image_requires_android_11">截图识图需要 Android 11 或更高版本。</string>
     <string name="live_action_target_not_visible">截取屏幕前，请先打开已选择的目标应用。</string>
     <string name="live_action_capture_failed">无法截取目标屏幕，受保护的界面不能用于识图。</string>
-    <string name="live_action_image_crop_instruction">拖动框选要识别的图像。完整截图仅保存在内存中，截取时悬浮控件已隐藏。</string>
-    <string name="live_action_image_crop_description">已截取的目标屏幕，拖动以选择识图点击模板。</string>
+    <string name="live_action_image_crop_instruction">拖动框选原始尺寸识别图像。快速截取默认点击模板中心；可编辑步骤指定其他位置。所选裁剪区域会保存在工作流和导出文件内；完整截图仅保存在内存中。</string>
+    <string name="live_action_image_crop_description">已截取目标屏幕。拖动选择原始尺寸模板，点击位置默认为模板中心。使用无障碍点击操作可选择目标应用中央、尺寸受支持的原始像素区域。</string>
     <string name="live_action_image_outside_target">请将整个选区保持在目标应用窗口内。</string>
-    <string name="live_action_image_selected">已选择截图模板：%1$d×%2$d。请选择“添加动作”确认，或重新截取。</string>
+    <string name="live_action_image_selected">已选择 %1$d×%2$d 模板；点击位置：(%3$d, %4$d)。请选择“添加动作”确认，或重新截取。</string>
     <string name="live_action_add">添加动作</string>
     <string name="live_action_add_description">将所选动作添加到当前工作流</string>
     <string name="monitor_elements_overlay">悬浮录制点击</string>
@@ -114,6 +139,7 @@
     <string name="element_inspector_use_selector">使用选择器</string>
     <string name="element_inspector_use_selector_description">在新的点击操作中使用此检查结果</string>
     <string name="element_inspector_tap_instruction">点击要检查的元素。此次点击不会激活目标。</string>
+    <string name="element_inspector_picker_accessibility">点击要检查的元素。使用无障碍点击操作可取消并返回检查器控件。</string>
     <string name="element_inspector_hierarchy_unavailable">目标应用当前没有可访问的元素层级。请等待页面加载完成后重试。</string>
     <string name="element_inspector_no_element">该位置没有可访问的元素。请选择“拾取”并尝试其他位置。</string>
     <string name="element_inspector_selector_unique">选择器唯一</string>
@@ -126,6 +152,7 @@
     <string name="click_recording_count">正在录制点击：%1$d</string>
     <string name="click_recording_status">已录制：%1$d · 未识别：%2$d</string>
     <string name="click_recording_choose_recent_app">请在最近任务中选择 %1$s，以保留当前页面。</string>
+    <string name="click_recording_privacy_notice">点击、非密码文本更改和控件标签会添加到此本地工作流，并包含在导出文件中。密码字段会被跳过。</string>
     <string name="click_recording_notification_channel">点击录制</string>
     <string name="click_recording_notification_title">正在录制点击</string>
     <string name="click_recording_notification_text">正在 %1$s 中录制控件</string>
@@ -135,13 +162,18 @@
     <string name="record_action_home">录制主屏幕</string>
     <string name="record_action_swipe">录制滑动</string>
     <string name="record_swipe_instruction">请在屏幕任意位置滑动一次</string>
+    <string name="record_swipe_accessibility">请在屏幕任意位置滑动一次。使用无障碍点击操作可取消并返回录制控件。</string>
     <string name="record_swipe_executing">正在重放滑动…</string>
     <string name="record_action_launch_app">启动应用</string>
     <string name="record_launch_app_item">%1$s\n%2$s</string>
     <string name="click_recording_unrecognized_title">部分点击未识别</string>
-    <string name="click_recording_unrecognized_message">有 %1$d 次点击没有可靠的控件信息。有有效位置的点击已按坐标保留，没有位置的点击未添加。请返回目标界面重新录制。</string>
+    <plurals name="click_recording_unrecognized_message">
+        <item quantity="other">有 %1$d 次点击没有可靠的控件信息。有有效位置的点击已按坐标保留，没有位置的点击未添加。请返回目标界面重新录制。</item>
+    </plurals>
     <string name="recorded_click_edit_title">编辑录制点击</string>
     <string name="recorded_click_target_mode">执行目标</string>
+    <string name="recorded_click_selector_repair">控件选择器</string>
+    <string name="recorded_click_selector_repair_description">录制控件发生变化时，可在此更新或测试选择器。控件模式需要有效选择器；坐标模式可作为后备。</string>
     <string name="recorded_click_target_control">控件</string>
     <string name="recorded_click_target_coordinates">坐标</string>
     <string name="recorded_click_control_unavailable">本条记录没有稳定的控件选择器，必须使用坐标模式。</string>
@@ -159,10 +191,10 @@
     <string name="recorded_click_snapshot_description">内容描述：%1$s</string>
     <string name="recorded_click_snapshot_class">类名：%1$s</string>
     <string name="recorded_click_snapshot_bounds">边界：%1$d, %2$d, %3$d, %4$d</string>
-    <string name="recorded_click_snapshot_capabilities">可点击：%1$b · 已启用：%2$b · 可长按：%3$b · 可滚动：%4$b</string>
+    <string name="recorded_click_snapshot_capabilities">可点击：%1$s · 已启用：%2$s · 可长按：%3$s · 可滚动：%4$s</string>
     <string name="recorded_click_privacy_notice">控件文本和内容描述会保存在本地工作流中，并包含在导出文件内。</string>
     <string name="recorded_click_step_control">录制控件：%1$s</string>
-    <string name="recorded_click_step_coordinates">录制坐标：(%2$d, %3$d)</string>
+    <string name="recorded_click_step_coordinates">录制坐标：(%1$d, %2$d)</string>
     <string name="element_monitor_details">%1$s\n包名：%2$s\n资源 ID：%3$s</string>
     <string name="element_monitor_no_target">没有可用的目标应用。请先打开目标应用，再返回并启动监视。</string>
     <string name="element_monitor_start_failed">无法显示元素监视器，请检查无障碍服务是否已启用。</string>
@@ -171,6 +203,9 @@
     <string name="running_notification_title">正在运行 %1$s</string>
     <string name="running_notification_step">当前步骤：%1$s</string>
     <string name="running_notification_preparing">正在准备工作流</string>
+    <string name="workflow_result_notification_title">工作流需要处理：%1$s</string>
+    <string name="workflow_result_notification_text">有一个工作流步骤需要处理。打开 AI Index Finger 查看详情。</string>
+    <string name="workflow_result_notification_history_not_saved">有一个工作流步骤需要处理，但无法保存其运行历史。请打开 AI Index Finger 检查存储状态。</string>
     <string name="stop">停止</string>
     <string name="run_action">运行</string>
     <string name="scheduled_workflow_fallback_name">计划工作流</string>
@@ -199,22 +234,29 @@
     <string name="automation_service_disabled_description">请先启用服务，再测试或运行工作流。</string>
     <string name="settings_open_accessibility">打开无障碍设置</string>
     <string name="settings_review_disclosure">查看无障碍权限说明</string>
+    <string name="tutorial_action">教程</string>
+    <string name="open_tutorial_failed">无法打开教程，请确认设备可用浏览器。</string>
     <string name="workflow">工作流</string>
     <string name="inspect_recent_elements">检查最近元素（%1$d）</string>
     <string name="my_workflows">我的工作流</string>
     <string name="backup">备份</string>
     <string name="import_action">导入</string>
     <string name="search_workflows">搜索工作流</string>
-    <string name="workflow_count">共 %1$d 个工作流，当前显示 %2$d 个</string>
-    <string name="workflow_row_summary">%1$s · %2$d 个步骤</string>
+    <plurals name="workflow_count">
+        <item quantity="other">显示 %2$d / %1$d 个工作流</item>
+    </plurals>
+    <plurals name="workflow_row_summary">
+        <item quantity="other">%1$s · %2$d 个步骤</item>
+    </plurals>
     <string name="no_workflows">暂无工作流</string>
+    <string name="no_workflows_tutorial_hint">打开教程可以更快创建第一个工作流。</string>
     <string name="no_matching_workflows">没有符合搜索条件的工作流</string>
     <string name="run_history">运行历史</string>
     <string name="view_all_count">查看全部（%1$d）</string>
     <string name="clear">清除</string>
     <string name="no_run_records">暂无运行记录</string>
     <string name="delete_workflow_title">删除工作流？</string>
-    <string name="delete_workflow_message">将从此设备删除 %1$s 及其所有步骤。</string>
+    <string name="delete_workflow_message">将从此设备永久删除 %1$s、其中的所有步骤及其历史版本。</string>
     <string name="delete">删除</string>
     <string name="cancel">取消</string>
     <string name="edit">编辑</string>
@@ -237,14 +279,16 @@
     <string name="stop_workflow">停止工作流</string>
     <string name="continue_next_step">继续下一步</string>
     <string name="retry">重试</string>
-    <string name="retry_attempts">重试次数（1-10）</string>
+    <string name="retry_attempts">重试次数（1 到 10）</string>
     <string name="retry_delay_millis">重试间隔（毫秒）</string>
+    <string name="retry_attempts_error">请输入 1 到 10 次重试。</string>
+    <string name="retry_delay_error">请输入大于或等于 0 毫秒的重试间隔。</string>
     <string name="use_retry_policy">使用重试策略</string>
     <string name="continue_to_settings">继续前往设置</string>
     <string name="not_now">暂不</string>
     <string name="accessibility_disclosure_title">允许自动化访问？</string>
     <string name="accessibility_disclosure_observation">启用后，AI Index Finger 会读取屏幕上可见的文本、描述、视图标识和应用名称，以便你检查元素并运行自己创建的工作流。</string>
-    <string name="accessibility_disclosure_actions">运行工作流时，应用可以点击、滑动、输入文本、使用系统导航，还可临时替换剪贴板内容进行粘贴；若剪贴板未再次变化，之后会恢复原内容。</string>
+    <string name="accessibility_disclosure_actions">运行工作流时，应用可以点击、滑动、输入文本、使用系统导航，还可临时替换剪贴板内容进行粘贴；若可读取的剪贴板未再次变化，之后会恢复原内容。若 Android 隐藏当前剪贴板，粘贴会失败且不会替换内容。</string>
     <string name="accessibility_disclosure_privacy">观察到的界面数据和运行历史仅保存在此设备上。应用没有网络权限，不会向外发送这些数据。你可以随时在 Android 设置中关闭此服务。</string>
     <string name="global_action">全局操作</string>
     <string name="repeat_settings">重复设置</string>
@@ -255,7 +299,8 @@
     <string name="comparison_right_value">右侧值</string>
     <string name="comparison_operator">比较方式</string>
     <string name="repeat_count">重复次数</string>
-    <string name="repeat_count_range">重复次数（1-%1$d）</string>
+    <string name="repeat_count_range">重复次数（1 到 %1$d）</string>
+    <string name="repeat_count_error">请输入 1 到 %1$d 的重复次数。</string>
     <string name="edit_wait">编辑等待</string>
     <string name="variable_value_source">值来源</string>
     <string name="variable_value_literal">固定值</string>
@@ -276,7 +321,7 @@
     <string name="input_fixed_text_description">将此文本保存在工作流中。</string>
     <string name="input_method_paste">通过剪贴板粘贴</string>
     <string name="input_method_set_text">直接设置文本</string>
-    <string name="input_method_paste_description">临时使用剪贴板，若内容未被再次更改则自动恢复。</string>
+    <string name="input_method_paste_description">临时使用剪贴板，若内容未被再次更改则自动恢复。若 Android 隐藏当前剪贴板，此操作会在不修改内容的情况下失败；请改用“设置文本”。</string>
     <string name="input_method_set_text_description">使用无障碍服务的设置文本操作。</string>
     <string name="no_scrollable_elements">目标界面中未观察到可滚动元素。</string>
     <string name="scroll_toward_later_content">移向后续内容。</string>
@@ -284,6 +329,7 @@
     <string name="save_to_variable">保存到变量</string>
     <string name="select_recent_element">选择最近观察到的元素</string>
     <string name="select_step_to_wrap">选择要包装的步骤</string>
+    <string name="numbered_step_label">%1$d. %2$s</string>
     <string name="wrap_step">包装</string>
     <string name="if_variable_matches">比较两个值</string>
     <string name="run_step_when_true">条件为真时运行此步骤</string>
@@ -300,6 +346,7 @@
     <string name="selector_attribute_required">测试或添加此操作前，请至少输入一个元素属性。</string>
     <string name="recent_observed_elements">最近观察到的元素</string>
     <string name="element_attributes">元素属性</string>
+    <string name="selector_matching_behavior">精确匹配和包含匹配都区分大小写，空格也会参与匹配。</string>
     <string name="test_selector">测试选择器</string>
     <string name="open_steps">打开步骤</string>
     <string name="when_true">为真</string>
@@ -310,15 +357,16 @@
     <string name="comparison_not_equals">不等于</string>
     <string name="comparison_contains">包含</string>
     <string name="comparison_not_contains">不包含</string>
-    <string name="system_action_back">返回</string>
-    <string name="system_action_home">主屏幕</string>
-    <string name="system_action_recents">最近任务</string>
+    <string name="comparison_matching_behavior">比较会区分大小写，空格也是值的一部分。</string>
+    <string name="system_action_back">系统返回</string>
+    <string name="system_action_home">系统主页</string>
+    <string name="system_action_recents">系统最近任务</string>
     <string name="workflow_state_draft">草稿</string>
     <string name="workflow_state_ready">就绪</string>
     <string name="notification_status_ready">可用</string>
     <string name="notification_status_permission_required">需要通知权限</string>
     <string name="notification_status_app_disabled">应用通知已关闭</string>
-    <string name="notification_status_channel_disabled">工作流计划通知已关闭</string>
+    <string name="notification_status_channel_disabled">工作流控制通知已关闭</string>
     <string name="selector_role_click">点击</string>
     <string name="selector_role_recorded_click">录制点击</string>
     <string name="selector_role_long_click">长按</string>
@@ -329,7 +377,9 @@
     <string name="selector_role_node_condition">元素条件</string>
     <string name="failure_policy_stop">停止</string>
     <string name="failure_policy_continue">继续</string>
-    <string name="failure_policy_retry">重试 %1$d 次</string>
+    <plurals name="failure_policy_retry">
+        <item quantity="other">重试 %1$d 次</item>
+    </plurals>
     <string name="step_click_element">点击元素</string>
     <string name="step_delay">等待 %1$d 毫秒</string>
     <string name="step_if_variable">如果两个值%1$s</string>
@@ -337,7 +387,9 @@
     <string name="literal_text">文本</string>
     <string name="step_paste">粘贴%1$s</string>
     <string name="step_input">输入%1$s</string>
-    <string name="step_repeat">重复 %1$d 次</string>
+    <plurals name="step_repeat">
+        <item quantity="other">重复 %1$d 次</item>
+    </plurals>
     <string name="scroll_backward">向后滚动</string>
     <string name="scroll_forward">向前滚动</string>
     <string name="step_launch_app">启动 %1$s</string>
@@ -363,7 +415,9 @@
     <string name="workflow_example_catalog_title">示例目录</string>
     <string name="workflow_example_search">搜索示例</string>
     <string name="workflow_example_category_all">全部</string>
-    <string name="workflow_example_result_count">%1$d 个示例</string>
+    <plurals name="workflow_example_result_count">
+        <item quantity="other">%1$d 个示例</item>
+    </plurals>
     <string name="workflow_example_no_results">没有符合这些筛选条件的示例。</string>
     <string name="workflow_example_clear_filters">清除筛选</string>
     <string name="workflow_example_details_title">示例详情</string>
@@ -617,7 +671,9 @@
     <string name="cancel_schedule">取消计划</string>
     <string name="recent_accessibility_elements">最近的无障碍元素</string>
     <string name="filter_elements">筛选应用包、ID、文本或类名</string>
-    <string name="element_count">共 %1$d 个元素，当前显示 %2$d 个</string>
+    <plurals name="element_count">
+        <item quantity="other">显示 %2$d / %1$d 个元素</item>
+    </plurals>
     <string name="observe_elements_hint">打开目标应用并操作其界面，然后返回此处。</string>
     <string name="package_name">应用包</string>
     <string name="selector_package_optional">应用包（可选；留空使用当前窗口）</string>
@@ -628,9 +684,13 @@
     <string name="selector_text">文本</string>
     <string name="selector_content_description">内容描述</string>
     <string name="selector_no_matches">当前窗口中没有匹配元素</string>
-    <string name="selector_index_unavailable">仅有 %1$d 个匹配项，无法选择第 %2$d 个</string>
+    <plurals name="selector_index_unavailable">
+        <item quantity="other">仅有 %1$d 个匹配项，无法选择第 %2$d 个</item>
+    </plurals>
     <string name="selector_unique_ready">唯一匹配，选择器已就绪</string>
-    <string name="selector_match_available">%1$d 个匹配项中可选择第 %2$d 个</string>
+    <plurals name="selector_match_available">
+        <item quantity="other">%1$d 个匹配项中可选择第 %2$d 个</item>
+    </plurals>
     <string name="limit_to_ancestor">限制到某个祖先元素</string>
     <string name="ancestor_attributes">祖先元素属性</string>
     <string name="ancestor_resource_id">祖先资源 ID</string>
@@ -644,23 +704,49 @@
     <string name="class_name">类名</string>
     <string name="bounds">边界</string>
     <string name="status">状态</string>
-    <string name="element_state">可点击=%1$b，可长按=%2$b，可滚动=%3$b，已启用=%4$b</string>
+    <string name="element_state">可点击：%1$s，可长按：%2$s，可滚动：%3$s，已启用：%4$s</string>
+    <string name="numbered_item">%1$d. %2$s</string>
+    <string name="node_property">%1$s：%2$s</string>
     <string name="close">关闭</string>
     <string name="workflow_ready_to_run">%1$s 已就绪，点击“运行”即可开始。</string>
     <string name="workflow_scheduled">已计划 %1$s</string>
     <string name="schedule_failed">无法计划工作流</string>
+    <string name="schedule_workflow_missing">此工作流已不存在，因此未创建提醒。</string>
+    <string name="schedule_time_nonexistent">由于夏令时调整，此本地时间不存在。请选择其他时间。</string>
+    <string name="schedule_time_not_future">请选择晚于当前时间的时间。</string>
+    <string name="schedule_time_too_far">请选择未来一年内的时间。</string>
     <string name="cannot_schedule">无法计划：%1$s</string>
     <string name="schedule_requires_notifications">计划提醒需要通知权限</string>
     <string name="schedule_notifications_blocked_title">启用计划通知</string>
     <string name="schedule_notifications_blocked">由于 Android 已关闭应用通知或工作流计划通知，此提醒未创建。</string>
     <string name="open_notification_settings">打开通知设置</string>
     <string name="workflow_exported">已导出 %1$s</string>
+    <string name="export_workflow_missing">此工作流已不存在，因此未导出。</string>
     <string name="export_failed">导出失败：%1$s</string>
-    <string name="workflows_backed_up">已备份 %1$d 个工作流</string>
+    <plurals name="workflows_backed_up">
+        <item quantity="other">已备份 %1$d 个工作流</item>
+    </plurals>
     <string name="backup_failed">备份失败：%1$s</string>
-    <string name="workflows_imported">已导入 %1$d 个工作流</string>
+    <plurals name="workflows_imported">
+        <item quantity="other">已导入 %1$d 个工作流</item>
+    </plurals>
     <string name="import_failed">导入失败：%1$s</string>
+    <string name="imported_workflow_name">%1$s（导入）</string>
     <string name="import_error_unknown">未知导入错误</string>
+    <string name="transfer_error_invalid_content">所选文件不是有效的工作流 JSON 文件。</string>
+    <string name="transfer_error_too_many_workflows">工作流包包含过多工作流。</string>
+    <string name="transfer_error_too_many_folders">工作流包包含过多文件夹。</string>
+    <string name="transfer_error_duplicate_workflows">工作流包包含重复的工作流 ID。</string>
+    <string name="transfer_error_duplicate_folder_ids">工作流包包含重复的文件夹 ID。</string>
+    <string name="transfer_error_root_not_object">工作流文件必须包含 JSON 对象。</string>
+    <string name="transfer_error_unsupported_bundle_version">工作流包版本 %1$s 高于此应用支持的版本。</string>
+    <string name="transfer_error_blank_folder">工作流包包含没有名称的文件夹。</string>
+    <string name="transfer_error_duplicate_folder_names">工作流包包含重复的文件夹名称。</string>
+    <string name="transfer_error_unsupported_workflow_version">工作流架构版本 %1$s 高于此应用支持的版本。</string>
+    <string name="transfer_error_file_unavailable">无法打开或写入所选文件。</string>
+    <string name="transfer_error_file_too_large">工作流文件大于 2 MiB。</string>
+    <string name="transfer_error_save_failed">导入的工作流无法保存，现有工作流未被替换。</string>
+    <string name="transfer_error_unknown">未知工作流传输错误。</string>
     <string name="import_in_progress_title">正在导入工作流</string>
     <string name="import_in_progress_message">正在读取并保存导入的工作流…</string>
     <string name="workflow_copy_name">%1$s 副本</string>
@@ -676,13 +762,17 @@
     <string name="folder_name_required">请输入文件夹名称</string>
     <string name="folder_name_duplicate">已存在同名文件夹</string>
     <string name="no_folders">尚无文件夹</string>
-    <string name="folder_item_count">%1$s · %2$d 个工作流</string>
+    <plurals name="folder_item_count">
+        <item quantity="other">%1$s · %2$d 个工作流</item>
+    </plurals>
     <string name="rename">重命名</string>
     <string name="save">保存</string>
     <string name="move_to_folder">移动</string>
     <string name="move_workflow_title">移动 %1$s</string>
     <string name="delete_folder_title">删除文件夹？</string>
-    <string name="delete_folder_message">删除 %1$s？其中 %2$d 个工作流将移至“未分类”。</string>
+    <plurals name="delete_folder_message">
+        <item quantity="other">删除 %1$s？其中 %2$d 个工作流将移至“未分类”。</item>
+    </plurals>
     <string name="delete_empty_folder_message">删除空文件夹 %1$s？</string>
     <string name="install_settings_examples">安装已测试的设置示例</string>
     <string name="settings_folder_name">设置</string>
@@ -724,18 +814,25 @@
     <string name="run_completed">工作流已完成</string>
     <string name="run_already_running">已有其他工作流正在运行</string>
     <string name="run_cancelled">工作流已停止</string>
+    <string name="run_cancelled_controls_unavailable">工作流已停止，因为“停止”和“调试”通知已不可用。再次运行前请启用通知。</string>
     <string name="run_step_failed">步骤 %1$s 失败：%2$s</string>
     <string name="run_failure_with_step">步骤 %1$s：%2$s</string>
     <string name="run_failure_details">详情：%1$s</string>
     <string name="run_failure_unknown">发生未知的工作流错误</string>
     <string name="run_status_completed">已完成</string>
+    <string name="run_status_completed_with_warnings">已完成但有警告</string>
+    <string name="run_completed_with_warnings">工作流已完成，但有一个或多个步骤失败后继续执行。请在运行历史中查看详情。</string>
+    <string name="run_result_history_not_saved">%1$s 无法保存运行历史；已存储的历史记录可能已损坏或暂时不可用。</string>
     <string name="run_status_cancelled">已取消</string>
     <string name="run_status_failed">失败</string>
     <string name="run_status_rejected">已拒绝</string>
+    <string name="run_status_unknown">未知</string>
     <string name="run_history_filter_workflow">按工作流名称筛选</string>
     <string name="run_history_status">状态</string>
     <string name="run_history_status_all">全部</string>
-    <string name="run_history_count">共 %1$d 次运行，当前显示 %2$d 次</string>
+    <plurals name="run_history_count">
+        <item quantity="other">显示 %2$d / %1$d 次运行</item>
+    </plurals>
     <string name="run_history_no_matches">没有符合筛选条件的运行记录</string>
     <string name="run_history_clear_title">清除运行历史？</string>
     <string name="run_history_clear_message">所有本地执行记录都将被永久删除。</string>
@@ -745,9 +842,11 @@
     <string name="run_history_detail_duration">持续时间：%1$d 毫秒</string>
     <string name="run_history_detail_failed_step">失败步骤：%1$s</string>
     <string name="run_history_workflow_missing">原始工作流已不存在。</string>
+    <string name="run_history_record_missing">此执行记录已不存在，可能已被清除。</string>
     <string name="run_history_step_missing">失败步骤已更改或不存在，将打开工作流的第一级。</string>
     <string name="run_history_open_workflow">打开工作流</string>
     <string name="run_history_edit_failed_step">编辑失败步骤</string>
+    <string name="run_history_retry_current_version">重试当前版本</string>
     <string name="run_history_row_metadata">%1$s · %2$d 毫秒</string>
     <string name="validation_empty_workflow">工作流没有步骤</string>
     <string name="validation_execution_limit_exceeded">工作流可能执行超过 %1$d 个步骤</string>
@@ -772,20 +871,35 @@
     <string name="execution_error_capture_failed">无法截取当前屏幕</string>
     <string name="execution_error_image_gesture_failed">无法点击匹配的图片</string>
     <string name="execution_error_system_action_failed">系统操作失败</string>
+    <string name="execution_error_system_action_failed_for">无法执行%1$s</string>
     <string name="execution_error_target_not_scrollable">目标元素不可滚动</string>
+    <string name="execution_error_scroll_failed_for">无法执行%1$s</string>
     <string name="execution_error_app_launch_failed">无法启动应用</string>
+    <string name="execution_error_app_launch_package_failed">无法启动 %1$s</string>
+    <string name="execution_error_app_launch_action_failed">无法打开 %1$s（Android 操作：%2$s）</string>
     <string name="execution_error_target_not_long_clickable">目标元素不可长按</string>
+    <string name="execution_error_target_not_found">当前界面上未找到目标元素</string>
     <string name="execution_error_undefined_variable">变量“%1$s”未定义</string>
     <string name="execution_error_text_input_failed">文本输入失败</string>
+    <string name="execution_error_text_input_method_failed">目标拒绝了%1$s</string>
     <string name="execution_error_missing_node_attribute">目标元素不提供%1$s</string>
     <string name="execution_error_swipe_failed">滑动失败</string>
     <string name="execution_error_tap_failed">点击失败</string>
+    <string name="execution_error_coordinates_out_of_bounds">坐标超出当前 %1$d×%2$d 像素显示范围。请编辑此动作，或从新截图中选择坐标。</string>
+    <string name="execution_error_clipboard_unavailable">Android 未提供当前剪贴板，因此未尝试粘贴。请将此动作改为“设置文本”。</string>
     <string name="node_attribute_text_or_description">文本或描述</string>
     <string name="node_attribute_text">文本</string>
     <string name="node_attribute_content_description">内容描述</string>
     <string name="node_attribute_view_id">资源 ID</string>
     <string name="node_attribute_class_name">类名</string>
     <string name="enable_automation_before_run">请先启用自动化服务，再运行工作流</string>
+    <string name="run_requires_notifications">需要通知权限，确保工作流运行时始终显示“停止”和“调试”控件。</string>
+    <string name="run_notifications_blocked">启动前请启用工作流运行通知。自动化运行时必须保持“停止”和“调试”控件可见。</string>
+    <string name="run_notifications_blocked_title">启用工作流控制通知</string>
+    <string name="run_notification_settings_unavailable">无法打开通知设置。请在系统设置中打开此应用并启用通知，然后再运行工作流。</string>
+    <string name="notification_settings_unavailable">无法打开通知设置。请在系统设置中打开 AI Index Finger 并启用通知。</string>
+    <string name="run_controls_unavailable">工作流未启动，因为无法显示“停止”和“调试”通知。请检查通知设置后重试。</string>
+    <string name="run_workflow_missing">此工作流已不存在，因此未启动。</string>
     <string name="running_workflow">正在运行 %1$s</string>
     <string name="debugging_workflow">正在调试 %1$s</string>
     <string name="debug_workflow">调试</string>
@@ -796,8 +910,9 @@
     <string name="another_workflow_running">已有其他工作流正在运行</string>
     <string name="save_draft">保存草稿</string>
     <string name="save_ready">保存并设为就绪</string>
-    <string name="test_entire_workflow">整体测试</string>
-    <string name="workflow_test_title">测试 %1$s</string>
+    <string name="test_entire_workflow">检查工作流</string>
+    <string name="workflow_test_title">检查 %1$s</string>
+    <string name="workflow_check_read_only">这是只读的运行前检查，不会执行任何工作流操作。</string>
     <string name="workflow_test_state">状态：%1$s</string>
     <string name="workflow_test_automation">自动化服务：%1$s</string>
     <string name="workflow_test_notifications">计划通知：%1$s</string>
@@ -805,34 +920,60 @@
     <string name="status_not_connected">未连接</string>
     <string name="set_up_automation">设置自动化服务</string>
     <string name="workflow_test_structure_valid">工作流结构：有效</string>
-    <string name="workflow_test_structure_issues">工作流结构：%1$d 个问题</string>
+    <plurals name="workflow_test_structure_issues">
+        <item quantity="other">工作流结构：%1$d 个问题</item>
+    </plurals>
     <string name="workflow_test_whole_workflow">整体</string>
     <string name="workflow_test_issue_row">%1$s：%2$s</string>
     <string name="workflow_test_variables">变量：已定义 %1$d 个，引用 %2$d 个</string>
     <string name="workflow_test_limits">限制：%1$d/%2$d 个步骤 · %3$d/%4$d 层 · 最多执行 %5$d/%6$d 次</string>
+    <string name="workflow_test_coordinate_issues">设备坐标</string>
+    <string name="workflow_test_coordinate_issue">%1$s：坐标超出当前 %2$d×%3$d 像素显示范围。</string>
+    <string name="workflow_test_image_template_issues">已保存的图片模板</string>
+    <string name="workflow_test_image_template_issue">%1$s：无法解码已保存模板，或模板与其声明尺寸不一致。</string>
     <string name="workflow_test_launch_targets">启动目标</string>
     <string name="workflow_test_target_available">可用：%1$s</string>
     <string name="workflow_test_target_unavailable">无法启动：%1$s</string>
+    <string name="workflow_test_target_unverified">需要运行时检查：%1$s</string>
     <string name="workflow_test_selector_snapshot">选择器快照</string>
-    <string name="workflow_test_selector_available">可用（%1$d 个匹配项）</string>
-    <string name="workflow_test_selector_index_missing">当前有 %1$d 个匹配项，需要索引 %2$d</string>
     <string name="workflow_test_selector_not_checked">连接无障碍服务后才能检查</string>
+    <string name="workflow_test_selector_absent">当前不存在；等待消失条件已满足</string>
+    <string name="workflow_test_condition_currently_false">当前不存在；此条件在可见界面上为假</string>
+    <plurals name="workflow_test_selector_available">
+        <item quantity="other">可用（%1$d 个匹配项）</item>
+    </plurals>
+    <plurals name="workflow_test_selector_index_missing">
+        <item quantity="other">当前有 %1$d 个匹配项，需要第 %2$d 个匹配</item>
+    </plurals>
+    <plurals name="workflow_test_selector_waiting_disappearance">
+        <item quantity="other">当前存在（%1$d 个匹配）；工作流会等待其消失</item>
+    </plurals>
+    <plurals name="workflow_test_condition_currently_true">
+        <item quantity="other">当前存在（%1$d 个匹配）；此条件在可见界面上为真</item>
+    </plurals>
     <string name="workflow_test_selector_row">%1$s · %2$s：%3$s</string>
     <string name="workflow_test_selector_scope_note">选择器匹配数量仅反映服务当前可见的界面。</string>
     <string name="back">返回</string>
     <string name="workflow_editor">工作流编辑器</string>
     <string name="workflow_name">工作流名称</string>
     <string name="default_step_timeout">默认步骤超时（毫秒）</string>
-    <string name="validation_issue_count">发现 %1$d 个校验问题</string>
+    <plurals name="validation_issue_count">
+        <item quantity="other">发现 %1$d 个校验问题</item>
+    </plurals>
     <string name="edit_step">编辑步骤</string>
     <string name="collapse">收起</string>
-    <string name="more_issues">另有 %1$d 个</string>
+    <plurals name="more_issues">
+        <item quantity="other">另有 %1$d 个问题</item>
+    </plurals>
     <string name="steps">步骤</string>
     <string name="nested_steps">嵌套步骤</string>
     <string name="up_one_level">上一级</string>
     <string name="add_first_action">请在下方添加第一个操作</string>
     <string name="add_action">添加操作</string>
     <string name="add_operation">新增操作</string>
+    <string name="operation_requires_automation_service">请先启用自动化服务，再录制点击。</string>
+    <string name="operation_requires_existing_step">请先添加一个步骤，再用此操作包裹它。</string>
+    <string name="overlay_actions_require_automation_service">请先启用自动化服务，再使用现场添加、点击录制或元素检查。</string>
     <string name="launch_app">启动应用</string>
     <string name="add">添加</string>
     <string name="search_installed_apps">搜索已安装应用</string>
@@ -843,6 +984,11 @@
     <string name="no_matching_apps">没有符合搜索条件的应用。</string>
     <string name="selected_launchable_app">已选择：%1$s</string>
     <string name="app_package_not_launchable">此设备无法启动该应用包。</string>
+    <string name="launch_target_available">当前设备可以启动此包。</string>
+    <string name="launch_target_action_available">此包可以处理 %1$s。</string>
+    <string name="launch_target_unverified">由于应用可见性可能受限，Android 无法预先验证此目标。工作流会在运行时尝试。</string>
+    <string name="launch_target_unavailable">当前设备上的此包没有可启动界面。</string>
+    <string name="launch_target_imported_unavailable">此未修改的导入应用在当前设备不可用。为兼容旧工作流已予保留。</string>
     <string name="click">点击</string>
     <string name="long_click">长按</string>
     <string name="tap_coordinates">点击坐标</string>
@@ -862,15 +1008,19 @@
     <string name="save_failed">无法保存更改，现有工作流文件已保留。</string>
     <string name="clear_history_failed">无法清除运行历史。</string>
     <string name="execution_diagnostics">执行诊断</string>
-    <string name="execution_diagnostic_row">%1$s · %2$s · %3$d 毫秒 · 尝试 %4$d 次</string>
+    <plurals name="execution_diagnostic_row">
+        <item quantity="other">%1$s · %2$s · %3$d 毫秒 · 尝试 %4$d 次</item>
+    </plurals>
+    <string name="execution_diagnostic_failed_step">根因步骤：%1$s</string>
     <string name="execution_outcome_completed">已完成</string>
     <string name="execution_outcome_continued">失败后继续</string>
     <string name="execution_outcome_failed">失败</string>
     <string name="execution_outcome_cancelled">已取消</string>
+    <string name="execution_outcome_unknown">未知结果</string>
     <string name="compare_workflow">比较</string>
     <string name="workflow_version_history">历史版本</string>
     <string name="workflow_version_history_title">历史版本：%1$s</string>
-    <string name="workflow_version_history_empty">暂无历史版本。工作流发生更改或被删除时会保存一个版本。</string>
+    <string name="workflow_version_history_empty">暂无历史版本。工作流发生更改时会保存一个版本。</string>
     <string name="workflow_version_name">保存时名称：%1$s</string>
     <string name="preview_changes">预览更改</string>
     <string name="rollback">回滚</string>
@@ -883,7 +1033,9 @@
     <string name="workflow_comparison">工作流比较</string>
     <string name="workflow_comparison_names">%1$s 与 %2$s</string>
     <string name="workflows_identical">未发现差异。</string>
-    <string name="workflow_difference_count">共 %1$d 项差异</string>
+    <plurals name="workflow_difference_count">
+        <item quantity="other">共 %1$d 项差异</item>
+    </plurals>
     <string name="workflow_metadata_changed">%1$s已更改</string>
     <string name="workflow_metadata_name">名称</string>
     <string name="workflow_metadata_state">状态</string>

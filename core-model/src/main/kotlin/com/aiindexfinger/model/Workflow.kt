@@ -24,7 +24,7 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 18
+        const val CURRENT_SCHEMA_VERSION = 19
     }
 }
 
@@ -102,6 +102,8 @@ sealed interface Step {
         val scaleTolerancePermille: Int = 0,
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
+        val templateClickX: Int? = null,
+        val templateClickY: Int? = null,
     ) : Step {
         init {
             require(packageName.isNotBlank()) { "Package name must not be blank" }
@@ -114,6 +116,15 @@ sealed interface Step {
             require(ambiguityMarginPermille in 0..1_000) { "Image ambiguity margin must be between 0 and 1000" }
             require(scaleTolerancePermille in SUPPORTED_SCALE_TOLERANCES) {
                 "Image scale tolerance must be 0, 50, or 100"
+            }
+            require((templateClickX == null) == (templateClickY == null)) {
+                "Image click coordinates must both be set or both be absent"
+            }
+            templateClickX?.let {
+                require(it in 0 until templateWidth) { "Image click X coordinate is outside the template" }
+            }
+            templateClickY?.let {
+                require(it in 0 until templateHeight) { "Image click Y coordinate is outside the template" }
             }
         }
 

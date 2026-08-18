@@ -49,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,6 +59,9 @@ import com.aiindexfinger.automation.AutomationAccessibilityService
 import com.aiindexfinger.automation.PreflightRecoveryAction
 import com.aiindexfinger.automation.WorkflowPreflightReport
 import com.aiindexfinger.automation.buildWorkflowPreflightReport
+import com.aiindexfinger.automation.imageTemplateIsValid
+import com.aiindexfinger.automation.openRunningNotificationSettings
+import com.aiindexfinger.automation.runningNotificationReadiness
 import com.aiindexfinger.data.AppPreferences
 import com.aiindexfinger.data.WorkflowLibrary
 import com.aiindexfinger.data.WorkflowLoadResult
@@ -65,10 +69,6 @@ import com.aiindexfinger.model.StepPath
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.effectiveState
-import com.aiindexfinger.scheduler.ScheduleStorageException
-import com.aiindexfinger.scheduler.openScheduleNotificationSettings
-import com.aiindexfinger.scheduler.scheduleNotificationReadiness
-import com.aiindexfinger.scheduler.WorkflowScheduler
 import java.lang.ref.WeakReference
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -77,7 +77,6 @@ import kotlinx.coroutines.withContext
 
 class FloatingWorkflowEditorActivity : ComponentActivity() {
     private val workflowApplication by lazy { application as AiIndexFingerApplication }
-    private val workflowScheduler by lazy { WorkflowScheduler(this) }
     private val accessibilityDisclosurePreferences by lazy {
         AccessibilityDisclosurePreferences(this)
     }
@@ -96,7 +95,6 @@ class FloatingWorkflowEditorActivity : ComponentActivity() {
                     requestedWorkflowId = requestedWorkflowId,
                     openRequestSequence = openRequestSequence,
                     application = workflowApplication,
-                    scheduler = workflowScheduler,
                     onClose = ::finish,
                     onCollapse = ::collapseEditor,
                     accessibilityDisclosureAcknowledged =
@@ -197,7 +195,6 @@ private fun FloatingWorkflowEditor(
     requestedWorkflowId: String?,
     openRequestSequence: Int,
     application: AiIndexFingerApplication,
-    scheduler: WorkflowScheduler,
     onClose: () -> Unit,
     onCollapse: () -> Unit,
     accessibilityDisclosureAcknowledged: Boolean,
@@ -286,9 +283,19 @@ private fun FloatingWorkflowEditor(
                     floatingEditorMode = true,
                     onCollapse = onCollapse,
                     saveInProgress = saving,
+                    onSetUpAutomation = requestAccessibilitySetup,
                     onTest = { candidate ->
                         val service = AutomationAccessibilityService.instance
-                        val notificationStatus = scheduleNotificationReadiness(application)
+                        val notificationStatus = runningNotificationReadiness(application)
+                        val displaySize = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            application.getSystemService(WindowManager::class.java)
+                                .maximumWindowMetrics.bounds
+                                .let { it.width() to it.height() }
+                        } else {
+                            application.resources.displayMetrics.let {
+                                it.widthPixels to it.heightPixels
+                            }
+                        }
                         preflight = candidate to buildWorkflowPreflightReport(
                             workflow = candidate,
                             accessibilityConnected = service != null,
@@ -301,6 +308,9 @@ private fun FloatingWorkflowEditor(
                             },
                             countMatches = { selector -> service?.countMatches(selector) ?: 0 },
                             imageCaptureSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
+                            displayWidth = displaySize.first,
+                            displayHeight = displaySize.second,
+                            isImageTemplateValid = ::imageTemplateIsValid,
                         )
                     },
                     onBack = {
@@ -317,17 +327,12 @@ private fun FloatingWorkflowEditor(
                                     withContext(Dispatchers.IO) {
                                         application.commitWorkflow(expected, candidate)
                                     }
-                                }.onSuccess {
-                                    val scheduleCleanup = if (candidate.state == WorkflowState.Draft) {
-                                        runCatching { scheduler.cancel(candidate.id) }
-                                    } else {
-                                        Result.success(emptyList())
-                                    }
-                                    scheduleCleanup.onSuccess {
+                                }.onSuccess { commit ->
+                                    if (commit.cleanupError == null) {
                                         selectedWorkflow = null
                                         persistedBaseline = null
                                         initialEditingStepPath = null
-                                    }.onFailure {
+                                    } else {
                                         persistedBaseline = candidate
                                         selectedWorkflow = candidate
                                         editorRevision += 1
@@ -339,8 +344,6 @@ private fun FloatingWorkflowEditor(
                                     saveError = application.getString(
                                         if (error is com.aiindexfinger.data.WorkflowEditConflictException) {
                                             R.string.workflow_edit_conflict
-                                        } else if (error is ScheduleStorageException) {
-                                            R.string.schedule_storage_corrupt
                                         } else {
                                             R.string.save_failed
                                         },
@@ -389,7 +392,9 @@ private fun FloatingWorkflowEditor(
                 when (action) {
                     PreflightRecoveryAction.SetUpAutomation -> requestAccessibilitySetup()
                     PreflightRecoveryAction.OpenNotificationSettings -> {
-                        openScheduleNotificationSettings(application, report.notificationStatus)
+                        if (!openRunningNotificationSettings(application, report.notificationStatus)) {
+                            saveError = application.getString(R.string.notification_settings_unavailable)
+                        }
                     }
                 }
             },
@@ -487,8 +492,9 @@ private fun FloatingWorkflowPicker(
                             Column(Modifier.fillMaxWidth()) {
                                 Text(workflow.name, fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    stringResource(
-                                        R.string.floating_editor_workflow_summary,
+                                    pluralStringResource(
+                                        R.plurals.floating_editor_workflow_summary,
+                                        workflow.steps.size,
                                         stringResource(
                                             if (workflow.effectiveState() == WorkflowState.Ready) {
                                                 R.string.workflow_state_ready

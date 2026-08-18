@@ -32,6 +32,9 @@ data class WorkflowValidationSummary(
 object WorkflowValidator {
     fun validate(workflow: Workflow): List<ValidationIssue> = inspect(workflow).issues
 
+    fun structuralIssues(workflow: Workflow): List<ValidationIssue> =
+        validate(workflow).filter { it.code in STRUCTURAL_ISSUE_CODES }
+
     fun inspect(workflow: Workflow): WorkflowValidationSummary {
         val issues = mutableListOf<ValidationIssue>()
         if (workflow.steps.isEmpty()) {
@@ -88,6 +91,7 @@ object WorkflowValidator {
         }
         var estimatedExecutions = 0L
         steps.forEach { step ->
+            val guaranteedVariablesBeforeStep = definedVariables.toSet()
             state.definedSteps++
             if (state.definedSteps > WorkflowLimits.MAX_DEFINED_STEPS && !state.reportedStepLimit) {
                 issues += ValidationIssue(
@@ -184,6 +188,9 @@ object WorkflowValidator {
                 }
                 else -> 0L
             }
+            if (step.failurePolicy is FailurePolicy.Continue) {
+                definedVariables.retainAll(guaranteedVariablesBeforeStep)
+            }
             val attempts = (step.failurePolicy as? FailurePolicy.Retry)?.attempts?.plus(1) ?: 1
             val maximumStepExecutions = saturatingMultiply(
                 saturatingAdd(1, nestedExecutions),
@@ -242,6 +249,13 @@ object WorkflowValidator {
         var reportedStepLimit: Boolean = false,
         val variableDefinitions: MutableSet<String> = linkedSetOf(),
         val variableReferences: MutableSet<String> = linkedSetOf(),
+    )
+
+    private val STRUCTURAL_ISSUE_CODES = setOf(
+        ValidationIssueCode.NestingLimitExceeded,
+        ValidationIssueCode.DefinedStepLimitExceeded,
+        ValidationIssueCode.BlankStepId,
+        ValidationIssueCode.DuplicateStepId,
     )
 }
 

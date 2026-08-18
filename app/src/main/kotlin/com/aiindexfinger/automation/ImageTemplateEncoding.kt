@@ -8,6 +8,30 @@ import java.util.Base64
 
 internal data class ImageCropBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
 
+internal fun templatePointRelativeToCrop(crop: ImageCropBounds, point: ScreenPoint): ScreenPoint? =
+    point.takeIf { it.x in crop.left until crop.right && it.y in crop.top until crop.bottom }
+        ?.let { ScreenPoint(it.x - crop.left, it.y - crop.top) }
+
+internal fun templateCenterRelativeToCrop(crop: ImageCropBounds): ScreenPoint = ScreenPoint(
+    x = (crop.right - crop.left) / 2,
+    y = (crop.bottom - crop.top) / 2,
+)
+
+internal fun centeredSupportedTemplateCrop(bounds: ImageCropBounds): ImageCropBounds? {
+    val availableWidth = bounds.right - bounds.left
+    val availableHeight = bounds.bottom - bounds.top
+    if (availableWidth < Step.ImageClick.MIN_TEMPLATE_SIZE ||
+        availableHeight < Step.ImageClick.MIN_TEMPLATE_SIZE
+    ) {
+        return null
+    }
+    val width = minOf(availableWidth, Step.ImageClick.MAX_TEMPLATE_SIZE)
+    val height = minOf(availableHeight, Step.ImageClick.MAX_TEMPLATE_SIZE)
+    val left = bounds.left + (availableWidth - width) / 2
+    val top = bounds.top + (availableHeight - height) / 2
+    return ImageCropBounds(left, top, left + width, top + height)
+}
+
 internal fun cropBoundsOrNull(left: String, top: String, right: String, bottom: String): ImageCropBounds? {
     val bounds = ImageCropBounds(
         left.toIntOrNull() ?: return null,
@@ -54,6 +78,12 @@ internal fun decodeImageTemplate(step: Step.ImageClick): Bitmap? = runCatching {
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         ?.takeIf { it.width == step.templateWidth && it.height == step.templateHeight }
 }.getOrNull()
+
+internal fun imageTemplateIsValid(step: Step.ImageClick): Boolean =
+    decodeImageTemplate(step)?.let { bitmap ->
+        bitmap.recycle()
+        true
+    } ?: false
 
 internal data class EncodedTemplate(val base64: String, val width: Int, val height: Int)
 

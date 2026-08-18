@@ -8,12 +8,16 @@ AI Index Finger 是一款本地、由用户主动控制的 Android 工作流自�
 
 **[打开中文图文教程](docs/WORKFLOW_TUTORIAL_ZH.md)**
 
+Need an English quickstart?
+
+**[Open English tutorial](docs/WORKFLOW_TUTORIAL_EN.md)**
+
 教程包含真实简体中文应用截图，以及创建流程、条件逻辑和元素定位策略图。
 
 ## 当前版本
 
 - Android 8.0 / API 26 及以上
-- 当前测试版本：`0.33.0-beta.9`
+- 当前测试版本：`0.33.0-beta.10`
 - [GitHub Releases](https://github.com/w835041951-dotcom/Ai-Index-Finger/releases)
 
 GitHub Release 中的 debug APK 用于测试和侧载。仓库尚未配置正式发布签名，AAB 不是可直接上传 Google Play 的生产候选。

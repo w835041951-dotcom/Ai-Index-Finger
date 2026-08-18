@@ -13,8 +13,8 @@ android {
         applicationId = "com.aiindexfinger"
         minSdk = 26
         targetSdk = 36
-        versionCode = 40
-        versionName = "0.33.0-beta.9"
+        versionCode = 41
+        versionName = "0.33.0-beta.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,6 +33,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    bundle {
+        language {
+            enableSplit = false
+        }
     }
 }
 

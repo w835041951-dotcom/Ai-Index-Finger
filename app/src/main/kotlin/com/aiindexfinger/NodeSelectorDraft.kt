@@ -40,7 +40,9 @@ internal data class NodeSelectorDraft(
     fun toSelectorOrNull(): NodeSelector? {
         if (!isValid) return null
         originalSelector?.let { original ->
-            if (withoutOriginal() == original.toDraft().withoutOriginal()) return original
+            if (withoutOriginal() == original.toDraft().withoutOriginal()) {
+                return original.copy(packageName = packageName.trim())
+            }
         }
         val original = originalSelector
         val originalAncestor = original?.ancestor
@@ -63,11 +65,7 @@ internal data class NodeSelectorDraft(
             null
         }
         return NodeSelector(
-            packageName = if (original != null && packageName == original.packageName) {
-                original.packageName
-            } else {
-                packageName.trim()
-            },
+            packageName = packageName.trim(),
             viewId = viewId.preserveOrNormalize(original?.viewId, original != null),
             text = text.preserveOrNormalize(original?.text, original != null),
             textMatchMode = textMatchMode,
@@ -103,6 +101,9 @@ internal fun NodeSelector.toDraft(): NodeSelectorDraft = NodeSelectorDraft(
     ancestorClassName = ancestor?.className.orEmpty(),
     originalSelector = this,
 )
+
+internal fun NodeSelectorDraft.withReplacementSelector(selector: NodeSelector): NodeSelectorDraft =
+    selector.toDraft()
 
 private fun String.normalizedOptionalText(): String? = trim().ifBlank { null }
 

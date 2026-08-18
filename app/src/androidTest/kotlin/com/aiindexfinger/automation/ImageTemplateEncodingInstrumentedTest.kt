@@ -45,6 +45,23 @@ class ImageTemplateEncodingInstrumentedTest {
     }
 
     @Test
+    fun closingScreenshotPickerRecyclesReadyCapture() {
+        val bitmap = patternedBitmap(32, 24)
+        AutomationAccessibilityService.screenCaptureState.value = ScreenCaptureState.Ready(
+            bitmap = bitmap,
+            nodes = emptyList(),
+            screenBounds = ScreenBounds(0, 0, 32, 24),
+            targetPackage = "com.example",
+            targetBounds = listOf(ScreenBounds(0, 0, 32, 24)),
+        )
+
+        AutomationAccessibilityService.cancelPendingScreenCapture()
+
+        assertEquals(ScreenCaptureState.Idle, AutomationAccessibilityService.screenCaptureState.value)
+        assertEquals(true, bitmap.isRecycled)
+    }
+
+    @Test
     fun encodedTemplateDecodesWithDeclaredDimensions() {
         val source = patternedBitmap(32, 24)
         val encoded = requireNotNull(encodeTemplatePng(source))

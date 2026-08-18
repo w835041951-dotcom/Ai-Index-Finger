@@ -6,7 +6,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 ## Current Baseline
 
-- Current prerelease `0.33.0-beta.9` (`versionCode 40`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
+- Current prerelease `0.33.0-beta.10` (`versionCode 41`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
 - Core workflow editing, execution, persistence, import/export, scheduling, node inspection, and run history are implemented.
 - Core and app JVM tests pass. Structured validator and executor errors are localized through English and Simplified Chinese resources, and new run-history records persist stable error codes while legacy text records remain readable.
 - The application has no network permission.
@@ -18,7 +18,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 | Gate | Owner | Current state | Required evidence | Production blocker |
 | --- | --- | --- | --- | --- |
-| Release identity | Product owner | `com.aiindexfinger`, `0.33.0-beta.9`, code 40 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
+| Release identity | Product owner | `com.aiindexfinger`, `0.33.0-beta.10`, code 41 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
 | Upload signing | Release owner | Not configured | Upload keystore and alias stored outside Git; signed AAB verified with `jarsigner` or `apksigner`; Play App Signing enabled | Yes |
 | Automated build gate | Engineering | Local commands pass; no CI | Protected GitHub workflow runs tests, release lint, and unsigned bundle build for the release commit | Yes |
 | Bilingual product UI | Engineering/QA | Resource keys match; remaining hardcoded Compose text exists outside the newly localized run-history flow | English and Simplified Chinese smoke-test checklist passes with no mixed-language critical workflow | Yes |
