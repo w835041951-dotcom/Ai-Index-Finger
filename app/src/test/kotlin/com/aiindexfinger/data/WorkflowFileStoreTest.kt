@@ -114,6 +114,32 @@ class WorkflowFileStoreTest {
     }
 
     @Test
+    fun failedWorkflowDeletionPreservesCurrentDataVersionsAndBackup() =
+        withTemporaryDirectory { directory ->
+            val store = WorkflowFileStore(directory) { 100L }
+            val first = workflow("one", "First")
+            val current = workflow("one", "Current")
+            store.save(listOf(first))
+            store.save(listOf(current))
+            assertTrue(store.listVersions("one").isNotEmpty())
+            val blockedTemporary = directory.resolve("workflows.json.tmp").apply {
+                mkdirs()
+                resolve("blocker").writeText("prevent atomic write")
+            }
+
+            assertThrows(Exception::class.java) { store.save(emptyList()) }
+
+            assertEquals(listOf(current), store.load())
+            assertTrue(store.listVersions("one").isNotEmpty())
+            blockedTemporary.deleteRecursively()
+            directory.resolve("workflows.json").writeText("{corrupt")
+            assertEquals(
+                WorkflowLoadResult.RecoveredFromBackup(WorkflowLibrary(workflows = listOf(first))),
+                store.loadDetailed(),
+            )
+        }
+
+    @Test
     fun deletingWorkflowPurgesFolderAssignmentAfterProcessRestart() = withTemporaryDirectory { directory ->
         val folder = WorkflowFolder("private", "Private")
         val store = WorkflowFileStore(directory) { 100L }
@@ -200,6 +226,28 @@ class WorkflowFileStoreTest {
     }
 
     @Test
+    fun futureWorkflowVersionIsIgnoredAndCannotOverwriteCurrentData() =
+        withTemporaryDirectory { directory ->
+            val store = WorkflowFileStore(directory) { 100L }
+            store.save(listOf(workflow("one", "First")))
+            store.save(listOf(workflow("one", "Current")))
+            val versionFile = requireNotNull(
+                directory.walkTopDown().first {
+                    it.isFile && it.parentFile?.name != directory.name && it.extension == "json"
+                },
+            )
+            versionFile.writeText(
+                versionFile.readText()
+                    .replace("\"schemaVersion\": 19", "\"schemaVersion\": 999")
+                    .replace("\"state\":", "\"futureField\": true,\n        \"state\":"),
+            )
+
+            assertTrue(store.listVersions("one").isEmpty())
+            assertThrows(IllegalArgumentException::class.java) { store.rollback("one", "100-0") }
+            assertEquals("Current", store.load().single().name)
+        }
+
+    @Test
     fun versionForDifferentWorkflowCannotBeRolledBack() = withTemporaryDirectory { directory ->
         val store = WorkflowFileStore(directory) { 100L }
         store.save(listOf(workflow("one", "First")))
@@ -262,6 +310,23 @@ class WorkflowFileStoreTest {
     }
 
     @Test
+    fun ordinarySaveKeepsACompletePreviousLibraryAsBackup() = withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+        val first = workflow("one", "First")
+        val second = workflow("one", "Second")
+        store.save(listOf(first))
+
+        store.save(listOf(second))
+        directory.resolve("workflows.json").writeText("{corrupt")
+
+        assertEquals(
+            WorkflowLoadResult.RecoveredFromBackup(WorkflowLibrary(workflows = listOf(first))),
+            WorkflowFileStore(directory).loadDetailed(),
+        )
+        assertFalse(directory.resolve("workflows.backup.json.tmp").exists())
+    }
+
+    @Test
     fun loadRemovesInterruptedWorkflowTemporaryFiles() = withTemporaryDirectory { directory ->
         val store = WorkflowFileStore(directory)
         store.save(listOf(workflow("one")))
@@ -298,6 +363,24 @@ class WorkflowFileStoreTest {
             store.loadDetailed(),
         )
         }
+
+    @Test
+    fun savingRecoveredBackupRepairsPrimaryWorkflowFile() = withTemporaryDirectory { directory ->
+        val store = WorkflowFileStore(directory)
+        val backupWorkflow = workflow("one", "Backup")
+        store.save(listOf(backupWorkflow))
+        store.save(listOf(workflow("one", "Current")))
+        directory.resolve("workflows.json").writeText("{truncated")
+        val recovered = store.loadDetailed() as WorkflowLoadResult.RecoveredFromBackup
+        val repairedWorkflow = recovered.workflows.single().copy(name = "Repaired")
+
+        store.saveLibrary(recovered.library.withWorkflow(repairedWorkflow))
+
+        assertEquals(
+            WorkflowLoadResult.Loaded(WorkflowLibrary(workflows = listOf(repairedWorkflow))),
+            WorkflowFileStore(directory).loadDetailed(),
+        )
+    }
 
     @Test
     fun missingFilesAreDistinguishedFromCorruptFiles() = withTemporaryDirectory { directory ->

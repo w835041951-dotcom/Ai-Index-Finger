@@ -19,6 +19,8 @@ data class WorkflowSchedule(
     val missedOccurrencePending: Boolean = false,
     val recurrenceLocalTimeMinutes: Int? = null,
     val occurrenceId: String? = null,
+    val previousOccurrenceId: String? = null,
+    val previousScheduledAtMillis: Long? = null,
 ) {
     init {
         require(recurrenceLocalTimeMinutes == null || recurrenceLocalTimeMinutes in 0 until 24 * 60) {
@@ -26,6 +28,15 @@ data class WorkflowSchedule(
         }
         require(occurrenceId == null || occurrenceId.isNotBlank() && occurrenceId.length <= 128) {
             "Occurrence ID must be non-blank and bounded"
+        }
+        require(
+            previousOccurrenceId == null ||
+                previousOccurrenceId.isNotBlank() && previousOccurrenceId.length <= 128,
+        ) {
+            "Previous occurrence ID must be non-blank and bounded"
+        }
+        require(previousScheduledAtMillis == null || previousScheduledAtMillis > 0) {
+            "Previous occurrence time must be positive"
         }
     }
 }
@@ -45,6 +56,12 @@ enum class ScheduleStatus {
 
 class ScheduleStorageException(cause: Throwable) :
     IllegalStateException("Stored schedules are corrupt and cannot be modified", cause)
+
+class ScheduleStorageWriteException(cause: Throwable) :
+    IllegalStateException("Schedules could not be saved", cause)
+
+class ScheduleStorageCapacityException :
+    IllegalStateException("Stored schedules are too large")
 
 class ScheduleStore private constructor(private val file: File) {
     constructor(context: Context) : this(File(context.filesDir, FILE_NAME))
@@ -77,14 +94,6 @@ class ScheduleStore private constructor(private val file: File) {
         val updated = consumeMissedSchedule(load(), workflowId)
         save(updated)
         updated
-    }
-
-    fun isPendingOccurrence(workflowId: String, expectedAtMillis: Long): Boolean = synchronized(FILE_LOCK) {
-        load().any { schedule ->
-            schedule.workflowId == workflowId &&
-                schedule.scheduledAtMillis == expectedAtMillis &&
-                schedule.status == ScheduleStatus.Pending
-        }
     }
 
     internal fun discardOccurrence(
@@ -146,18 +155,26 @@ class ScheduleStore private constructor(private val file: File) {
 
     private fun save(schedules: List<WorkflowSchedule>) {
         if (schedules.isEmpty()) {
-            Files.deleteIfExists(File(file.parentFile, "${file.name}.tmp").toPath())
-            Files.deleteIfExists(file.toPath())
+            try {
+                Files.deleteIfExists(File(file.parentFile, "${file.name}.tmp").toPath())
+                Files.deleteIfExists(file.toPath())
+            } catch (error: Exception) {
+                throw ScheduleStorageWriteException(error)
+            }
             return
         }
         val content = json.encodeToString(ListSerializer(WorkflowSchedule.serializer()), schedules)
-        require(content.toByteArray(Charsets.UTF_8).size <= MAX_SCHEDULE_BYTES) {
-            "Stored schedules are too large"
+        if (content.toByteArray(Charsets.UTF_8).size > MAX_SCHEDULE_BYTES) {
+            throw ScheduleStorageCapacityException()
         }
-        AtomicFileWriter.write(
-            file,
-            content,
-        )
+        try {
+            AtomicFileWriter.write(
+                file,
+                content,
+            )
+        } catch (error: Exception) {
+            throw ScheduleStorageWriteException(error)
+        }
     }
 
     private fun loadForMutation(): List<WorkflowSchedule> {
@@ -250,6 +267,8 @@ internal fun completeScheduleOccurrence(
             status = ScheduleStatus.Pending,
             recurrenceLocalTimeMinutes = anchorMinutes,
             occurrenceId = nextOccurrenceId ?: current.occurrenceId,
+            previousOccurrenceId = current.occurrenceId,
+            previousScheduledAtMillis = current.scheduledAtMillis,
         )
     }
     return ScheduleCompletion(
@@ -302,6 +321,8 @@ internal fun missScheduleOccurrence(
         missedOccurrencePending = true,
         recurrenceLocalTimeMinutes = anchorMinutes,
         occurrenceId = nextOccurrenceId ?: current.occurrenceId,
+        previousOccurrenceId = current.occurrenceId,
+        previousScheduledAtMillis = current.scheduledAtMillis,
     )
     return ScheduleCompletion(
         accepted = true,

@@ -19,6 +19,29 @@ class ScheduleStoreTest {
     }
 
     @Test
+    fun scheduleWriteFailureIsDistinctFromStoredDataCorruption() = withTemporaryDirectory { directory ->
+        val blockedParent = directory.resolve("blocked").apply { writeText("not a directory") }
+        val store = ScheduleStore.forFile(blockedParent.resolve("workflow-schedules.json"))
+
+        assertThrows(ScheduleStorageWriteException::class.java) { store.put(schedule("one")) }
+    }
+
+    @Test
+    fun scheduleCapacityFailureIsNonTransientAndDoesNotCreateAFile() =
+        withTemporaryDirectory { directory ->
+            val file = directory.resolve("workflow-schedules.json")
+            val store = ScheduleStore.forFile(file)
+            val oversized = schedule("one").copy(
+                workflowName = "x".repeat(2 * 1024 * 1024),
+            )
+
+            assertThrows(ScheduleStorageCapacityException::class.java) {
+                store.put(oversized)
+            }
+            assertEquals(false, file.exists())
+        }
+
+    @Test
     fun corruptFileCannotBeOverwrittenByPut() = withTemporaryDirectory { directory ->
         val file = directory.resolve("workflow-schedules.json")
         file.writeText("{truncated")

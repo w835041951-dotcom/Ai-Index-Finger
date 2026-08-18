@@ -59,7 +59,7 @@ If selector uniqueness is ambiguous, adjust conditions before running repeatedly
 
 ## 8. Privacy Notes
 
-- No network permission.
+- No Android `INTERNET` permission; workflow data is not transmitted.
 - Workflow data stays on-device.
 - Full screenshots used for visual selection stay only in memory and are not uploaded. An image-click action stores its selected crop inside the workflow, and that crop is included when you export the workflow or library.
 

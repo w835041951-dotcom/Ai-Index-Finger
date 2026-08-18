@@ -165,6 +165,21 @@ class OverlayActionFactoryTest {
     }
 
     @Test
+    fun lateSensitiveClassificationDiscardsItsFieldAfterAnotherFieldBecameActive() {
+        val session = RecordedClickSession(capacity = 4)
+        val first = NodeSelector("com.example", viewId = "com.example:id/first")
+        val second = NodeSelector("com.example", viewId = "com.example:id/second")
+        session.start()
+        session.recordOrReplaceText("first", Step.InputText("secret", first, "transitional"))
+        session.recordOrReplaceText("second", Step.InputText("safe", second, "visible"))
+
+        session.discardTextBurst("first")
+
+        val actions = session.finish().actions.map { (it as RecordedAction.ExistingStep).step }
+        assertEquals(listOf("safe"), actions.map(Step::id))
+    }
+
+    @Test
     fun mixedRecordedActionsPreserveTheirExactOrder() {
         val session = RecordedClickSession(capacity = 8)
         val selector = NodeSelector("com.example", viewId = "com.example:id/action")

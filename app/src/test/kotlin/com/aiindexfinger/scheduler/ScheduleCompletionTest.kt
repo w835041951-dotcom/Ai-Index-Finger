@@ -141,6 +141,39 @@ class ScheduleCompletionTest {
 
         assertTrue(completion.accepted)
         assertEquals("next", completion.nextSchedule?.occurrenceId)
+        assertEquals("old", completion.nextSchedule?.previousOccurrenceId)
+        assertEquals(100L, completion.nextSchedule?.previousScheduledAtMillis)
+    }
+
+    @Test
+    fun `post completion discard removes the newly advanced stale occurrence`() {
+        val current = WorkflowSchedule(
+            "id",
+            "Current",
+            100,
+            recurrence = ScheduleRecurrence.Daily,
+            occurrenceId = "old",
+        )
+        val completion = completeScheduleOccurrence(
+            listOf(current),
+            "id",
+            100,
+            100,
+            utc,
+            expectedOccurrenceId = "old",
+            nextOccurrenceId = "next",
+        )
+        val next = requireNotNull(completion.nextSchedule)
+
+        val discard = discardScheduleOccurrence(
+            completion.schedules,
+            next.workflowId,
+            next.scheduledAtMillis,
+            next.occurrenceId,
+        )
+
+        assertTrue(discard.accepted)
+        assertTrue(discard.schedules.isEmpty())
     }
 
     @Test

@@ -76,10 +76,11 @@
     <string name="image_click_preflight_supported">Screenshot recognition: supported</string>
     <string name="image_click_preflight_unsupported">Screenshot recognition: requires Android 11 or later</string>
     <string name="loading_workflows">Loading workflows…</string>
-    <string name="workflows_recovered_from_backup">The workflow file was damaged. The previous valid backup has been restored.</string>
+    <string name="workflows_recovered_from_backup">The workflow file was damaged. The app is using the previous valid backup; save a change to repair the main file.</string>
     <string name="workflows_corrupt">Workflow data could not be read. The damaged files were preserved and will not be overwritten automatically.</string>
     <string name="workflows_unsupported_version">Workflow data was created by a newer app version. It was preserved and will not be overwritten.</string>
     <string name="schedule_storage_corrupt">Schedule data could not be read. The damaged file was preserved and will not be overwritten automatically.</string>
+    <string name="schedule_reconciliation_failed">Saved reminders are still listed, but Android scheduling could not be fully restored. Reopen the app or reschedule affected workflows.</string>
     <string name="run_history_storage_corrupt">Run history could not be read. The damaged file was preserved and will not be overwritten automatically. Clear run history to start over.</string>
     <string name="run_history_newer_read_only">Run history contains data from a newer app version. You can view it here, but new runs will not overwrite it. Clear run history to start over.</string>
     <string name="schedule_notification_missed">A scheduled reminder could not be shown. Check notification permission and schedule it again.</string>
@@ -293,7 +294,7 @@
     <string name="accessibility_disclosure_title">Allow automation access?</string>
     <string name="accessibility_disclosure_observation">When enabled, AI Index Finger reads visible screen text, descriptions, view identifiers, and app names so you can inspect elements and run workflows you create.</string>
     <string name="accessibility_disclosure_actions">While running a workflow, the app can click, swipe, enter text, use system navigation, and temporarily replace clipboard content for pasting. It restores readable clipboard content if it has not changed again; when Android hides the current clipboard, paste fails without replacing it.</string>
-    <string name="accessibility_disclosure_privacy">Observed interface data and run history stay on this device. The app has no network permission and does not send this data elsewhere. You can disable the service at any time in Android settings.</string>
+    <string name="accessibility_disclosure_privacy">Observed interface data and run history stay on this device. The app does not request the Android INTERNET permission and does not send this data elsewhere. You can disable the service at any time in Android settings.</string>
     <string name="global_action">Global action</string>
     <string name="repeat_settings">Repeat settings</string>
     <string name="condition_settings">Condition settings</string>
@@ -829,8 +830,8 @@
     <string name="run_already_running">Another workflow is already running</string>
     <string name="run_cancelled">Workflow stopped</string>
     <string name="run_cancelled_controls_unavailable">Workflow stopped because its Stop and Debug notification was no longer available. Enable notifications before running it again.</string>
-    <string name="run_step_failed">Step %1$s failed: %2$s</string>
-    <string name="run_failure_with_step">Step %1$s: %2$s</string>
+    <string name="run_step_failed">%1$s failed: %2$s</string>
+    <string name="run_failure_with_step">%1$s: %2$s</string>
     <string name="run_failure_details">Details: %1$s</string>
     <string name="run_failure_unknown">An unknown workflow error occurred</string>
     <string name="run_status_completed">Completed</string>
@@ -852,7 +853,6 @@
     <string name="run_history_clear_title">Clear run history?</string>
     <string name="run_history_clear_message">All local execution records will be permanently deleted.</string>
     <string name="run_history_detail_status">Status: %1$s</string>
-    <string name="run_history_detail_workflow_id">Workflow ID: %1$s</string>
     <string name="run_history_detail_started">Started: %1$s</string>
     <string name="run_history_detail_duration">Duration: %1$d ms</string>
     <string name="run_history_detail_failed_step">Failed step: %1$s</string>

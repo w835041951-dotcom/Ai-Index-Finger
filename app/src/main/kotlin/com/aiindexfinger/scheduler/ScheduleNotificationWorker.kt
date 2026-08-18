@@ -26,55 +26,92 @@ class ScheduleNotificationWorker(
     workerParameters: WorkerParameters,
 ) : CoroutineWorker(appContext, workerParameters) {
     override suspend fun doWork(): Result {
-        val workflowId = inputData.getString(KEY_WORKFLOW_ID) ?: return Result.failure()
-        val scheduledAtMillis = inputData.getLong(KEY_SCHEDULED_AT_MILLIS, Long.MIN_VALUE)
-        if (scheduledAtMillis == Long.MIN_VALUE) return Result.failure()
-        val occurrenceId = inputData.getString(KEY_OCCURRENCE_ID)
+        val scheduler = WorkflowScheduler(applicationContext)
+        val inputWorkflowId = inputData.getString(KEY_WORKFLOW_ID)
+        val inputScheduledAtMillis = inputData.getLong(KEY_SCHEDULED_AT_MILLIS, Long.MIN_VALUE)
+        val target = if (inputWorkflowId != null && inputScheduledAtMillis != Long.MIN_VALUE) {
+            ScheduleWorkTarget(
+                inputWorkflowId,
+                inputScheduledAtMillis,
+                inputData.getString(KEY_OCCURRENCE_ID),
+            )
+        } else {
+            try {
+                scheduler.resolveWorkRequest(id)
+            } catch (_: ScheduleStorageException) {
+                return Result.failure()
+            }
+        } ?: return Result.success()
+        val workflowId = target.workflowId
+        val scheduledAtMillis = target.scheduledAtMillis
+        val occurrenceId = target.occurrenceId
         val runnableWorkflows = loadRunnableWorkflows() ?: return Result.failure()
         if (runnableWorkflows.none { it.id == workflowId }) {
             return try {
-                WorkflowScheduler(applicationContext).discardOccurrence(
+                scheduler.discardOccurrence(
                     workflowId,
                     scheduledAtMillis,
                     occurrenceId,
                 )
                 Result.success()
+            } catch (_: ScheduleStorageWriteException) {
+                Result.retry()
+            } catch (_: ScheduleStorageCapacityException) {
+                Result.failure()
             } catch (_: ScheduleStorageException) {
                 Result.failure()
             }
         }
 
-        val notificationManager = ensureScheduleNotificationChannel(applicationContext)
-        if (scheduleNotificationReadiness(applicationContext) != ScheduleNotificationReadiness.Ready) {
+        val notificationManager: NotificationManager
+        val notificationReadiness: ScheduleNotificationReadiness
+        try {
+            notificationManager = ensureScheduleNotificationChannel(applicationContext)
+            notificationReadiness = scheduleNotificationReadiness(applicationContext)
+        } catch (_: Exception) {
+            return Result.retry()
+        }
+        if (notificationReadiness != ScheduleNotificationReadiness.Ready) {
             try {
-                WorkflowScheduler(applicationContext).missOccurrence(
+                scheduler.deliverOccurrence(
                     workflowId,
                     scheduledAtMillis,
                     ScheduleWorkOrigin.RunningWorker,
                     occurrenceId,
-                )
+                ) { false }
+            } catch (_: ScheduleWorkOperationException) {
+                return Result.retry()
+            } catch (_: ScheduleStorageWriteException) {
+                return Result.retry()
+            } catch (_: ScheduleStorageCapacityException) {
+                return Result.failure()
             } catch (_: ScheduleStorageException) {
                 return Result.failure()
             }
             return Result.success()
         }
 
-        val completion = try {
-            WorkflowScheduler(applicationContext).completeOccurrence(
-                workflowId,
-                scheduledAtMillis,
-                ScheduleWorkOrigin.RunningWorker,
-                occurrenceId,
-            )
-        } catch (_: ScheduleStorageException) {
-            return Result.failure()
-        }
-        if (!completion.accepted) return Result.success()
+        val runnableWorkflowsBeforeNotification = loadRunnableWorkflows()
+            ?: return Result.retry()
         val workflowBeforeNotification = workflowForScheduledNotification(
             workflowId,
-            loadRunnableWorkflows(),
-        )
-            ?: return Result.success()
+            runnableWorkflowsBeforeNotification,
+        ) ?: run {
+            try {
+                scheduler.discardOccurrence(
+                    workflowId,
+                    scheduledAtMillis,
+                    occurrenceId,
+                )
+            } catch (_: ScheduleStorageWriteException) {
+                return Result.retry()
+            } catch (_: ScheduleStorageCapacityException) {
+                return Result.failure()
+            } catch (_: ScheduleStorageException) {
+                return Result.failure()
+            }
+            return Result.success()
+        }
 
         val openAppIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -98,15 +135,38 @@ class ScheduleNotificationWorker(
             )
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
             .build()
-        notificationManager.notify(workflowId, SCHEDULE_NOTIFICATION_ID, notification)
+        val delivery = try {
+            scheduler.deliverOccurrence(
+                workflowId,
+                scheduledAtMillis,
+                ScheduleWorkOrigin.RunningWorker,
+                occurrenceId,
+            ) {
+                scheduledNotificationDelivered {
+                    notificationManager.notify(workflowId, SCHEDULE_NOTIFICATION_ID, notification)
+                }
+            }
+        } catch (_: ScheduleWorkOperationException) {
+            return Result.retry()
+        } catch (_: ScheduleStorageWriteException) {
+            return Result.retry()
+        } catch (_: ScheduleStorageCapacityException) {
+            return Result.failure()
+        } catch (_: ScheduleStorageException) {
+            return Result.failure()
+        }
+        if (!delivery.accepted) return Result.success()
         return Result.success()
     }
 
-    private fun loadRunnableWorkflows(): List<Workflow>? = runCatching {
+    private fun loadRunnableWorkflows(): List<Workflow>? = try {
         runnableWorkflowsForScheduling(WorkflowStore(applicationContext).loadDetailed())
-    }.getOrNull()
+    } catch (_: Exception) {
+        null
+    }
 
     companion object {
         const val KEY_WORKFLOW_ID = "workflow_id"
@@ -131,6 +191,16 @@ internal fun workflowForScheduledNotification(
     workflowId: String,
     runnableWorkflows: List<Workflow>?,
 ): Workflow? = runnableWorkflows?.firstOrNull { it.id == workflowId }
+
+internal fun shouldRetryScheduledWorker(error: Throwable): Boolean =
+    error is ScheduleWorkOperationException || error is ScheduleStorageWriteException
+
+internal fun scheduledNotificationDelivered(deliver: () -> Unit): Boolean = try {
+    deliver()
+    true
+} catch (_: Exception) {
+    false
+}
 
 internal fun ensureScheduleNotificationChannel(context: Context): NotificationManager =
     context.getSystemService(NotificationManager::class.java).also { notificationManager ->

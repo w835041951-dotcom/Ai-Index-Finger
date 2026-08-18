@@ -4,8 +4,14 @@ import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.ScrollDirection
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.RecordedClickTargetMode
+import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
+import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.data.WorkflowLibrary
+import com.aiindexfinger.scheduler.ScheduleStorageException
+import com.aiindexfinger.scheduler.WorkflowSchedule
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import com.aiindexfinger.model.FailurePolicy
 import com.aiindexfinger.automation.ScreenPoint
 import com.aiindexfinger.automation.ScreenBounds
@@ -19,6 +25,73 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OperationSettingsMappingTest {
+    @Test
+    fun `dynamic semantics tags preserve short IDs and bound imported long IDs`() {
+        assertEquals("workflow-run-short", workflowRunTag("short"))
+        assertEquals("step-short-edit", stepOperationTag("short", "edit"))
+        assertEquals("floating-workflow-short", floatingWorkflowTag("short"))
+
+        val longId = "界".repeat(1_000)
+        val same = workflowRunTag(longId)
+        assertEquals(same, workflowRunTag(longId))
+        assertTrue(same.toByteArray(Charsets.UTF_8).size <= 256)
+        assertTrue(stepOperationTag(longId, "delete").toByteArray(Charsets.UTF_8).size <= 256)
+        assertTrue(floatingWorkflowTag(longId).toByteArray(Charsets.UTF_8).size <= 256)
+        assertFalse(same.contains(longId))
+        assertFalse(same == workflowRunTag(longId + "different"))
+    }
+
+    @Test
+    fun `scheduled notification reflects current workflow availability`() {
+        val ready = Workflow(
+            id = "ready",
+            name = "Ready",
+            steps = listOf(Step.Delay("delay", 1)),
+            state = WorkflowState.Ready,
+        )
+        val draft = ready.copy(id = "draft", name = "Draft", state = WorkflowState.Draft)
+
+        assertEquals(
+            ScheduledWorkflowAvailability.Ready,
+            scheduledWorkflowAvailability(listOf(ready, draft), ready.id),
+        )
+        assertEquals(
+            ScheduledWorkflowAvailability.NotReady,
+            scheduledWorkflowAvailability(listOf(ready, draft), draft.id),
+        )
+        assertEquals(
+            ScheduledWorkflowAvailability.Missing,
+            scheduledWorkflowAvailability(listOf(ready, draft), "missing"),
+        )
+    }
+
+    @Test
+    fun `startup schedule loading falls back without hiding corruption or cancellation`() = runBlocking {
+        val saved = listOf(WorkflowSchedule("workflow", "Workflow", 100))
+        val fallback = loadSchedulesForStartup(
+            reconcile = { throw IllegalStateException("work manager unavailable") },
+            loadWithoutReconciliation = { saved },
+        )
+        val corrupt = loadSchedulesForStartup(
+            reconcile = { throw ScheduleStorageException(IllegalStateException("corrupt")) },
+            loadWithoutReconciliation = { error("must not load") },
+        )
+
+        assertEquals(ScheduleStartupLoad(saved, ScheduleStartupIssue.ReconciliationFailed), fallback)
+        assertEquals(
+            ScheduleStartupLoad(emptyList(), ScheduleStartupIssue.StorageCorrupt),
+            corrupt,
+        )
+        assertTrue(
+            runCatching {
+                loadSchedulesForStartup(
+                    reconcile = { throw CancellationException("cancelled") },
+                    loadWithoutReconciliation = { saved },
+                )
+            }.exceptionOrNull() is CancellationException,
+        )
+    }
+
     @Test
     fun `captured screen bounds must match current display dimensions`() {
         val portrait = ScreenBounds(0, 0, 1_080, 2_400)

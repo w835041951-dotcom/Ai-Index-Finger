@@ -237,6 +237,8 @@ import com.aiindexfinger.scheduler.openScheduleNotificationSettings
 import com.aiindexfinger.scheduler.removeTriggeredSchedule
 import com.aiindexfinger.executor.ExecutionError
 import com.aiindexfinger.executor.ExecutionErrorCode
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.text.DateFormat
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -349,24 +351,36 @@ class MainActivity : ComponentActivity() {
         val runHistoryResult = runHistoryStore.loadDetailed()
         val library = workflowResult.library
         val runnableWorkflows = runnableWorkflowsForScheduling(workflowResult)
-        val scheduleResult = runCatching {
-            if (runnableWorkflows == null) {
-                workflowPersistence.loadWorkflowSchedulesWithoutReconciliation()
-            } else {
-                workflowPersistence.reloadWorkflowSchedules(
-                    runnableWorkflows.mapTo(mutableSetOf(), Workflow::id),
-                )
-            }
-        }
-        scheduleResult.exceptionOrNull()?.let { error ->
-            if (error !is ScheduleStorageException) throw error
-        }
-        val loadedSchedules = scheduleResult.getOrDefault(emptyList())
+        val scheduleLoad = loadSchedulesForStartup(
+            reconcile = {
+                if (runnableWorkflows == null) {
+                    workflowPersistence.loadWorkflowSchedulesWithoutReconciliation()
+                } else {
+                    workflowPersistence.reloadWorkflowSchedules(
+                        runnableWorkflows.mapTo(mutableSetOf(), Workflow::id),
+                    )
+                }
+            },
+            loadWithoutReconciliation =
+                workflowPersistence::loadWorkflowSchedulesWithoutReconciliation,
+        )
+        val loadedSchedules = scheduleLoad.schedules
         val missed = missedSchedules(loadedSchedules)
         var schedules = loadedSchedules
+        var scheduleIssue = scheduleLoad.issue
         if (runnableWorkflows != null) {
-            missed.forEach { schedule ->
-                schedules = workflowPersistence.consumeMissedWorkflowSchedule(schedule.workflowId)
+            for (schedule in missed) {
+                try {
+                    schedules = workflowPersistence.consumeMissedWorkflowSchedule(schedule.workflowId)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: ScheduleStorageException) {
+                    scheduleIssue = ScheduleStartupIssue.StorageCorrupt
+                    break
+                } catch (_: Exception) {
+                    scheduleIssue = ScheduleStartupIssue.ReconciliationFailed
+                    break
+                }
             }
         }
         val hasMissedSchedule = missed.isNotEmpty()
@@ -382,8 +396,14 @@ class MainActivity : ComponentActivity() {
                     is WorkflowLoadResult.UnsupportedVersion -> add(R.string.workflows_unsupported_version)
                     else -> Unit
                 }
-                if (scheduleResult.exceptionOrNull() is ScheduleStorageException) {
-                    add(R.string.schedule_storage_corrupt)
+                scheduleIssue?.let { issue ->
+                    add(
+                        when (issue) {
+                            ScheduleStartupIssue.StorageCorrupt -> R.string.schedule_storage_corrupt
+                            ScheduleStartupIssue.ReconciliationFailed ->
+                                R.string.schedule_reconciliation_failed
+                        },
+                    )
                 }
                 when (runHistoryResult) {
                     is RunHistoryLoadResult.Corrupt -> add(R.string.run_history_storage_corrupt)
@@ -408,6 +428,59 @@ class MainActivity : ComponentActivity() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
+}
+
+internal enum class ScheduleStartupIssue {
+    StorageCorrupt,
+    ReconciliationFailed,
+}
+
+internal enum class ScheduledWorkflowAvailability {
+    Missing,
+    NotReady,
+    Ready,
+}
+
+internal fun scheduledWorkflowAvailability(
+    workflows: List<Workflow>,
+    workflowId: String,
+): ScheduledWorkflowAvailability {
+    val workflow = workflows.firstOrNull { it.id == workflowId }
+        ?: return ScheduledWorkflowAvailability.Missing
+    return if (workflow.isReadyToRun()) {
+        ScheduledWorkflowAvailability.Ready
+    } else {
+        ScheduledWorkflowAvailability.NotReady
+    }
+}
+
+internal data class ScheduleStartupLoad(
+    val schedules: List<WorkflowSchedule>,
+    val issue: ScheduleStartupIssue? = null,
+)
+
+internal suspend fun loadSchedulesForStartup(
+    reconcile: suspend () -> List<WorkflowSchedule>,
+    loadWithoutReconciliation: suspend () -> List<WorkflowSchedule>,
+): ScheduleStartupLoad = try {
+    ScheduleStartupLoad(reconcile())
+} catch (error: CancellationException) {
+    throw error
+} catch (_: ScheduleStorageException) {
+    ScheduleStartupLoad(emptyList(), ScheduleStartupIssue.StorageCorrupt)
+} catch (_: Exception) {
+    try {
+        ScheduleStartupLoad(
+            loadWithoutReconciliation(),
+            ScheduleStartupIssue.ReconciliationFailed,
+        )
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: ScheduleStorageException) {
+        ScheduleStartupLoad(emptyList(), ScheduleStartupIssue.StorageCorrupt)
+    } catch (_: Exception) {
+        ScheduleStartupLoad(emptyList(), ScheduleStartupIssue.ReconciliationFailed)
+    }
 }
 
 private data class InitialAppState(
@@ -555,16 +628,29 @@ private fun WorkflowApp(
     LaunchedEffect(scheduledWorkflowEvent?.sequence) {
         scheduledWorkflowEvent?.let { event ->
             val id = event.workflowId
-            runCatching {
-                onReloadSchedules(workflows.filter { it.isReadyToRun() }.map { it.id }.toSet())
-            }.onSuccess {
-                schedules = it
-                val workflowName = workflows.firstOrNull { it.id == id }?.name
-                    ?: context.getString(R.string.scheduled_workflow_fallback_name)
-                runMessage = context.getString(R.string.workflow_ready_to_run, workflowName)
-            }.onFailure { error ->
-                if (error !is ScheduleStorageException) throw error
+            try {
+                schedules = onReloadSchedules(
+                    workflows.filter { it.isReadyToRun() }.map { it.id }.toSet(),
+                )
+                val workflow = workflows.firstOrNull { it.id == id }
+                runMessage = when (scheduledWorkflowAvailability(workflows, id)) {
+                    ScheduledWorkflowAvailability.Ready -> context.getString(
+                        R.string.workflow_ready_to_run,
+                        requireNotNull(workflow).name,
+                    )
+                    ScheduledWorkflowAvailability.NotReady -> context.getString(
+                        R.string.cannot_run,
+                        requireNotNull(workflow).readinessIssues().first().localizedMessage(context),
+                    )
+                    ScheduledWorkflowAvailability.Missing ->
+                        context.getString(R.string.run_workflow_missing)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: ScheduleStorageException) {
                 runMessage = context.getString(R.string.schedule_storage_corrupt)
+            } catch (_: Exception) {
+                runMessage = context.getString(R.string.schedule_reconciliation_failed)
             }
             onScheduledWorkflowEventConsumed(event.sequence)
         }
@@ -608,6 +694,8 @@ private fun WorkflowApp(
                 error.issue.localizedMessage(context),
             )
             null
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Exception) {
             runMessage = context.getString(
                 if (error is ScheduleStorageException) {
@@ -865,9 +953,8 @@ private fun WorkflowApp(
                     editorSaveInProgress = true
                     editorSaveError = null
                     coroutineScope.launch {
-                        runCatching {
-                            onCommitWorkflow(expected, workflow)
-                        }.onSuccess { commit ->
+                        try {
+                            val commit = onCommitWorkflow(expected, workflow)
                             library = commit.library
                             commit.cleanupResult?.let { schedules = it }
                             if (commit.cleanupError != null) {
@@ -877,7 +964,9 @@ private fun WorkflowApp(
                             }
                             editingWorkflow = null
                             initialEditingStepPath = null
-                        }.onFailure { error ->
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
                             editorSaveError = context.getString(
                                 if (error is com.aiindexfinger.data.WorkflowEditConflictException) {
                                     R.string.workflow_edit_conflict
@@ -885,8 +974,9 @@ private fun WorkflowApp(
                                     R.string.save_failed
                                 },
                             )
+                        } finally {
+                            editorSaveInProgress = false
                         }
-                        editorSaveInProgress = false
                     }
                 }
             },
@@ -1062,12 +1152,13 @@ private fun WorkflowApp(
             onCompare = { before, after -> workflowComparison = before to after },
                         onViewVersions = { workflow ->
                             coroutineScope.launch {
-                                runCatching { onListVersions(workflow.id) }
-                                    .onSuccess { versions -> versionHistory = workflow to versions }
-                                    .onFailure {
-                                        runMessage = context.getString(R.string.workflow_versions_load_failed)
-                                    }
-                                    Unit
+                                try {
+                                    versionHistory = workflow to onListVersions(workflow.id)
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (_: Exception) {
+                                    runMessage = context.getString(R.string.workflow_versions_load_failed)
+                                }
                             }
                         },
             onDelete = { workflow ->
@@ -1121,24 +1212,24 @@ private fun WorkflowApp(
             },
             onCancelSchedule = { workflow ->
                 coroutineScope.launch {
-                    runCatching { onCancelSchedule(workflow.id) }
-                        .onSuccess {
-                            schedules = it
-                            runMessage = context.getString(
-                                R.string.workflow_schedule_cancelled,
-                                workflow.name,
-                            )
-                        }
-                        .onFailure { error ->
-                            runMessage = context.getString(
-                                if (error is ScheduleStorageException) {
-                                    R.string.schedule_storage_corrupt
-                                } else {
-                                    R.string.schedule_failed
-                                },
-                            )
-                        }
+                    try {
+                        schedules = onCancelSchedule(workflow.id)
+                        runMessage = context.getString(
+                            R.string.workflow_schedule_cancelled,
+                            workflow.name,
+                        )
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        runMessage = context.getString(
+                            if (error is ScheduleStorageException) {
+                                R.string.schedule_storage_corrupt
+                            } else {
+                                R.string.schedule_failed
+                            },
+                        )
                     }
+                }
             },
             onClearRunHistory = requestClearRunHistory,
             onViewRunHistory = { showRunHistory = true },
@@ -1194,22 +1285,29 @@ private fun WorkflowApp(
             },
             onRollback = { version ->
                 coroutineScope.launch {
-                    runCatching { onRollback(current.id, version.versionId) }
-                        .onSuccess { rollback ->
-                            val restored = rollback.workflow
-                            library = rollback.libraryCommit.library
-                            rollback.libraryCommit.cleanupResult?.let { schedules = it }
-                            versionHistory = restored to runCatching { onListVersions(restored.id) }
-                                .getOrDefault(emptyList())
-                            runMessage = if (rollback.libraryCommit.cleanupError == null) {
-                                context.getString(R.string.workflow_rollback_complete, restored.name)
-                            } else {
-                                context.getString(R.string.workflow_saved_schedule_cleanup_failed)
-                            }
+                    try {
+                        val rollback = onRollback(current.id, version.versionId)
+                        val restored = rollback.workflow
+                        library = rollback.libraryCommit.library
+                        rollback.libraryCommit.cleanupResult?.let { schedules = it }
+                        val restoredVersions = try {
+                            onListVersions(restored.id)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            emptyList()
                         }
-                        .onFailure {
-                            runMessage = context.getString(R.string.workflow_rollback_failed)
+                        versionHistory = restored to restoredVersions
+                        runMessage = if (rollback.libraryCommit.cleanupError == null) {
+                            context.getString(R.string.workflow_rollback_complete, restored.name)
+                        } else {
+                            context.getString(R.string.workflow_saved_schedule_cleanup_failed)
                         }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        runMessage = context.getString(R.string.workflow_rollback_failed)
+                    }
                 }
             },
         )
@@ -1414,7 +1512,8 @@ internal fun WorkflowHome(
     onReviewAccessibilityDisclosure: () -> Unit,
 ) {
     val serviceConnected by AutomationAccessibilityService.connected.collectAsStateWithLifecycle()
-    val currentStepId by AutomationAccessibilityService.currentStepId.collectAsStateWithLifecycle()
+    val currentStepLocation by AutomationAccessibilityService.currentStepLocation
+        .collectAsStateWithLifecycle()
     val debugPaused by AutomationAccessibilityService.debugPaused.collectAsStateWithLifecycle()
     val workflowStartedAtMillis by AutomationAccessibilityService.workflowStartedAtMillis
         .collectAsStateWithLifecycle()
@@ -1514,11 +1613,10 @@ internal fun WorkflowHome(
             }
             if (runningWorkflowId != null) {
                 val currentWorkflow = workflows.firstOrNull { it.id == runningWorkflowId }
-                val currentStep = currentStepId?.let { currentWorkflow?.steps?.findById(it) }
                 Spacer(Modifier.height(14.dp))
                 RunningWorkflowStatus(
                     workflowName = currentWorkflow?.name ?: stringResource(R.string.workflow),
-                    stepName = currentStep?.title() ?: currentStepId,
+                    stepName = currentStepLocation?.localizedName(),
                     elapsedMillis = elapsedMillis,
                     debugPaused = debugPaused,
                     onNext = { AutomationAccessibilityService.instance?.advanceWorkflow() },
@@ -2074,11 +2172,14 @@ private fun FolderDestinationRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .semantics { this.selected = selected }
-            .clickable(onClick = onClick),
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                onClick = onClick,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RadioButton(selected = selected, onClick = onClick)
+        RadioButton(selected = selected, onClick = null)
         Text(name)
     }
 }
@@ -2144,12 +2245,16 @@ private fun ScheduleDialog(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { recurrence = option },
+                            .selectable(
+                                selected = recurrence == option,
+                                role = Role.RadioButton,
+                                onClick = { recurrence = option },
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
                             selected = recurrence == option,
-                            onClick = { recurrence = option },
+                            onClick = null,
                         )
                         Text(option.localizedLabel())
                     }
@@ -6926,19 +7031,6 @@ private fun Step.title(): String = when (this) {
     is Step.WaitForNode -> stringResource(if (mustExist) R.string.wait_element_appear else R.string.wait_element_disappear)
 }
 
-private fun List<Step>.findById(stepId: String): Step? {
-    for (step in this) {
-        if (step.id == stepId) return step
-        val nested = when (step) {
-            is Step.IfElse -> (step.whenTrue + step.whenFalse).findById(stepId)
-            is Step.Repeat -> step.steps.findById(stepId)
-            else -> null
-        }
-        if (nested != null) return nested
-    }
-    return null
-}
-
 internal fun matchesRecordingDestination(recordingWorkflowId: String, editorWorkflowId: String): Boolean =
     recordingWorkflowId == editorWorkflowId
 
@@ -7205,14 +7297,41 @@ internal const val FOLDER_DELETE_CONFIRM_TAG = "folder-delete-confirm"
 internal const val FOLDER_FILTER_ALL_TAG = "folder-filter-all"
 internal const val FOLDER_FILTER_UNFILED_TAG = "folder-filter-unfiled"
 internal const val FOLDER_DESTINATION_UNFILED_TAG = "folder-destination-unfiled"
-internal fun folderFilterTag(folderId: String) = "folder-filter-$folderId"
-internal fun folderRenameTag(folderId: String) = "folder-rename-$folderId"
-internal fun folderDeleteTag(folderId: String) = "folder-delete-$folderId"
-internal fun folderMoveWorkflowTag(workflowId: String) = "folder-move-workflow-$workflowId"
-internal fun workflowRunTag(workflowId: String) = "workflow-run-$workflowId"
-internal fun workflowDebugTag(workflowId: String) = "workflow-debug-$workflowId"
-internal fun folderDestinationTag(folderId: String) = "folder-destination-$folderId"
-internal fun stepOperationTag(stepId: String, operation: String) = "step-$stepId-$operation"
+internal fun folderFilterTag(folderId: String) = boundedIdentityTag("folder-filter", folderId)
+internal fun folderRenameTag(folderId: String) = boundedIdentityTag("folder-rename", folderId)
+internal fun folderDeleteTag(folderId: String) = boundedIdentityTag("folder-delete", folderId)
+internal fun folderMoveWorkflowTag(workflowId: String) =
+    boundedIdentityTag("folder-move-workflow", workflowId)
+internal fun workflowRunTag(workflowId: String) = boundedIdentityTag("workflow-run", workflowId)
+internal fun workflowDebugTag(workflowId: String) = boundedIdentityTag("workflow-debug", workflowId)
+internal fun folderDestinationTag(folderId: String) =
+    boundedIdentityTag("folder-destination", folderId)
+internal fun stepOperationTag(stepId: String, operation: String) =
+    boundedIdentityTag("step", stepId, operation)
+
+internal fun boundedIdentityTag(
+    prefix: String,
+    identity: String,
+    suffix: String? = null,
+): String {
+    val direct = listOfNotNull(prefix, identity, suffix).joinToString("-")
+    if (direct.toByteArray(StandardCharsets.UTF_8).size <= MAX_DYNAMIC_TEST_TAG_BYTES) {
+        return direct
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(identity.toByteArray(StandardCharsets.UTF_8))
+    val encoded = buildString(digest.size * 2) {
+        digest.forEach { byte ->
+            val value = byte.toInt() and 0xff
+            append(HEX_DIGITS[value ushr 4])
+            append(HEX_DIGITS[value and 0x0f])
+        }
+    }
+    return listOfNotNull(prefix, "sha256", encoded, suffix).joinToString("-")
+}
+
+private const val MAX_DYNAMIC_TEST_TAG_BYTES = 256
+private const val HEX_DIGITS = "0123456789abcdef"
 
 @Composable
 private fun ScheduleRecurrence.localizedLabel(): String = stringResource(
@@ -7602,7 +7721,7 @@ internal fun PreflightReportDialog(
                     report.coordinateIssues.forEach { issue ->
                         val location = workflow.steps.uniqueRunLocationTo(issue.stepId)
                             ?.localizedName()
-                            ?: issue.stepId
+                            ?: stringResource(R.string.workflow_step_type_unknown)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 stringResource(
@@ -7633,7 +7752,7 @@ internal fun PreflightReportDialog(
                     report.imageTemplateIssues.forEach { issue ->
                         val location = workflow.steps.uniqueRunLocationTo(issue.stepId)
                             ?.localizedName()
-                            ?: issue.stepId
+                            ?: stringResource(R.string.workflow_step_type_unknown)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 stringResource(
@@ -7716,7 +7835,7 @@ internal fun PreflightReportDialog(
                             }
                         }
                         val location = workflow.steps.uniqueRunLocationTo(check.use.stepId)?.localizedName()
-                            ?: check.use.stepId
+                            ?: stringResource(R.string.workflow_step_type_unknown)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 stringResource(
@@ -7941,7 +8060,6 @@ internal fun RunRecordDetailsDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(stringResource(R.string.run_history_detail_status, record.status.localizedName()))
-                Text(stringResource(R.string.run_history_detail_workflow_id, record.workflowId))
                 Text(
                     stringResource(
                         R.string.run_history_detail_started,
@@ -7953,7 +8071,8 @@ internal fun RunRecordDetailsDialog(
                     Text(
                         stringResource(
                             R.string.run_history_detail_failed_step,
-                            record.failedStepLocation?.localizedName() ?: it,
+                            record.failedStepLocation?.localizedName()
+                                ?: stringResource(R.string.workflow_step_type_unknown),
                         ),
                     )
                 }
@@ -7970,7 +8089,8 @@ internal fun RunRecordDetailsDialog(
                             pluralStringResource(
                                 R.plurals.execution_diagnostic_row,
                                 diagnostic.attemptCount,
-                                diagnostic.location?.localizedName() ?: diagnostic.stepId,
+                                diagnostic.location?.localizedName()
+                                    ?: stringResource(R.string.workflow_step_type_unknown),
                                 diagnostic.outcome.localizedName(),
                                 diagnostic.durationMillis,
                                 diagnostic.attemptCount,
@@ -7982,7 +8102,8 @@ internal fun RunRecordDetailsDialog(
                                 Text(
                                     stringResource(
                                         R.string.execution_diagnostic_failed_step,
-                                        diagnostic.failedStepLocation?.localizedName() ?: failedStepId,
+                                        diagnostic.failedStepLocation?.localizedName()
+                                            ?: stringResource(R.string.workflow_step_type_unknown),
                                     ),
                                     fontSize = 12.sp,
                                 )
@@ -8073,7 +8194,8 @@ private fun RunRecordRow(record: RunRecord) {
                     record.failedStepId?.let {
                         context.getString(
                             R.string.run_failure_with_step,
-                            record.failedStepLocation?.localizedName(context) ?: it,
+                            record.failedStepLocation?.localizedName(context)
+                                ?: context.getString(R.string.workflow_step_type_unknown),
                             failureMessage,
                         )
                     } ?: failureMessage,
@@ -8142,7 +8264,8 @@ private fun RunResult.localizedMessage(
     RunResult.Cancelled -> context.getString(R.string.run_cancelled)
     is RunResult.Failed -> context.getString(
         R.string.run_step_failed,
-        failedStepLocation?.localizedName(context) ?: stepId,
+        failedStepLocation?.localizedName(context)
+            ?: context.getString(R.string.workflow_step_type_unknown),
         error.localizedMessage(context),
     )
 }
@@ -8155,7 +8278,7 @@ private fun RunStepLocation.localizedName(): String = segments.flatMap { segment
     }
 }.joinToString(" › ")
 
-private fun RunStepLocation.localizedName(context: Context): String = segments.flatMap { segment ->
+internal fun RunStepLocation.localizedName(context: Context): String = segments.flatMap { segment ->
     buildList {
         add(context.getString(R.string.workflow_step_position, segment.index + 1))
         segment.branch?.let { branch ->

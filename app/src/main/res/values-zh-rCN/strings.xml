@@ -76,10 +76,11 @@
     <string name="image_click_preflight_supported">截图识别：支持</string>
     <string name="image_click_preflight_unsupported">截图识别：需要 Android 11 或更高版本</string>
     <string name="loading_workflows">正在加载工作流……</string>
-    <string name="workflows_recovered_from_backup">工作流文件已损坏，已恢复上一个有效备份。</string>
+    <string name="workflows_recovered_from_backup">工作流主文件已损坏，应用正在使用上一个有效备份；保存一次更改可修复主文件。</string>
     <string name="workflows_corrupt">无法读取工作流数据。损坏的文件已保留，应用不会自动覆盖它们。</string>
     <string name="workflows_unsupported_version">工作流数据由较新的应用版本创建，已保留且不会被覆盖。</string>
     <string name="schedule_storage_corrupt">无法读取计划数据。损坏的文件已保留，应用不会自动覆盖它。</string>
+    <string name="schedule_reconciliation_failed">已保存的提醒仍会显示，但未能完全恢复 Android 计划任务。请重新打开应用，或重新安排受影响的工作流。</string>
     <string name="run_history_storage_corrupt">无法读取运行历史。损坏的文件已保留，应用不会自动覆盖它。如需重新开始，请清除运行历史。</string>
     <string name="run_history_newer_read_only">运行历史包含由较新应用版本创建的数据。你可以在此查看，但新的运行不会覆盖它。如需重新开始，请清除运行历史。</string>
     <string name="schedule_notification_missed">无法显示计划提醒。请检查通知权限后重新安排。</string>
@@ -289,7 +290,7 @@
     <string name="accessibility_disclosure_title">允许自动化访问？</string>
     <string name="accessibility_disclosure_observation">启用后，AI Index Finger 会读取屏幕上可见的文本、描述、视图标识和应用名称，以便你检查元素并运行自己创建的工作流。</string>
     <string name="accessibility_disclosure_actions">运行工作流时，应用可以点击、滑动、输入文本、使用系统导航，还可临时替换剪贴板内容进行粘贴；若可读取的剪贴板未再次变化，之后会恢复原内容。若 Android 隐藏当前剪贴板，粘贴会失败且不会替换内容。</string>
-    <string name="accessibility_disclosure_privacy">观察到的界面数据和运行历史仅保存在此设备上。应用没有网络权限，不会向外发送这些数据。你可以随时在 Android 设置中关闭此服务。</string>
+    <string name="accessibility_disclosure_privacy">观察到的界面数据和运行历史仅保存在此设备上。应用不申请 Android 的 INTERNET 联网权限，也不会向外发送这些数据。你可以随时在 Android 设置中关闭此服务。</string>
     <string name="global_action">全局操作</string>
     <string name="repeat_settings">重复设置</string>
     <string name="condition_settings">条件设置</string>
@@ -815,8 +816,8 @@
     <string name="run_already_running">已有其他工作流正在运行</string>
     <string name="run_cancelled">工作流已停止</string>
     <string name="run_cancelled_controls_unavailable">工作流已停止，因为“停止”和“调试”通知已不可用。再次运行前请启用通知。</string>
-    <string name="run_step_failed">步骤 %1$s 失败：%2$s</string>
-    <string name="run_failure_with_step">步骤 %1$s：%2$s</string>
+    <string name="run_step_failed">%1$s 失败：%2$s</string>
+    <string name="run_failure_with_step">%1$s：%2$s</string>
     <string name="run_failure_details">详情：%1$s</string>
     <string name="run_failure_unknown">发生未知的工作流错误</string>
     <string name="run_status_completed">已完成</string>
@@ -837,7 +838,6 @@
     <string name="run_history_clear_title">清除运行历史？</string>
     <string name="run_history_clear_message">所有本地执行记录都将被永久删除。</string>
     <string name="run_history_detail_status">状态：%1$s</string>
-    <string name="run_history_detail_workflow_id">工作流 ID：%1$s</string>
     <string name="run_history_detail_started">开始时间：%1$s</string>
     <string name="run_history_detail_duration">持续时间：%1$d 毫秒</string>
     <string name="run_history_detail_failed_step">失败步骤：%1$s</string>

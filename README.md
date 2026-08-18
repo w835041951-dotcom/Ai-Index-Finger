@@ -1,6 +1,6 @@
 # AI Index Finger
 
-AI Index Finger 是一款本地、由用户主动控制的 Android 工作流自动化工具。它使用无障碍服务执行用户创建的点击、输入、滑动、元素读取、条件分支和有限循环；应用没有网络权限。
+AI Index Finger 是一款本地、由用户主动控制的 Android 工作流自动化工具。它使用无障碍服务执行用户创建的点击、输入、滑动、元素读取、条件分支和有限循环；应用不申请 Android `INTERNET` 联网权限。
 
 ## 使用教程
 
@@ -17,14 +17,14 @@ Need an English quickstart?
 ## 当前版本
 
 - Android 8.0 / API 26 及以上
-- 当前测试版本：`0.33.0-beta.10`
+- 当前测试版本：`0.33.0-beta.11`
 - [GitHub Releases](https://github.com/w835041951-dotcom/Ai-Index-Finger/releases)
 
 GitHub Release 中的 debug APK 用于测试和侧载。仓库尚未配置正式发布签名，AAB 不是可直接上传 Google Play 的生产候选。
 
 ## 隐私边界
 
-- 不请求网络权限，不包含遥测或云同步。
+- 不申请 Android `INTERNET` 联网权限，不包含遥测或云同步，不向外传输工作流数据。
 - 工作流、运行历史和观察到的界面信息保存在本机。
 - 自动化只在用户主动运行或调试工作流后执行。
 - 调度功能发送本地提醒，不会静默执行自动化。

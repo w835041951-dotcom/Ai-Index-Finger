@@ -32,11 +32,11 @@ class LocalizedResourcesTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
 
         assertEquals(
-            "The workflow file was damaged. The previous valid backup has been restored.",
+            "The workflow file was damaged. The app is using the previous valid backup; save a change to repair the main file.",
             context.forLocale(Locale.US).getString(R.string.workflows_recovered_from_backup),
         )
         assertEquals(
-            "工作流文件已损坏，已恢复上一个有效备份。",
+            "工作流主文件已损坏，应用正在使用上一个有效备份；保存一次更改可修复主文件。",
             context.forLocale(Locale.SIMPLIFIED_CHINESE)
                 .getString(R.string.workflows_recovered_from_backup),
         )

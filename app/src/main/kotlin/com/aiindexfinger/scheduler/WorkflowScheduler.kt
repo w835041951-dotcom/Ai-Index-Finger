@@ -4,21 +4,29 @@ import android.content.Context
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.await
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.ValidationIssue
 import com.aiindexfinger.model.readinessIssues
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.ZoneId
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 internal class WorkflowScheduleValidationException(
     val issue: ValidationIssue,
 ) : IllegalArgumentException(issue.code.name)
+
+internal class ScheduleWorkOperationException(cause: Throwable) :
+    IllegalStateException("Android scheduling operation failed", cause)
 
 internal enum class ScheduleWorkOrigin {
     External,
@@ -70,64 +78,43 @@ class WorkflowScheduler(
         )
     }
 
-    internal suspend fun completeOccurrence(
+    internal suspend fun deliverOccurrence(
         workflowId: String,
         expectedAtMillis: Long,
         origin: ScheduleWorkOrigin = ScheduleWorkOrigin.External,
         expectedOccurrenceId: String? = null,
-    ) = SCHEDULER_MUTEX.withLock {
-            val previous = store.load().firstOrNull { it.workflowId == workflowId }
-            val completion = store.completeOccurrence(
-                workflowId,
-                expectedAtMillis,
-                currentTimeMillis(),
-                currentZoneId(),
-                expectedOccurrenceId,
-                UUID.randomUUID().toString(),
-            )
-            completion.nextSchedule?.let { next ->
-                try {
-                    enqueue(next, existingWorkPolicy(origin))
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    restoreSchedule(previous, error)
-                    throw error
-                }
-            }
-            completion
-        }
-
-    internal suspend fun missOccurrence(
-        workflowId: String,
-        expectedAtMillis: Long,
-        origin: ScheduleWorkOrigin = ScheduleWorkOrigin.External,
-        expectedOccurrenceId: String? = null,
-    ) = SCHEDULER_MUTEX.withLock {
-            val previous = store.load().firstOrNull { it.workflowId == workflowId }
-            val completion = store.missOccurrence(
-                workflowId,
-                expectedAtMillis,
-                currentTimeMillis(),
-                currentZoneId(),
-                expectedOccurrenceId,
-                UUID.randomUUID().toString(),
-            )
-            completion.nextSchedule?.let { next ->
-                try {
-                    enqueue(next, existingWorkPolicy(origin))
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    restoreSchedule(previous, error)
-                    throw error
-                }
-            }
-            completion
-        }
-
-    internal fun isPendingOccurrence(workflowId: String, expectedAtMillis: Long): Boolean =
-        store.isPendingOccurrence(workflowId, expectedAtMillis)
+        deliverNotification: () -> Boolean,
+    ): ScheduleOccurrenceDelivery = SCHEDULER_MUTEX.withLock {
+        deliverScheduledOccurrence(
+            workflowId = workflowId,
+            expectedAtMillis = expectedAtMillis,
+            expectedOccurrenceId = expectedOccurrenceId,
+            loadSchedules = store::load,
+            deliverNotification = deliverNotification,
+            completeOccurrence = {
+                store.completeOccurrence(
+                    workflowId,
+                    expectedAtMillis,
+                    currentTimeMillis(),
+                    currentZoneId(),
+                    expectedOccurrenceId,
+                    UUID.randomUUID().toString(),
+                )
+            },
+            missOccurrence = {
+                store.missOccurrence(
+                    workflowId,
+                    expectedAtMillis,
+                    currentTimeMillis(),
+                    currentZoneId(),
+                    expectedOccurrenceId,
+                    UUID.randomUUID().toString(),
+                )
+            },
+            enqueue = { next -> enqueue(next, existingWorkPolicy(origin)) },
+            restoreSchedule = store::put,
+        )
+    }
 
     internal suspend fun discardOccurrence(
         workflowId: String,
@@ -141,7 +128,7 @@ class WorkflowScheduler(
         SCHEDULER_MUTEX.withLock {
         val schedule = store.load().firstOrNull { it.workflowId == workflowId }
         if (schedule?.status == ScheduleStatus.Missed) {
-            workManager.cancelUniqueWork(workName(workflowId)).await()
+            workManager.cancelUniqueWork(scheduleWorkName(workflowId)).await()
         }
         store.consumeMissedOccurrence(workflowId)
     }
@@ -151,19 +138,36 @@ class WorkflowScheduler(
         workPolicy: ExistingWorkPolicy = ExistingWorkPolicy.REPLACE,
         delayMillis: Long = scheduleDelayMillis(schedule.scheduledAtMillis, currentTimeMillis()),
     ) {
-        val input = Data.Builder()
-            .putString(ScheduleNotificationWorker.KEY_WORKFLOW_ID, schedule.workflowId)
-            .putLong(ScheduleNotificationWorker.KEY_SCHEDULED_AT_MILLIS, schedule.scheduledAtMillis)
-            .apply {
-                schedule.occurrenceId?.let { putString(ScheduleNotificationWorker.KEY_OCCURRENCE_ID, it) }
-            }
-            .build()
+        val requestId = scheduleWorkRequestId(schedule)
+        val input = scheduleWorkInput(schedule)
         val request = OneTimeWorkRequestBuilder<ScheduleNotificationWorker>()
+            .setId(requestId)
             .setInitialDelay(delayMillis, TimeUnit.MILLISECONDS)
             .setInputData(input)
-            .addTag(workName(schedule.workflowId))
+            .addTag(scheduleWorkName(schedule.workflowId))
             .build()
-        workManager.enqueueUniqueWork(workName(schedule.workflowId), workPolicy, request).await()
+        try {
+            enqueueScheduledWorkIfMissing(
+                requestId = requestId,
+                workExists = { id ->
+                    scheduledWorkNeedsNoEnqueue(
+                        workManager.getWorkInfoByIdFlow(id).first()?.state,
+                        workPolicy,
+                    )
+                },
+                enqueue = {
+                    workManager.enqueueUniqueWork(
+                        scheduleWorkName(schedule.workflowId),
+                        workPolicy,
+                        request,
+                    ).await()
+                },
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            throw ScheduleWorkOperationException(error)
+        }
     }
 
     suspend fun cancel(workflowId: String): List<WorkflowSchedule> = SCHEDULER_MUTEX.withLock {
@@ -172,7 +176,7 @@ class WorkflowScheduler(
             loadSchedules = store::load,
             persistSchedule = store::put,
             removeSchedule = store::remove,
-            cancelWork = { workManager.cancelUniqueWork(workName(workflowId)).await() },
+            cancelWork = { workManager.cancelUniqueWork(scheduleWorkName(workflowId)).await() },
         )
     }
 
@@ -181,7 +185,7 @@ class WorkflowScheduler(
             .asSequence()
             .map { it.workflowId }
             .filterNot { it in workflowIds }
-            .forEach { workManager.cancelUniqueWork(workName(it)).await() }
+            .forEach { workManager.cancelUniqueWork(scheduleWorkName(it)).await() }
         var schedules = store.removeMissingWorkflows(workflowIds)
         schedules.filter { it.status == ScheduleStatus.Pending }.forEach { schedule ->
             if (schedule.scheduledAtMillis > currentTimeMillis()) {
@@ -214,6 +218,11 @@ class WorkflowScheduler(
         store.load()
     }
 
+    internal suspend fun resolveWorkRequest(requestId: UUID): ScheduleWorkTarget? =
+        SCHEDULER_MUTEX.withLock {
+            resolveScheduleWorkTarget(store.load(), requestId)
+        }
+
     private fun restoreSchedule(previous: WorkflowSchedule?, originalError: Exception) {
         if (previous == null) return
         try {
@@ -223,12 +232,12 @@ class WorkflowScheduler(
         }
     }
 
-    private fun workName(workflowId: String) = "workflow-schedule-$workflowId"
-
     private companion object {
         val SCHEDULER_MUTEX = Mutex()
     }
 }
+
+internal fun scheduleWorkName(workflowId: String): String = "workflow-schedule-$workflowId"
 
 internal fun scheduleDelayMillis(targetEpochMillis: Long, currentEpochMillis: Long): Long {
     if (targetEpochMillis <= currentEpochMillis) {
@@ -241,7 +250,100 @@ internal fun scheduleDelayMillis(targetEpochMillis: Long, currentEpochMillis: Lo
     return delayMillis
 }
 
+internal fun scheduleWorkRequestId(schedule: WorkflowSchedule): UUID = scheduleWorkRequestId(
+    workflowId = schedule.workflowId,
+    scheduledAtMillis = schedule.scheduledAtMillis,
+    occurrenceId = schedule.occurrenceId,
+)
+
+private fun scheduleWorkRequestId(
+    workflowId: String,
+    scheduledAtMillis: Long,
+    occurrenceId: String?,
+): UUID {
+    val identity = buildString {
+        append("aiindexfinger:schedule:v1\n")
+        append(workflowId.length).append(':').append(workflowId).append('\n')
+        append(scheduledAtMillis).append('\n')
+        append(occurrenceId?.length ?: -1).append(':').append(occurrenceId.orEmpty())
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(identity.toByteArray(StandardCharsets.UTF_8))
+    digest[6] = ((digest[6].toInt() and 0x0f) or 0x50).toByte()
+    digest[8] = ((digest[8].toInt() and 0x3f) or 0x80).toByte()
+    return ByteBuffer.wrap(digest).let { bytes -> UUID(bytes.long, bytes.long) }
+}
+
+internal fun workflowIdForWorkInput(workflowId: String): String? = workflowId.takeIf {
+    it.toByteArray(StandardCharsets.UTF_8).size <= MAX_WORKFLOW_ID_INPUT_BYTES
+}
+
+internal fun scheduleWorkInput(schedule: WorkflowSchedule): Data = Data.Builder()
+    .putLong(ScheduleNotificationWorker.KEY_SCHEDULED_AT_MILLIS, schedule.scheduledAtMillis)
+    .apply {
+        workflowIdForWorkInput(schedule.workflowId)?.let {
+            putString(ScheduleNotificationWorker.KEY_WORKFLOW_ID, it)
+        }
+        schedule.occurrenceId?.let {
+            putString(ScheduleNotificationWorker.KEY_OCCURRENCE_ID, it)
+        }
+    }
+    .build()
+
+internal data class ScheduleWorkTarget(
+    val workflowId: String,
+    val scheduledAtMillis: Long,
+    val occurrenceId: String?,
+)
+
+internal fun resolveScheduleWorkTarget(
+    schedules: List<WorkflowSchedule>,
+    requestId: UUID,
+): ScheduleWorkTarget? = schedules.firstNotNullOfOrNull { schedule ->
+    when {
+        scheduleWorkRequestId(schedule) == requestId -> ScheduleWorkTarget(
+            schedule.workflowId,
+            schedule.scheduledAtMillis,
+            schedule.occurrenceId,
+        )
+        schedule.previousScheduledAtMillis != null && scheduleWorkRequestId(
+            schedule.workflowId,
+            schedule.previousScheduledAtMillis,
+            schedule.previousOccurrenceId,
+        ) == requestId -> ScheduleWorkTarget(
+            schedule.workflowId,
+            schedule.previousScheduledAtMillis,
+            schedule.previousOccurrenceId,
+        )
+        else -> null
+    }
+}
+
+internal suspend fun enqueueScheduledWorkIfMissing(
+    requestId: UUID,
+    workExists: suspend (UUID) -> Boolean,
+    enqueue: suspend () -> Unit,
+) {
+    if (!workExists(requestId)) enqueue()
+}
+
+internal fun scheduledWorkNeedsNoEnqueue(
+    state: WorkInfo.State?,
+    workPolicy: ExistingWorkPolicy,
+): Boolean = when (state) {
+    WorkInfo.State.ENQUEUED,
+    WorkInfo.State.RUNNING,
+    WorkInfo.State.BLOCKED,
+    -> true
+    WorkInfo.State.SUCCEEDED -> workPolicy != ExistingWorkPolicy.REPLACE
+    WorkInfo.State.FAILED,
+    WorkInfo.State.CANCELLED,
+    null,
+    -> false
+}
+
 internal val MAX_SCHEDULE_DELAY_MILLIS: Long = TimeUnit.DAYS.toMillis(365)
+private const val MAX_WORKFLOW_ID_INPUT_BYTES = 4 * 1024
 
 internal suspend fun persistScheduledWork(
     schedule: WorkflowSchedule,
@@ -300,4 +402,56 @@ internal suspend fun cancelScheduledWork(
     }
     storageFailure?.let { throw it }
     return requireNotNull(schedules)
+}
+
+internal data class ScheduleOccurrenceDelivery(
+    val accepted: Boolean,
+    val notificationDelivered: Boolean,
+)
+
+internal suspend fun deliverScheduledOccurrence(
+    workflowId: String,
+    expectedAtMillis: Long,
+    expectedOccurrenceId: String?,
+    loadSchedules: () -> List<WorkflowSchedule>,
+    deliverNotification: () -> Boolean,
+    completeOccurrence: () -> ScheduleCompletion,
+    missOccurrence: () -> ScheduleCompletion,
+    enqueue: suspend (WorkflowSchedule) -> Unit,
+    restoreSchedule: (WorkflowSchedule) -> List<WorkflowSchedule>,
+): ScheduleOccurrenceDelivery {
+    val current = loadSchedules().firstOrNull { it.workflowId == workflowId }
+        ?: return ScheduleOccurrenceDelivery(false, false)
+    val previous = current.takeIf { schedule ->
+        schedule.scheduledAtMillis == expectedAtMillis &&
+            schedule.occurrenceId == expectedOccurrenceId &&
+            schedule.status == ScheduleStatus.Pending
+    }
+    if (previous == null) {
+        if (current.status == ScheduleStatus.Pending &&
+            current.previousScheduledAtMillis == expectedAtMillis &&
+            current.previousOccurrenceId == expectedOccurrenceId
+        ) {
+            enqueue(current)
+        }
+        return ScheduleOccurrenceDelivery(false, false)
+    }
+    val notificationDelivered = deliverNotification()
+    val completion = if (notificationDelivered) completeOccurrence() else missOccurrence()
+    if (!completion.accepted) return ScheduleOccurrenceDelivery(false, notificationDelivered)
+    completion.nextSchedule?.let { next ->
+        try {
+            enqueue(next)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            try {
+                restoreSchedule(previous)
+            } catch (restoreError: Exception) {
+                error.addSuppressed(restoreError)
+            }
+            throw error
+        }
+    }
+    return ScheduleOccurrenceDelivery(true, notificationDelivered)
 }

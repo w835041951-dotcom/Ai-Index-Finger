@@ -36,6 +36,7 @@ import androidx.annotation.RequiresApi
 import com.aiindexfinger.FloatingWorkflowEditorActivity
 import com.aiindexfinger.MainActivity
 import com.aiindexfinger.R
+import com.aiindexfinger.localizedName
 import com.aiindexfinger.executor.AutomationDriver
 import com.aiindexfinger.executor.ImageClickResult
 import com.aiindexfinger.executor.GestureActionResult
@@ -46,9 +47,11 @@ import com.aiindexfinger.executor.RunState
 import com.aiindexfinger.executor.WorkflowExecutor
 import com.aiindexfinger.data.RunHistoryStore
 import com.aiindexfinger.data.RunRecord
+import com.aiindexfinger.data.RunStepLocation
 import com.aiindexfinger.data.RunStatus
 import com.aiindexfinger.data.toRunRecord
 import com.aiindexfinger.data.withControlNotificationCancellation
+import com.aiindexfinger.data.uniqueRunLocationTo
 import com.aiindexfinger.model.AncestorSelector
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
@@ -351,6 +354,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var screenCaptureTimeoutJob: Job? = null
     private var screenCaptureRequestId = 0L
     private var runningWorkflowName: String? = null
+    private var runningWorkflow: Workflow? = null
     private var lastExternalAppPackage: String? = null
     private var homePackages: Set<String> = emptySet()
     private var elementMonitorView: View? = null
@@ -417,10 +421,15 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                     is RunState.Paused -> state.stepId
                     RunState.Idle -> null
                 }
-                currentStepId.value = stepId
+                val stepLocation = stepId?.let { id ->
+                    runningWorkflow?.let { workflow -> runningStepLocation(workflow, id) }
+                }
+                currentStepLocation.value = stepLocation
                 debugPaused.value = state is RunState.Paused
                 runningWorkflowName?.let { name ->
-                    if (!showRunningNotification(name, stepId)) stopWorkflow()
+                    val stepPosition = stepLocation
+                        ?.localizedName(this@AutomationAccessibilityService)
+                    if (!showRunningNotification(name, stepPosition)) stopWorkflow()
                 }
             }
         }
@@ -522,24 +531,32 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             val sourceInfo = event.source
             val source = sourceInfo?.toDescriptor()
                 ?.takeIf { it.packageName == monitoredTargetPackage }
-            if (event.isPassword || sourceInfo?.isPassword == true) {
-                recordedClickSession.discardActiveTextBurst()
-                recordClickIssue(event, RecordingIssueReason.SensitiveText)
-            } else if (source != null) {
-                val resolved = recordingTargetResolver.resolve(
-                    source = source,
+            val resolved = source?.let {
+                recordingTargetResolver.resolve(
+                    source = it,
                     packageName = packageName,
                     windowId = event.windowId,
                     eventTimeMillis = event.eventTime,
                 )
-                val selector = resolved?.selector
+            }
+            val selector = resolved?.selector
+            val key = selector?.let {
+                listOf(packageName, event.windowId, it).joinToString("|")
+            }
+            if (event.isPassword || sourceInfo?.isPassword == true) {
+                if (key == null) {
+                    recordedClickSession.discardActiveTextBurst()
+                } else {
+                    recordedClickSession.discardTextBurst(key)
+                }
+                recordClickIssue(event, RecordingIssueReason.SensitiveText)
+            } else if (source != null) {
                 val text = sourceInfo?.text?.toString()
                     ?: event.text.lastOrNull()?.toString()
                     ?: "".takeIf { event.removedCount > 0 }
                 if (selector != null && text != null) {
-                    val key = listOf(packageName, event.windowId, selector).joinToString("|")
                     recordedClickSession.recordOrReplaceText(
-                        key,
+                        requireNotNull(key),
                         Step.InputText(
                             id = UUID.randomUUID().toString(),
                             selector = selector,
@@ -684,7 +701,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         serviceScope.cancel()
         if (ownedSharedState) {
             cancelRunningNotification()
-            currentStepId.value = null
+            currentStepLocation.value = null
             debugPaused.value = false
             runningWorkflowId.value = null
             workflowStartedAtMillis.value = null
@@ -714,7 +731,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private fun resetVolatileSharedStateAfterReplacement() {
         stopRecordingForeground()
         cancelRunningNotification()
-        currentStepId.value = null
+        currentStepLocation.value = null
         debugPaused.value = false
         runningWorkflowId.value = null
         workflowStartedAtMillis.value = null
@@ -734,11 +751,14 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         if (!workflow.isReadyToRun()) return WorkflowStartResult.NotReady
         if (workflowJobOwnership.isOccupied()) return WorkflowStartResult.AlreadyRunning
         if (!isCurrentServiceInstance()) return WorkflowStartResult.ServiceUnavailable
+        currentStepLocation.value = null
+        debugPaused.value = false
         if (!showRunningNotification(workflow.name)) return WorkflowStartResult.ControlsUnavailable
         val startedAtMillis = System.currentTimeMillis()
         runningWorkflowId.value = workflow.id
         workflowStartedAtMillis.value = startedAtMillis
         runningWorkflowName = workflow.name
+        runningWorkflow = workflow
         var controlNotificationUnavailable = false
         val keepResultNotification = AtomicBoolean(false)
         lateinit var pendingJob: Job
@@ -796,10 +816,13 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     ) {
         if (!workflowJobOwnership.release(completedJob)) return
         controlWatchdog.cancel()
+        runningWorkflowName = null
+        runningWorkflow = null
         if (isCurrentServiceInstance()) {
+            currentStepLocation.value = null
+            debugPaused.value = false
             runningWorkflowId.value = null
             workflowStartedAtMillis.value = null
-            runningWorkflowName = null
             if (!keepResultNotification) cancelRunningNotification()
         }
     }
@@ -2200,7 +2223,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         )
     }
 
-    private fun showRunningNotification(workflowName: String, stepId: String? = null): Boolean {
+    private fun showRunningNotification(workflowName: String, stepPosition: String? = null): Boolean {
         if (runningNotificationReadiness(this) != ScheduleNotificationReadiness.Ready) return false
         val stopPendingIntent = notificationCommandPendingIntent(NotificationCommand.StopWorkflow)
         val nextPendingIntent = notificationCommandPendingIntent(NotificationCommand.AdvanceWorkflow)
@@ -2217,7 +2240,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(getString(R.string.running_notification_title, workflowName))
             .setContentText(
-                stepId?.let { getString(R.string.running_notification_step, it) }
+                stepPosition?.let { getString(R.string.running_notification_step, it) }
                     ?: getString(R.string.running_notification_preparing),
             )
             .setContentIntent(openAppPendingIntent)
@@ -2242,19 +2265,21 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 ).build(),
             )
             .build()
-        return runCatching {
+        return androidOperationSucceeded {
             notificationManager.notify(RUNNING_NOTIFICATION_ID, notification)
-        }.isSuccess
+        }
     }
 
-    private fun runningControlNotificationIsAvailable(): Boolean = runCatching {
+    private fun runningControlNotificationIsAvailable(): Boolean = try {
         runningControlsAvailable(
             readiness = runningNotificationReadiness(this),
             notificationActive = notificationManager.activeNotifications.any { notification ->
                 notification.id == RUNNING_NOTIFICATION_ID
             },
         )
-    }.getOrDefault(false)
+    } catch (_: Exception) {
+        false
+    }
 
     private fun showWorkflowResultNotification(
         record: RunRecord,
@@ -2288,16 +2313,16 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             .setOnlyAlertOnce(true)
             .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
             .build()
-        return runCatching {
+        return androidOperationSucceeded {
             notificationManager.notify(RUNNING_NOTIFICATION_ID, notification)
-        }.isSuccess
+        }
     }
 
     private fun startRecordingForeground(
         targetPackage: String,
         recordedCount: Int? = null,
         issueCount: Int? = null,
-    ): Boolean = runCatching {
+    ): Boolean = androidOperationSucceeded {
         notificationManager.createNotificationChannel(
             NotificationChannel(
                 RECORDING_CHANNEL_ID,
@@ -2362,7 +2387,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         } else {
             startForeground(RECORDING_NOTIFICATION_ID, notification)
         }
-    }.isSuccess
+    }
 
     private fun notificationCommandPendingIntent(command: NotificationCommand): PendingIntent {
         val identity = notificationCommandIdentity(command)
@@ -2969,7 +2994,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 instance?.cancelPendingObservationCapture()
             },
         )
-        val currentStepId = MutableStateFlow<String?>(null)
+        val currentStepLocation = MutableStateFlow<RunStepLocation?>(null)
         val debugPaused = MutableStateFlow(false)
         val runningWorkflowId = MutableStateFlow<String?>(null)
         val workflowStartedAtMillis = MutableStateFlow<Long?>(null)
@@ -3026,6 +3051,16 @@ internal fun sanitizedRecordedText(
     text: String?,
     contentDescription: String?,
 ): Pair<String?, String?> = if (isPassword) null to null else text to contentDescription
+
+internal fun androidOperationSucceeded(operation: () -> Unit): Boolean = try {
+    operation()
+    true
+} catch (_: Exception) {
+    false
+}
+
+internal fun runningStepLocation(workflow: Workflow, stepId: String): RunStepLocation? =
+    workflow.steps.uniqueRunLocationTo(stepId)
 
 internal fun targetAppLaunchFlags(initialFlags: Int): Int =
     (initialFlags or Intent.FLAG_ACTIVITY_NEW_TASK) and Intent.FLAG_ACTIVITY_REORDER_TO_FRONT.inv()
@@ -3084,6 +3119,7 @@ internal class RecordedClickSession(private val capacity: Int) {
     private val actions = mutableListOf<RecordedAction>()
     private val issues = mutableListOf<RecordingIssue>()
     private val textActionIndexes = mutableMapOf<String, Int>()
+    private val actionTextKeys = mutableListOf<String?>()
     private var activeTextKey: String? = null
 
     val count: Int get() = actions.size
@@ -3098,6 +3134,7 @@ internal class RecordedClickSession(private val capacity: Int) {
         actions.clear()
         issues.clear()
         textActionIndexes.clear()
+        actionTextKeys.clear()
         activeTextKey = null
         recording = true
     }
@@ -3122,6 +3159,7 @@ internal class RecordedClickSession(private val capacity: Int) {
         if (actions.size >= capacity) return false
         textActionIndexes[key] = actions.size
         actions += RecordedAction.ExistingStep(step)
+        actionTextKeys += key
         return true
     }
 
@@ -3139,10 +3177,16 @@ internal class RecordedClickSession(private val capacity: Int) {
 
     fun discardActiveTextBurst() {
         val key = activeTextKey ?: return
+        discardTextBurst(key)
+    }
+
+    fun discardTextBurst(key: String) {
         val index = textActionIndexes.remove(key)
-        activeTextKey = null
+            ?: actionTextKeys.indexOfLast { it == key }.takeIf { it >= 0 }
+        if (activeTextKey == key) activeTextKey = null
         if (index != null) {
             actions.removeAt(index)
+            actionTextKeys.removeAt(index)
             textActionIndexes.replaceAll { _, existingIndex ->
                 if (existingIndex > index) existingIndex - 1 else existingIndex
             }
@@ -3152,6 +3196,7 @@ internal class RecordedClickSession(private val capacity: Int) {
     private fun recordAction(action: RecordedAction): Boolean {
         if (!recording || actions.size >= capacity) return false
         actions += action
+        actionTextKeys += null
         return true
     }
 
@@ -3168,6 +3213,7 @@ internal class RecordedClickSession(private val capacity: Int) {
             actions.clear()
             issues.clear()
             textActionIndexes.clear()
+            actionTextKeys.clear()
             activeTextKey = null
         }
     }
@@ -3177,6 +3223,7 @@ internal class RecordedClickSession(private val capacity: Int) {
         actions.clear()
         issues.clear()
         textActionIndexes.clear()
+        actionTextKeys.clear()
         activeTextKey = null
     }
 }

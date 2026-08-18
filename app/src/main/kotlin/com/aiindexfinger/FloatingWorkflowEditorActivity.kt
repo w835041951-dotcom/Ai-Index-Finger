@@ -71,6 +71,7 @@ import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.effectiveState
 import java.lang.ref.WeakReference
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -323,11 +324,8 @@ private fun FloatingWorkflowEditor(
                             saving = true
                             saveError = null
                             scope.launch {
-                                runCatching {
-                                    withContext(Dispatchers.IO) {
-                                        application.commitWorkflow(expected, candidate)
-                                    }
-                                }.onSuccess { commit ->
+                                try {
+                                    val commit = application.commitWorkflow(expected, candidate)
                                     if (commit.cleanupError == null) {
                                         selectedWorkflow = null
                                         persistedBaseline = null
@@ -340,7 +338,9 @@ private fun FloatingWorkflowEditor(
                                             R.string.workflow_saved_schedule_cleanup_failed,
                                         )
                                     }
-                                }.onFailure { error ->
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (error: Exception) {
                                     saveError = application.getString(
                                         if (error is com.aiindexfinger.data.WorkflowEditConflictException) {
                                             R.string.workflow_edit_conflict
@@ -348,8 +348,9 @@ private fun FloatingWorkflowEditor(
                                             R.string.save_failed
                                         },
                                     )
+                                } finally {
+                                    saving = false
                                 }
-                                saving = false
                             }
                         }
                     },
@@ -519,4 +520,4 @@ private fun FloatingWorkflowPicker(
 
 internal const val FLOATING_EDITOR_NEW_TAG = "floating-editor-new"
 internal const val FLOATING_EDITOR_COLLAPSE_TAG = "floating-editor-collapse"
-internal fun floatingWorkflowTag(workflowId: String) = "floating-workflow-$workflowId"
+internal fun floatingWorkflowTag(workflowId: String) = boundedIdentityTag("floating-workflow", workflowId)

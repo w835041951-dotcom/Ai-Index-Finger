@@ -13,7 +13,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.Base64
 
 class WorkflowStore(context: Context) {
@@ -95,6 +94,7 @@ internal class WorkflowFileStore(
             return WorkflowLoadResult.UnsupportedVersion(primary.version)
         }
         if (primary is DecodeResult.Success) {
+            purgeStaleVersionDirectories(primary.library)
             return WorkflowLoadResult.Loaded(primary.library)
         }
 
@@ -163,16 +163,12 @@ internal class WorkflowFileStore(
                 snapshot(previous)
             }
         }
-        removedWorkflowIds.forEach { workflowId ->
-            check(versionDirectory(workflowId).deleteRecursively()) {
-                "Workflow version history could not be deleted"
-            }
-        }
         val sanitizedBackup = loadResult.library.takeIf { removedWorkflowIds.isNotEmpty() }?.copy(
             workflows = loadResult.workflows.filterNot { it.id in removedWorkflowIds },
             workflowFolderIds = loadResult.library.workflowFolderIds - removedWorkflowIds,
         )?.normalized()
         writeLibrary(normalizedLibrary, sanitizedBackup)
+        purgeStaleVersionDirectories(normalizedLibrary)
     }
 
     fun listVersions(workflowId: String): List<WorkflowVersion> = versionDirectory(workflowId)
@@ -217,6 +213,8 @@ internal class WorkflowFileStore(
         require(content.toByteArray(Charsets.UTF_8).size <= MAX_LIBRARY_BYTES) {
             "Workflow library is too large"
         }
+        val previousBackupContent = backupFile.takeIf { backupLibrary != null && it.exists() }
+            ?.readText()
         if (backupLibrary != null) {
             val backupContent = json.encodeToString(WorkflowLibrary.serializer(), backupLibrary)
             require(backupContent.toByteArray(Charsets.UTF_8).size <= MAX_LIBRARY_BYTES) {
@@ -227,9 +225,33 @@ internal class WorkflowFileStore(
                 backupContent,
             )
         } else if (decode(file) is DecodeResult.Success) {
-            Files.copy(file.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            AtomicFileWriter.write(backupFile, file.readText())
         }
-        AtomicFileWriter.write(file, content)
+        try {
+            AtomicFileWriter.write(file, content)
+        } catch (error: Throwable) {
+            if (backupLibrary != null) {
+                try {
+                    if (previousBackupContent == null) {
+                        Files.deleteIfExists(backupFile.toPath())
+                    } else {
+                        AtomicFileWriter.write(backupFile, previousBackupContent)
+                    }
+                } catch (restoreError: Throwable) {
+                    error.addSuppressed(restoreError)
+                }
+            }
+            throw error
+        }
+    }
+
+    private fun purgeStaleVersionDirectories(library: WorkflowLibrary) {
+        val retainedDirectories = library.workflows.mapTo(mutableSetOf()) { workflow ->
+            versionDirectory(workflow.id).name
+        }
+        versionsDirectory.listFiles { candidate -> candidate.isDirectory }.orEmpty()
+            .filterNot { it.name in retainedDirectories }
+            .forEach(File::deleteRecursively)
     }
 
     private fun snapshot(workflow: Workflow) {
@@ -269,9 +291,20 @@ internal class WorkflowFileStore(
 
     private fun decodeVersion(source: File): WorkflowVersion? {
         if (source.length() > MAX_VERSION_BYTES) return null
-        return runCatching {
-            json.decodeFromString(WorkflowVersion.serializer(), source.readText())
-        }.getOrNull()
+        return try {
+            val root = json.parseToJsonElement(source.readText()) as? JsonObject ?: return null
+            val workflowRoot = root["workflow"] as? JsonObject ?: return null
+            val schemaVersion = workflowRoot["schemaVersion"]?.jsonPrimitive?.intOrNull
+                ?: Workflow.CURRENT_SCHEMA_VERSION
+            if (schemaVersion > Workflow.CURRENT_SCHEMA_VERSION) return null
+            json.decodeFromJsonElement(WorkflowVersion.serializer(), root).takeIf { version ->
+                WorkflowValidator.structuralIssues(version.workflow).isEmpty()
+            }
+        } catch (_: StackOverflowError) {
+            null
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun versionTimestamp(versionId: String): Long = versionId.substringBefore('-').toLongOrNull() ?: Long.MIN_VALUE

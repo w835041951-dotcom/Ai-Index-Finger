@@ -151,6 +151,19 @@ class BilingualResourcesTest {
         }
     }
 
+    @Test
+    fun `privacy disclosure names the absent internet permission precisely`() {
+        val defaultDisclosure = strings(File("src/main/res/values/strings.xml"))
+            .getValue("accessibility_disclosure_privacy")
+        val chineseDisclosure = strings(File("src/main/res/values-zh-rCN/strings.xml"))
+            .getValue("accessibility_disclosure_privacy")
+
+        assertTrue(defaultDisclosure.contains("INTERNET"))
+        assertTrue(chineseDisclosure.contains("INTERNET"))
+        assertFalse(defaultDisclosure.contains("no network permission", ignoreCase = true))
+        assertFalse(chineseDisclosure.contains("没有网络权限"))
+    }
+
     private fun strings(file: File): Map<String, String> {
         val document = document(file)
         val strings = document.getElementsByTagName("string")
