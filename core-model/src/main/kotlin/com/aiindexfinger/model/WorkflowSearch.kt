@@ -21,13 +21,17 @@ private fun Step.addSearchTerms(terms: MutableList<String>) {
         is Step.Delay -> "wait delay 等待 延迟"
         is Step.GlobalAction -> "global ${action.name} 全局 操作"
         is Step.IfElse -> "if condition 判断 条件"
-        is Step.InputText -> variableName?.let { "input text variable 输入 文本 变量 $it" }
+        is Step.Label -> "label tag 标签 $name"
+        is Step.JumpIf -> "goto jump label 跳转 标签 $targetLabel"
+        is Step.InputText -> value?.let { "input text 输入 文本 ${it.searchableVariableNames()}" }
+            ?: variableName?.let { "input text variable 输入 文本 变量 $it" }
             ?: "input text 输入 文本"
         is Step.LaunchApp -> "launch app open 打开 应用 $packageName ${intentAction.orEmpty()}"
         is Step.LongClick -> "long click press 长按 元素"
         is Step.ReadNodeText -> "read node attribute ${attribute.name} 读取 属性 变量 $variableName"
         is Step.Repeat -> "repeat loop 循环"
         is Step.Scroll -> "scroll ${direction.name} 滚动"
+        is Step.ScrollUntil -> "scroll until ${direction.name} 滚动 直到"
         is Step.SetVariable -> "set variable define 变量 赋值 $name ${value.searchableVariableNames()}"
         is Step.Swipe -> "swipe gesture 滑动 手势"
         is Step.Tap -> "tap coordinate 点击 坐标"
@@ -50,11 +54,21 @@ private fun Step.addSearchTerms(terms: MutableList<String>) {
             condition.addSearchTerms(terms)
             (whenTrue + whenFalse).forEach { it.addSearchTerms(terms) }
         }
+        is Step.JumpIf -> condition?.addSearchTerms(terms)
         is Step.InputText -> selector.addSearchTerms(terms)
         is Step.LongClick -> selector.addSearchTerms(terms)
         is Step.ReadNodeText -> selector.addSearchTerms(terms)
         is Step.Repeat -> steps.forEach { it.addSearchTerms(terms) }
         is Step.Scroll -> selector.addSearchTerms(terms)
+        is Step.ScrollUntil -> {
+            selector.addSearchTerms(terms)
+            when (val stopCondition = stopCondition) {
+                is ScrollUntilStopCondition.NodeAppears -> stopCondition.selector.addSearchTerms(terms)
+                is ScrollUntilStopCondition.NodeDisappears -> stopCondition.selector.addSearchTerms(terms)
+                is ScrollUntilStopCondition.ConditionMet -> stopCondition.condition.addSearchTerms(terms)
+                else -> Unit
+            }
+        }
         is Step.WaitForNode -> selector.addSearchTerms(terms)
         else -> Unit
     }

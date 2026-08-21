@@ -1,6 +1,6 @@
 # AI Index Finger Workflow Tutorial (English)
 
-This guide helps you create and run your first workflow in AI Index Finger.
+This guide applies to `0.33.0-beta.12` and helps you create, debug, and run workflows in AI Index Finger.
 
 ## 1. Before You Start
 
@@ -50,20 +50,43 @@ If selector uniqueness is ambiguous, adjust conditions before running repeatedly
 - Keep workflows ready-to-run (no validation issues) before scheduling.
 - If notification permission is blocked, open notification settings and retry.
 
-## 7. Troubleshooting Quick Checks
+## 7. Click by Screenshot
+
+Use **Click by screenshot** only when the target control has no stable accessibility selector. It requires Android 11 or newer and searches only inside visible windows that belong to the selected target app.
+
+1. Capture the target app, draw a recognition area, and choose a click point inside it.
+2. The saved template keeps its original crop when possible. A long edge above 1024 px is scaled down; a PNG over 192 KiB is converted to grayscale, then scaled down in 85% steps until it fits. The final template is the only image saved. The selected click point is remapped to the final template.
+3. Default matching is **Best match**. It chooses one highest-scoring candidate; equal scores resolve from top to bottom, then left to right. The minimum similarity remains 92% by default and exact 1:1 scale remains the default.
+4. Enable **Click all matches** only for a deliberate batch operation. Candidates come from one initial screenshot, run from top to bottom and left to right, default to at most 20 clicks, and never exceed 100. The default interval is 200 ms.
+
+Before every click, the app rechecks the target package, display geometry, target-window set, template footprint, and gesture coordinates. If a click, window check, or timeout fails after an earlier click succeeded, the step records the completed count and does not retry the whole image step. A **Continue** policy preserves this as a warning in Run history.
+
+## 8. Troubleshooting Quick Checks
 
 - Service disabled: enable accessibility service.
 - Capture unavailable: requires Android 11+ for visual capture features.
 - Workflow cannot run: check readiness issues and failed step details.
 - Unexpected target screen: reopen target app and rerun preflight checks.
 
-## 8. Privacy Notes
+## 9. Debug with Floating Controls
+
+Choose **Debug** from a Ready workflow on the Home screen. A floating debugger appears above the target app and pauses before the first step.
+
+- Drag the debugger by its title to move it. It snaps to the nearest screen edge.
+- Choose **Next** to execute the current step and pause before the following step, including steps inside branches and repeats.
+- Choose **Stop** to cancel the debug run without executing a currently paused step.
+- The panel temporarily hides while a step executes so it cannot intercept coordinate gestures or appear in image matching. It returns at the next pause.
+- The running-workflow notification keeps **Next** and **Stop** available as backup controls.
+
+If Android cannot create the floating debugger, the workflow does not start. Reconnect the automation service and try again.
+
+## 10. Privacy Notes
 
 - No Android `INTERNET` permission; workflow data is not transmitted.
 - Workflow data stays on-device.
 - Full screenshots used for visual selection stay only in memory and are not uploaded. An image-click action stores its selected crop inside the workflow, and that crop is included when you export the workflow or library.
 
-## 9. Run the Google Clock Validation Workflows
+## 11. Run the Google Clock Validation Workflows
 
 After installing the tested system examples, open the **Clock** folder. The two validation workflows target Google Clock 9.0 (`com.google.android.deskclock`) in the API 36 reference environment. Other Clock versions and OEM apps can use different controls, so run **Preflight** before relying on them.
 
@@ -77,7 +100,7 @@ Prepare a dedicated test alarm before running either workflow:
 
 The workflows do not create, enable, or delete alarms. They stop if the named alarm is missing, duplicated, or enabled, and they do not select an alarm by list position or fixed screen coordinates.
 
-## 10. Next Step
+## 12. Next Step
 
 After your first successful run:
 

@@ -11,6 +11,8 @@ fun Step.duplicateWithNewIds(newId: () -> String): Step = when (this) {
         whenTrue = whenTrue.map { it.duplicateWithNewIds(newId) },
         whenFalse = whenFalse.map { it.duplicateWithNewIds(newId) },
     )
+    is Step.Label -> copy(id = newId())
+    is Step.JumpIf -> copy(id = newId())
     is Step.InputText -> copy(id = newId())
     is Step.LaunchApp -> copy(id = newId())
     is Step.LongClick -> copy(id = newId())
@@ -21,6 +23,7 @@ fun Step.duplicateWithNewIds(newId: () -> String): Step = when (this) {
     )
     is Step.SetVariable -> copy(id = newId())
     is Step.Scroll -> copy(id = newId())
+    is Step.ScrollUntil -> copy(id = newId())
     is Step.Swipe -> copy(id = newId())
     is Step.Tap -> copy(id = newId())
     is Step.WaitForNode -> copy(id = newId())

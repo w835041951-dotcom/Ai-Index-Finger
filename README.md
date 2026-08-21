@@ -17,7 +17,7 @@ Need an English quickstart?
 ## 当前版本
 
 - Android 8.0 / API 26 及以上
-- 当前测试版本：`0.33.0-beta.11`
+- 当前测试版本：`0.33.0-beta.12`
 - [GitHub Releases](https://github.com/w835041951-dotcom/Ai-Index-Finger/releases)
 
 GitHub Release 中的 debug APK 用于测试和侧载。仓库尚未配置正式发布签名，AAB 不是可直接上传 Google Play 的生产候选。

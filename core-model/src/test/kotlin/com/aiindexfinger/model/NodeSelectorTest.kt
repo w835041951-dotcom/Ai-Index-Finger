@@ -16,17 +16,11 @@ class NodeSelectorTest {
     }
 
     @Test
-    fun `rejects a match index outside the supported range`() {
+    fun `rejects negative match indexes and accepts large indexes`() {
         assertFailsWith<IllegalArgumentException> {
             NodeSelector("com.example", text = "Item", matchIndex = -1)
         }
-        assertFailsWith<IllegalArgumentException> {
-            NodeSelector(
-                "com.example",
-                text = "Item",
-                matchIndex = NodeSelector.MAX_MATCH_COUNT,
-            )
-        }
+        assertEquals(Int.MAX_VALUE, NodeSelector("com.example", text = "Item", matchIndex = Int.MAX_VALUE).matchIndex)
     }
 
     @Test

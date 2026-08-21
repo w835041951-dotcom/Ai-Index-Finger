@@ -11,6 +11,8 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.aiindexfinger.data.RunHistoryDestination
+import com.aiindexfinger.data.RunImageClickDiagnostic
+import com.aiindexfinger.data.RunImageClickSelectionMode
 import com.aiindexfinger.data.RunRecord
 import com.aiindexfinger.data.RunStatus
 import com.aiindexfinger.data.RunStepDiagnostic
@@ -124,6 +126,67 @@ class RunHistoryDetailsUiTest {
         composeRule.runOnIdle {
             assertEquals(workflow, retriedWorkflow)
         }
+    }
+
+    @Test
+    fun imageClickDiagnosticShowsUnknownModeAndPartialExecutionDetails() {
+        val diagnostic = RunStepDiagnostic(
+            sequence = 0,
+            stepId = "image",
+            durationMillis = 100,
+            attemptCount = 1,
+            outcome = RunStepOutcome.ContinuedAfterFailure,
+            imageClick = RunImageClickDiagnostic(
+                selectionMode = RunImageClickSelectionMode.Unknown,
+                candidateCount = 100,
+                candidatesTruncated = true,
+                bestScorePermille = null,
+                bestScalePermille = null,
+                plannedClickCount = 20,
+                completedClickCount = 4,
+                failedClickIndex = 5,
+                retrySuppressed = true,
+            ),
+        )
+        val record = RunRecord(
+            id = "image-history",
+            workflowId = "workflow",
+            workflowName = "Image history",
+            startedAtMillis = 1,
+            durationMillis = 100,
+            status = RunStatus.CompletedWithWarnings,
+            diagnostics = listOf(diagnostic),
+        )
+        val candidateCount = context.getString(
+            R.string.image_click_diagnostic_candidates_truncated,
+            100,
+        )
+        val summary = context.getString(
+            R.string.image_click_diagnostic_summary_no_best,
+            context.getString(R.string.image_click_selection_unknown),
+            candidateCount,
+            4,
+            20,
+        )
+
+        composeRule.setContent {
+            MaterialTheme {
+                RunRecordDetailsDialog(
+                    record = record,
+                    destination = null,
+                    onDismiss = {},
+                    onOpenWorkflow = { _, _ -> },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(summary).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            context.getString(R.string.image_click_diagnostic_failed_click, 5),
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText(
+            context.getString(R.string.image_click_diagnostic_retry_suppressed),
+        ).assertIsDisplayed()
     }
 
     private fun diagnosticRow(index: Int): String = context.resources.getQuantityString(

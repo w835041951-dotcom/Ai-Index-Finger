@@ -5,6 +5,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 
+object ImageTemplateConstraints {
+    const val MIN_EDGE_PX = 12
+    const val MAX_EDGE_PX = 1_024
+    const val MAX_PNG_BYTES = 192 * 1_024
+    const val MAX_BASE64_LENGTH = 256 * 1_024
+}
+
 @Serializable
 @OptIn(ExperimentalSerializationApi::class)
 data class Workflow(
@@ -24,8 +31,27 @@ data class Workflow(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 19
+        const val CURRENT_SCHEMA_VERSION = 23
     }
+}
+
+/** Upgrades data from a supported schema without changing its recorded action configuration. */
+fun Workflow.normalizedForCurrentSchema(): Workflow {
+    require(schemaVersion <= Workflow.CURRENT_SCHEMA_VERSION) { "Workflow schema is not supported" }
+    if (schemaVersion == Workflow.CURRENT_SCHEMA_VERSION) return this
+    return copy(
+        schemaVersion = Workflow.CURRENT_SCHEMA_VERSION,
+        steps = steps.map(Step::normalizedForCurrentSchema),
+    )
+}
+
+private fun Step.normalizedForCurrentSchema(): Step = when (this) {
+    is Step.IfElse -> copy(
+        whenTrue = whenTrue.map(Step::normalizedForCurrentSchema),
+        whenFalse = whenFalse.map(Step::normalizedForCurrentSchema),
+    )
+    is Step.Repeat -> copy(steps = steps.map(Step::normalizedForCurrentSchema))
+    else -> this
 }
 
 @Serializable
@@ -104,18 +130,32 @@ sealed interface Step {
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
         val templateClickX: Int? = null,
         val templateClickY: Int? = null,
+        val selectionMode: ImageClickSelectionMode = ImageClickSelectionMode.BestMatch,
+        val maxClicks: Int = 20,
+        val clickIntervalMillis: Long = 200,
     ) : Step {
         init {
             require(packageName.isNotBlank()) { "Package name must not be blank" }
-            require(templateWidth in MIN_TEMPLATE_SIZE..MAX_TEMPLATE_SIZE) { "Template width is out of range" }
-            require(templateHeight in MIN_TEMPLATE_SIZE..MAX_TEMPLATE_SIZE) { "Template height is out of range" }
-            require(templatePngBase64.isNotBlank() && templatePngBase64.length <= MAX_TEMPLATE_BASE64_LENGTH) {
+            require(templateWidth in ImageTemplateConstraints.MIN_EDGE_PX..ImageTemplateConstraints.MAX_EDGE_PX) {
+                "Template width is out of range"
+            }
+            require(templateHeight in ImageTemplateConstraints.MIN_EDGE_PX..ImageTemplateConstraints.MAX_EDGE_PX) {
+                "Template height is out of range"
+            }
+            require(
+                templatePngBase64.isNotBlank() &&
+                    templatePngBase64.length <= ImageTemplateConstraints.MAX_BASE64_LENGTH,
+            ) {
                 "Template image is missing or too large"
             }
             require(minimumScorePermille in 0..1_000) { "Image match score must be between 0 and 1000" }
             require(ambiguityMarginPermille in 0..1_000) { "Image ambiguity margin must be between 0 and 1000" }
             require(scaleTolerancePermille in SUPPORTED_SCALE_TOLERANCES) {
                 "Image scale tolerance must be 0, 50, or 100"
+            }
+            require(maxClicks in 1..100) { "Image click count must be between 1 and 100" }
+            require(clickIntervalMillis in 0..10_000) {
+                "Image click interval must be between 0 and 10000 ms"
             }
             require((templateClickX == null) == (templateClickY == null)) {
                 "Image click coordinates must both be set or both be absent"
@@ -129,9 +169,9 @@ sealed interface Step {
         }
 
         companion object {
-            const val MIN_TEMPLATE_SIZE = 12
-            const val MAX_TEMPLATE_SIZE = 256
-            const val MAX_TEMPLATE_BASE64_LENGTH = 128 * 1024
+            const val MIN_TEMPLATE_SIZE = ImageTemplateConstraints.MIN_EDGE_PX
+            const val MAX_TEMPLATE_SIZE = ImageTemplateConstraints.MAX_EDGE_PX
+            const val MAX_TEMPLATE_BASE64_LENGTH = ImageTemplateConstraints.MAX_BASE64_LENGTH
             val SUPPORTED_SCALE_TOLERANCES = setOf(0, 50, 100)
         }
     }
@@ -153,6 +193,7 @@ sealed interface Step {
         val text: String,
         val variableName: String? = null,
         val inputMethod: TextInputMethod = TextInputMethod.SetText,
+        val value: Value? = null,
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step {
@@ -170,6 +211,8 @@ sealed interface Step {
         val selector: NodeSelector,
         val variableName: String,
         val attribute: NodeAttribute = NodeAttribute.TextOrDescription,
+        val postProcess: ReadNodeTextPostProcess = ReadNodeTextPostProcess(),
+        val defaultValue: String? = null,
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step {
@@ -207,6 +250,25 @@ sealed interface Step {
         override val timeoutMillis: Long? = null,
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step
+
+    @Serializable
+    @SerialName("scroll_until")
+    data class ScrollUntil(
+        override val id: String,
+        val selector: NodeSelector,
+        val direction: ScrollDirection,
+        val stopCondition: ScrollUntilStopCondition,
+        val maxScrolls: Int? = null,
+        override val timeoutMillis: Long? = null,
+        override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
+    ) : Step {
+        init {
+            require(maxScrolls == null || maxScrolls > 0) { "Maximum scroll count must be positive" }
+            require(stopCondition !is ScrollUntilStopCondition.MaxScrolls || maxScrolls != null) {
+                "Maximum scroll stop condition requires a maximum scroll count"
+            }
+        }
+    }
 
     @Serializable
     @SerialName("tap")
@@ -272,6 +334,33 @@ sealed interface Step {
     ) : Step
 
     @Serializable
+    @SerialName("label")
+    data class Label(
+        override val id: String,
+        val name: String,
+        override val timeoutMillis: Long? = null,
+        override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
+    ) : Step {
+        init {
+            require(name.isNotBlank()) { "Label name must not be blank" }
+        }
+    }
+
+    @Serializable
+    @SerialName("jump_if")
+    data class JumpIf(
+        override val id: String,
+        val targetLabel: String,
+        val condition: Condition? = null,
+        override val timeoutMillis: Long? = null,
+        override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
+    ) : Step {
+        init {
+            require(targetLabel.isNotBlank()) { "Jump target label must not be blank" }
+        }
+    }
+
+    @Serializable
     @SerialName("repeat")
     data class Repeat(
         override val id: String,
@@ -281,13 +370,15 @@ sealed interface Step {
         override val failurePolicy: FailurePolicy = FailurePolicy.Stop,
     ) : Step {
         init {
-            require(times in 1..MAX_REPEAT_COUNT) { "Repeat count must be between 1 and $MAX_REPEAT_COUNT" }
-        }
-
-        companion object {
-            const val MAX_REPEAT_COUNT = 10_000
+            require(times > 0) { "Repeat count must be positive" }
         }
     }
+}
+
+@Serializable
+enum class ImageClickSelectionMode {
+    BestMatch,
+    AllMatches,
 }
 
 @Serializable
@@ -375,13 +466,9 @@ data class NodeSelector(
         require(listOf(viewId, text, contentDescription, className).any { !it.isNullOrBlank() }) {
             "A node selector requires at least one node attribute"
         }
-        require(matchIndex in 0 until MAX_MATCH_COUNT) {
-            "Match index must be between 0 and ${MAX_MATCH_COUNT - 1}"
+        require(matchIndex >= 0) {
+            "Match index must not be negative"
         }
-    }
-
-    companion object {
-        const val MAX_MATCH_COUNT = 1_000
     }
 }
 
@@ -454,6 +541,10 @@ enum class SystemAction {
     Back,
     Home,
     Recents,
+    Notifications,
+    QuickSettings,
+    PowerDialog,
+    LockScreen,
 }
 
 @Serializable
@@ -463,10 +554,75 @@ enum class ScrollDirection {
 }
 
 @Serializable
+sealed interface ScrollUntilStopCondition {
+    @Serializable
+    @SerialName("node_appears")
+    data class NodeAppears(val selector: NodeSelector) : ScrollUntilStopCondition
+
+    @Serializable
+    @SerialName("node_disappears")
+    data class NodeDisappears(val selector: NodeSelector) : ScrollUntilStopCondition
+
+    @Serializable
+    @SerialName("condition")
+    data class ConditionMet(val condition: Condition) : ScrollUntilStopCondition
+
+    @Serializable
+    @SerialName("no_progress")
+    data object NoProgress : ScrollUntilStopCondition
+
+    @Serializable
+    @SerialName("max_scrolls")
+    data object MaxScrolls : ScrollUntilStopCondition
+}
+
+@Serializable
 enum class NodeAttribute {
     TextOrDescription,
     Text,
     ContentDescription,
     ViewId,
     ClassName,
+}
+
+@Serializable
+data class ReadNodeTextPostProcess(
+    val trim: Boolean = false,
+    val caseTransform: ReadNodeTextCaseTransform = ReadNodeTextCaseTransform.None,
+    val regex: String? = null,
+    val regexGroup: Int = 0,
+    val splitDelimiter: String? = null,
+    val splitIndex: Int = 0,
+) {
+    init {
+        require(regex == null || regex.isNotBlank()) { "Read regex must not be blank" }
+        require(regexGroup >= 0) { "Read regex group must not be negative" }
+        require(splitDelimiter == null || splitDelimiter.isNotEmpty()) { "Split delimiter must not be empty" }
+        require(splitIndex >= 0) { "Split index must not be negative" }
+        regex?.let { Regex(it) }
+    }
+}
+
+@Serializable
+enum class ReadNodeTextCaseTransform {
+    None,
+    Lowercase,
+    Uppercase,
+}
+
+fun ReadNodeTextPostProcess.applyTo(value: String): String? {
+    var processed = if (trim) value.trim() else value
+    regex?.let { pattern ->
+        val match = Regex(pattern).find(processed) ?: return null
+        if (regexGroup > match.groupValues.lastIndex) return null
+        processed = match.groups[regexGroup]?.value ?: return null
+    }
+    splitDelimiter?.let { delimiter ->
+        processed = processed.split(delimiter).getOrNull(splitIndex) ?: return null
+    }
+    return when (caseTransform) {
+        ReadNodeTextCaseTransform.None -> processed
+        ReadNodeTextCaseTransform.Lowercase -> processed.lowercase()
+        ReadNodeTextCaseTransform.Uppercase -> processed.uppercase()
+    }
 }

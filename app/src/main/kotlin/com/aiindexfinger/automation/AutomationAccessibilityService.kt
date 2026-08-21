@@ -38,10 +38,12 @@ import com.aiindexfinger.MainActivity
 import com.aiindexfinger.R
 import com.aiindexfinger.localizedName
 import com.aiindexfinger.executor.AutomationDriver
+import com.aiindexfinger.executor.ImageClickExecutionDiagnostic
 import com.aiindexfinger.executor.ImageClickResult
 import com.aiindexfinger.executor.GestureActionResult
 import com.aiindexfinger.executor.NodeActionResult
 import com.aiindexfinger.executor.NodeReadResult
+import com.aiindexfinger.executor.ScrollActionResult
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.RunState
 import com.aiindexfinger.executor.WorkflowExecutor
@@ -97,6 +99,7 @@ internal enum class WorkflowStartResult {
     NotReady,
     AlreadyRunning,
     ControlsUnavailable,
+    DebuggerUnavailable,
     ServiceUnavailable,
 }
 
@@ -371,6 +374,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     private var liveActionLaunchJob: Job? = null
     private var floatingEditorLaunchJob: Job? = null
     private var floatingEditorRestoreView: View? = null
+    private var debuggerOverlayController: WorkflowDebuggerOverlayController? = null
+    private var runningWorkflowDebug = false
     private var liveActionTargetPackage: String? = null
     private var liveActionStatusMessage: String? = null
     private val liveActionSession = LiveActionSession()
@@ -426,9 +431,22 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 }
                 currentStepLocation.value = stepLocation
                 debugPaused.value = state is RunState.Paused
+                val stepPosition = stepLocation
+                    ?.localizedName(this@AutomationAccessibilityService)
+                if (runningWorkflowDebug) {
+                    runningWorkflowName?.let { name ->
+                        val overlayState = WorkflowDebuggerOverlayState(
+                            workflowName = name,
+                            stepName = stepPosition,
+                            paused = state is RunState.Paused,
+                        )
+                        when (state) {
+                            is RunState.Paused -> debuggerOverlayController?.show(overlayState)
+                            is RunState.Running, RunState.Idle -> debuggerOverlayController?.hide()
+                        }
+                    }
+                }
                 runningWorkflowName?.let { name ->
-                    val stepPosition = stepLocation
-                        ?.localizedName(this@AutomationAccessibilityService)
                     if (!showRunningNotification(name, stepPosition)) stopWorkflow()
                 }
             }
@@ -682,6 +700,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
     override fun onInterrupt() {
         val ownedSharedState = isCurrentServiceInstance()
         stopWorkflow()
+        hideDebuggerOverlay(restoreEditorControl = false)
         stopElementMonitor(
             preservePendingSelector = !ownedSharedState,
             stopForegroundService = ownedSharedState,
@@ -697,6 +716,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             stopForegroundService = ownedSharedState,
         )
         stopLiveAction()
+        hideDebuggerOverlay(restoreEditorControl = false)
         hideFloatingEditorRestoreControl()
         serviceScope.cancel()
         if (ownedSharedState) {
@@ -723,6 +743,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         stopLiveAction()
         floatingEditorLaunchJob?.cancel()
         floatingEditorLaunchJob = null
+        hideDebuggerOverlay(restoreEditorControl = false)
         hideFloatingEditorRestoreControl()
         cancelPendingObservationCapture()
         serviceScope.cancel()
@@ -754,6 +775,10 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         currentStepLocation.value = null
         debugPaused.value = false
         if (!showRunningNotification(workflow.name)) return WorkflowStartResult.ControlsUnavailable
+        if (debug && !showDebuggerOverlay(workflow.name)) {
+            cancelRunningNotification()
+            return WorkflowStartResult.DebuggerUnavailable
+        }
         val startedAtMillis = System.currentTimeMillis()
         runningWorkflowId.value = workflow.id
         workflowStartedAtMillis.value = startedAtMillis
@@ -819,6 +844,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         runningWorkflowName = null
         runningWorkflow = null
         if (isCurrentServiceInstance()) {
+            if (runningWorkflowDebug) hideDebuggerOverlay(restoreEditorControl = true)
             currentStepLocation.value = null
             debugPaused.value = false
             runningWorkflowId.value = null
@@ -831,7 +857,67 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         workflowJobOwnership.current()?.cancel()
     }
 
-    fun advanceWorkflow(): Boolean = workflowExecutor.advance()
+    fun advanceWorkflow(): Boolean {
+        if (runningWorkflowDebug) debuggerOverlayController?.hide()
+        if (workflowExecutor.advance()) return true
+        if (runningWorkflowDebug) restoreDebuggerOverlay()
+        return false
+    }
+
+    internal fun isDebuggerOverlayVisible(): Boolean =
+        debuggerOverlayController?.isVisible() == true
+
+    private fun showDebuggerOverlay(workflowName: String): Boolean {
+        debuggerOverlayController?.hide()
+        debuggerOverlayController = null
+        hideFloatingEditorRestoreControl()
+        val controller = WorkflowDebuggerOverlayController(
+            context = liveActionContext(),
+            windowManager = overlayWindowManager,
+            onNext = { advanceWorkflow() },
+            onStop = {
+                debuggerOverlayController?.hide()
+                stopWorkflow()
+            },
+        )
+        val shown = controller.show(
+            WorkflowDebuggerOverlayState(
+                workflowName = workflowName,
+                stepName = null,
+                paused = false,
+            ),
+        )
+        if (!shown) {
+            controller.hide()
+            if (FloatingWorkflowEditorActivity.hasCollapsedSession()) {
+                showFloatingEditorRestoreControl()
+            }
+            return false
+        }
+        debuggerOverlayController = controller
+        runningWorkflowDebug = true
+        return true
+    }
+
+    private fun restoreDebuggerOverlay() {
+        val name = runningWorkflowName ?: return
+        debuggerOverlayController?.show(
+            WorkflowDebuggerOverlayState(
+                workflowName = name,
+                stepName = currentStepLocation.value?.localizedName(this),
+                paused = debugPaused.value,
+            ),
+        )
+    }
+
+    private fun hideDebuggerOverlay(restoreEditorControl: Boolean) {
+        debuggerOverlayController?.hide()
+        debuggerOverlayController = null
+        runningWorkflowDebug = false
+        if (restoreEditorControl && FloatingWorkflowEditorActivity.hasCollapsedSession()) {
+            showFloatingEditorRestoreControl()
+        }
+    }
 
     fun capturePreviousApp(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
@@ -1397,7 +1483,7 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             return
         }
         val encoded = try {
-            encodeTemplatePng(crop)
+            encodeTemplatePng(crop, templateClickPoint)
         } finally {
             if (crop !== bitmap) crop.recycle()
         }
@@ -1411,8 +1497,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                 templatePngBase64 = encoded.base64,
                 templateWidth = encoded.width,
                 templateHeight = encoded.height,
-                templateClickX = templateClickPoint.x,
-                templateClickY = templateClickPoint.y,
+                templateClickX = requireNotNull(encoded.templateClickPoint).x,
+                templateClickY = requireNotNull(encoded.templateClickPoint).y,
             ),
         )
         liveActionStatusMessage = null
@@ -2460,7 +2546,10 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         return if (succeeded) NodeActionResult.Succeeded else NodeActionResult.ActionFailed
     }
 
-    override suspend fun clickImage(step: Step.ImageClick): ImageClickResult {
+    override suspend fun clickImage(
+        step: Step.ImageClick,
+        onProgress: (ImageClickExecutionDiagnostic) -> Unit,
+    ): ImageClickResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return ImageClickResult.Unsupported
         if (!isTargetPackageVisible(step.packageName)) {
             return ImageClickResult.WrongPackage
@@ -2487,51 +2576,104 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
                             screenBounds = capture.screenBounds,
                         )
                     }
-                    when (val match = withContext(Dispatchers.Default) {
+                    val plan = withContext(Dispatchers.Default) {
                         val matchingContext = currentCoroutineContext()
                         val checkCancellation = { matchingContext.ensureActive() }
-                        matchTemplate(
+                        matchTemplatePlan(
                             capture.bitmap.toLumaImage(checkCancellation),
                             template.toLumaImage(checkCancellation),
                             step.minimumScorePermille,
-                            step.ambiguityMarginPermille,
                             step.scaleTolerancePermille,
                             searchRegions = searchRegions,
                             checkCancellation = checkCancellation,
                         )
-                    }) {
-                        is TemplateMatchResult.Unique -> {
-                            val currentTargetWindows = targetPackageWindows(step.packageName)
-                            when {
-                                !isTargetPackageVisible(step.packageName) -> ImageClickResult.WrongPackage
-                                currentScreenBounds() != capture.screenBounds ||
-                                    currentTargetWindows.toSet() != matchingTargetWindows.toSet() -> {
-                                    ImageClickResult.CaptureFailed
-                                }
-                                else -> {
-                                    val point = mapMatchToTargetScreen(
-                                        match = match,
-                                        bitmapWidth = capture.bitmap.width,
-                                        bitmapHeight = capture.bitmap.height,
-                                        screenBounds = capture.screenBounds,
-                                        targetBounds = currentTargetWindows.map(TargetWindowSnapshot::bounds),
-                                        templateWidth = step.templateWidth,
-                                        templateHeight = step.templateHeight,
-                                        templateClickX = step.templateClickX,
-                                        templateClickY = step.templateClickY,
-                                    )
-                                    if (point == null) {
-                                        ImageClickResult.NoMatch
-                                    } else if (tap(point.x, point.y) == GestureActionResult.Succeeded) {
-                                        ImageClickResult.Clicked(match.scorePermille)
-                                    } else {
-                                        ImageClickResult.GestureFailed
-                                    }
+                    }
+                    val bestMatch = selectTemplateMatchCandidates(
+                        plan,
+                        com.aiindexfinger.model.ImageClickSelectionMode.BestMatch,
+                        maxClicks = 1,
+                    ).singleOrNull()
+                    val plannedMatches = selectTemplateMatchCandidates(
+                        plan,
+                        step.selectionMode,
+                        step.maxClicks,
+                    )
+                    var diagnostic = ImageClickExecutionDiagnostic(
+                        selectionMode = step.selectionMode,
+                        candidateCount = plan.rawCandidateCount,
+                        candidatesTruncated = plan.candidatesTruncated,
+                        bestScorePermille = bestMatch?.scorePermille,
+                        bestScalePermille = bestMatch?.scalePermille,
+                        plannedClickCount = plannedMatches.size,
+                        completedClickCount = 0,
+                    )
+                    fun reportProgress() {
+                        onProgress(diagnostic)
+                    }
+                    reportProgress()
+                    if (plannedMatches.isEmpty()) {
+                        ImageClickResult.NoMatch
+                    } else {
+                        var outcome: ImageClickResult? = null
+                        for ((index, match) in plannedMatches.withIndex()) {
+                            val failedClickIndex = index + 1
+                            fun targetWindowChanged(): ImageClickResult {
+                                diagnostic = diagnostic.copy(failedClickIndex = failedClickIndex)
+                                reportProgress()
+                                return ImageClickResult.TargetWindowChanged(diagnostic)
+                            }
+                            fun clickFailure(): ImageClickResult {
+                                diagnostic = diagnostic.copy(failedClickIndex = failedClickIndex)
+                                reportProgress()
+                                return if (diagnostic.completedClickCount > 0) {
+                                    ImageClickResult.PartialExecution(diagnostic)
+                                } else {
+                                    ImageClickResult.GestureFailed
                                 }
                             }
+                            val currentTargetWindows = targetPackageWindows(step.packageName)
+                            if (!isTargetPackageVisible(step.packageName) ||
+                                currentScreenBounds() != capture.screenBounds ||
+                                currentTargetWindows.toSet() != matchingTargetWindows.toSet()
+                            ) {
+                                outcome = targetWindowChanged()
+                                break
+                            }
+                            val point = mapMatchToTargetScreen(
+                                match = match,
+                                bitmapWidth = capture.bitmap.width,
+                                bitmapHeight = capture.bitmap.height,
+                                screenBounds = capture.screenBounds,
+                                targetBounds = currentTargetWindows.map(TargetWindowSnapshot::bounds),
+                                templateWidth = step.templateWidth,
+                                templateHeight = step.templateHeight,
+                                templateClickX = step.templateClickX,
+                                templateClickY = step.templateClickY,
+                            )
+                            if (point == null) {
+                                diagnostic = diagnostic.copy(failedClickIndex = failedClickIndex)
+                                reportProgress()
+                                outcome = if (diagnostic.completedClickCount > 0) {
+                                    ImageClickResult.PartialExecution(diagnostic)
+                                } else {
+                                    ImageClickResult.NoMatch
+                                }
+                                break
+                            }
+                            if (tap(point.x, point.y) != GestureActionResult.Succeeded) {
+                                outcome = clickFailure()
+                                break
+                            }
+                            diagnostic = diagnostic.copy(completedClickCount = index + 1)
+                            reportProgress()
+                            if (index + 1 < plannedMatches.size && step.clickIntervalMillis > 0) {
+                                delay(step.clickIntervalMillis)
+                            }
                         }
-                        TemplateMatchResult.NoMatch -> ImageClickResult.NoMatch
-                        TemplateMatchResult.Ambiguous -> ImageClickResult.Ambiguous
+                        outcome ?: ImageClickResult.Clicked(
+                            scorePermille = requireNotNull(bestMatch).scorePermille,
+                            diagnostic = diagnostic,
+                        )
                     }
                 }
             }
@@ -2664,18 +2806,74 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         selector: NodeSelector,
         direction: ScrollDirection,
     ): NodeActionResult {
-        val node = findNode(selector) ?: return NodeActionResult.TargetNotFound
         val action = when (direction) {
             ScrollDirection.Forward -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
             ScrollDirection.Backward -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         }
-        val succeeded = generateSequence(node) { it.parent }
+        val succeeded = findScrollTarget(selector, action)?.performAction(action) ?: false
+        return if (succeeded) NodeActionResult.Succeeded else NodeActionResult.ActionFailed
+    }
+
+    override suspend fun scrollNodeWithProgress(
+        selector: NodeSelector,
+        direction: ScrollDirection,
+    ): ScrollActionResult {
+        val action = when (direction) {
+            ScrollDirection.Forward -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            ScrollDirection.Backward -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        }
+        val target = findScrollTarget(selector, action) ?: return ScrollActionResult.TargetNotFound
+        val before = target.scrollProgressSignature()
+        if (!target.performAction(action)) return ScrollActionResult.NoProgress
+        delay(SCROLL_PROGRESS_SETTLE_MILLIS)
+        val after = findScrollTarget(selector, action) ?: return ScrollActionResult.Moved
+        return if (before == after.scrollProgressSignature()) {
+            ScrollActionResult.NoProgress
+        } else {
+            ScrollActionResult.Moved
+        }
+    }
+
+    private fun findScrollTarget(
+        selector: NodeSelector,
+        action: Int,
+    ): AccessibilityNodeInfo? = findNode(selector)?.let { node ->
+        generateSequence(node) { it.parent }
             .firstOrNull { candidate ->
                 candidate.isScrollable || candidate.actionList.any { it.id == action }
             }
-            ?.performAction(action)
-            ?: false
-        return if (succeeded) NodeActionResult.Succeeded else NodeActionResult.ActionFailed
+    }
+
+    private fun AccessibilityNodeInfo.scrollProgressSignature(): String = buildString {
+        val pending = ArrayDeque<AccessibilityNodeInfo>()
+        pending.addLast(this@scrollProgressSignature)
+        var visited = 0
+        while (pending.isNotEmpty() && visited < MAX_SCROLL_SIGNATURE_NODES) {
+            val node = pending.removeLast()
+            val bounds = Rect().also(node::getBoundsInScreen)
+            append(node.windowId)
+            append(':')
+            append(bounds.left)
+            append(':')
+            append(bounds.top)
+            append(':')
+            append(bounds.right)
+            append(':')
+            append(bounds.bottom)
+            append(':')
+            append(node.childCount)
+            append(':')
+            append(node.viewIdResourceName)
+            append(':')
+            append(node.text)
+            append(':')
+            append(node.contentDescription)
+            append(';')
+            visited++
+            for (index in node.childCount - 1 downTo 0) {
+                node.getChild(index)?.let(pending::addLast)
+            }
+        }
     }
 
     suspend fun inputText(
@@ -2816,6 +3014,14 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
             SystemAction.Back -> GLOBAL_ACTION_BACK
             SystemAction.Home -> GLOBAL_ACTION_HOME
             SystemAction.Recents -> GLOBAL_ACTION_RECENTS
+            SystemAction.Notifications -> GLOBAL_ACTION_NOTIFICATIONS
+            SystemAction.QuickSettings -> GLOBAL_ACTION_QUICK_SETTINGS
+            SystemAction.PowerDialog -> GLOBAL_ACTION_POWER_DIALOG
+            SystemAction.LockScreen -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                GLOBAL_ACTION_LOCK_SCREEN
+            } else {
+                return false
+            }
         }
         return performGlobalAction(globalAction)
     }
@@ -2964,6 +3170,8 @@ class AutomationAccessibilityService : AccessibilityService(), AutomationDriver 
         private const val RECORDING_SNAPSHOT_SETTLE_MILLIS = 120L
         private const val LONG_CLICK_CLICK_SUPPRESSION_MILLIS = 350L
         private const val SCROLL_DUPLICATE_SUPPRESSION_MILLIS = 250L
+        private const val SCROLL_PROGRESS_SETTLE_MILLIS = 250L
+        private const val MAX_SCROLL_SIGNATURE_NODES = 64
         private const val SWIPE_SCROLL_SUPPRESSION_PADDING_MILLIS = 300L
         private const val MIN_RECORDED_SWIPE_DISTANCE_PX = 24.0
         private const val LIVE_CAPTURE_OVERLAY_HIDE_MILLIS = 200L

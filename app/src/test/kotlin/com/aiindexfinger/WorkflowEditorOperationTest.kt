@@ -17,16 +17,23 @@ class WorkflowEditorOperationTest {
                 WorkflowEditorOperation.LongClick,
                 WorkflowEditorOperation.Tap,
                 WorkflowEditorOperation.Scroll,
+                WorkflowEditorOperation.ScrollUntil,
                 WorkflowEditorOperation.InputText,
                 WorkflowEditorOperation.Swipe,
                 WorkflowEditorOperation.Delay,
                 WorkflowEditorOperation.GlobalBack,
                 WorkflowEditorOperation.GlobalHome,
                 WorkflowEditorOperation.GlobalRecents,
+                WorkflowEditorOperation.GlobalNotifications,
+                WorkflowEditorOperation.GlobalQuickSettings,
+                WorkflowEditorOperation.GlobalPowerDialog,
+                WorkflowEditorOperation.GlobalLockScreen,
                 WorkflowEditorOperation.WaitForNode,
                 WorkflowEditorOperation.SetVariable,
                 WorkflowEditorOperation.ReadNodeText,
                 WorkflowEditorOperation.Repeat,
+                WorkflowEditorOperation.Label,
+                WorkflowEditorOperation.JumpIf,
                 WorkflowEditorOperation.VariableCondition,
                 WorkflowEditorOperation.NodeCondition,
             ),
@@ -44,6 +51,8 @@ class WorkflowEditorOperationTest {
         assertFalse(WorkflowEditorOperation.NodeCondition.isAvailable(false, true))
         assertTrue(WorkflowEditorOperation.NodeCondition.isAvailable(true, true))
         assertTrue(WorkflowEditorOperation.ImageClick.isAvailable(false, false))
+        assertFalse(WorkflowEditorOperation.JumpIf.isAvailable(false, false, hasLabels = false))
+        assertTrue(WorkflowEditorOperation.JumpIf.isAvailable(false, false, hasLabels = true))
     }
 
     @Test
@@ -64,5 +73,9 @@ class WorkflowEditorOperationTest {
             assertEquals(null, operation.unavailableReason(true, true))
         }
         assertEquals(null, WorkflowEditorOperation.Tap.unavailableReason(false, false))
+            assertEquals(
+                WorkflowOperationUnavailableReason.LabelRequired,
+                WorkflowEditorOperation.JumpIf.unavailableReason(false, true, hasLabels = false),
+            )
     }
 }

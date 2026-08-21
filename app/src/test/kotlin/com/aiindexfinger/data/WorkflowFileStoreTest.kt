@@ -25,6 +25,25 @@ class WorkflowFileStoreTest {
     }
 
     @Test
+    fun schemaNineteenImageClickLoadsAndSavesAsCurrentSchema() = withTemporaryDirectory { directory ->
+        directory.resolve("workflows.json").writeText(
+            """[{"schemaVersion":19,"id":"legacy","name":"Legacy","steps":[{"type":"image_click","id":"image","packageName":"com.example","templatePngBase64":"aGVsbG8=","templateWidth":24,"templateHeight":24}]}]""",
+        )
+        val store = WorkflowFileStore(directory)
+
+        val loaded = store.load().single()
+        val imageClick = loaded.steps.single() as Step.ImageClick
+        store.save(listOf(loaded))
+
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, loaded.schemaVersion)
+        assertEquals(20, imageClick.maxClicks)
+        assertTrue(
+            directory.resolve("workflows.json").readText()
+                .contains("\"schemaVersion\": ${Workflow.CURRENT_SCHEMA_VERSION}"),
+        )
+    }
+
+    @Test
     fun workflowLibraryRoundTripPreservesFoldersAndAssignments() = withTemporaryDirectory { directory ->
         val store = WorkflowFileStore(directory)
         val library = WorkflowLibrary(
@@ -238,7 +257,10 @@ class WorkflowFileStoreTest {
             )
             versionFile.writeText(
                 versionFile.readText()
-                    .replace("\"schemaVersion\": 19", "\"schemaVersion\": 999")
+                    .replace(
+                        "\"schemaVersion\": ${Workflow.CURRENT_SCHEMA_VERSION}",
+                        "\"schemaVersion\": 999",
+                    )
                     .replace("\"state\":", "\"futureField\": true,\n        \"state\":"),
             )
 

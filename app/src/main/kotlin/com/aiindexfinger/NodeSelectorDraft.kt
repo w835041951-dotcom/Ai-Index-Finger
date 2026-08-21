@@ -34,7 +34,7 @@ internal data class NodeSelectorDraft(
         )
 
     val isValid: Boolean
-        get() = hasTargetAttribute && matchIndex in 0 until NodeSelector.MAX_MATCH_COUNT &&
+        get() = hasTargetAttribute && matchIndex >= 0 &&
             (!useAncestor || hasAncestorAttribute)
 
     fun toSelectorOrNull(): NodeSelector? {

@@ -37,6 +37,29 @@ class StepDuplicatorTest {
         assertEquals(original.copy(id = "copy"), duplicate)
     }
 
+    @Test
+    fun `duplicates labels and jumps with new ids and unchanged control flow configuration`() {
+        val label = Step.Label("label", "target")
+        val jump = Step.JumpIf("jump", "target", Condition.Equals(Value.Literal("yes"), Value.Literal("yes")))
+
+        assertEquals(label.copy(id = "label-copy"), label.duplicateWithNewIds { "label-copy" })
+        assertEquals(jump.copy(id = "jump-copy"), jump.duplicateWithNewIds { "jump-copy" })
+    }
+
+    @Test
+    fun `duplicates scroll until with a new id and unchanged stop configuration`() {
+        val selector = NodeSelector("com.example", text = "List")
+        val original = Step.ScrollUntil(
+            "scroll-until",
+            selector,
+            ScrollDirection.Forward,
+            ScrollUntilStopCondition.NodeDisappears(selector),
+            maxScrolls = 8,
+        )
+
+        assertEquals(original.copy(id = "copy"), original.duplicateWithNewIds { "copy" })
+    }
+
     private fun Step.ids(): Set<String> = when (this) {
         is Step.IfElse -> setOf(id) + (whenTrue + whenFalse).flatMap { it.ids() }
         is Step.Repeat -> setOf(id) + steps.flatMap { it.ids() }

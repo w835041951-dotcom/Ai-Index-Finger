@@ -9,6 +9,7 @@ import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.RecordedControl
 import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.Condition
+import com.aiindexfinger.model.ImageClickSelectionMode
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.TextMatchMode
 import com.aiindexfinger.model.TextInputMethod
@@ -38,8 +39,35 @@ class WorkflowTransferCodecTest {
     fun currentSchemaVersionIsExplicitInSingleAndBundleExports() {
         val workflow = Workflow(id = "schema", name = "Schema", steps = emptyList())
 
-        assertTrue(WorkflowTransferCodec.encode(workflow).contains("\"schemaVersion\": 19"))
-        assertTrue(WorkflowTransferCodec.encodeBundle(listOf(workflow)).contains("\"schemaVersion\": 19"))
+        assertTrue(
+            WorkflowTransferCodec.encode(workflow)
+                .contains("\"schemaVersion\": ${Workflow.CURRENT_SCHEMA_VERSION}"),
+        )
+        assertTrue(
+            WorkflowTransferCodec.encodeBundle(listOf(workflow))
+                .contains("\"schemaVersion\": ${Workflow.CURRENT_SCHEMA_VERSION}"),
+        )
+    }
+
+    @Test
+    fun schemaNineteenImageClickNormalizesOnImportAndReexportsAsCurrentSchema() {
+        val legacy = """{"schemaVersion":19,"id":"legacy","name":"Legacy","steps":[{"type":"image_click","id":"image","packageName":"com.example","templatePngBase64":"aGVsbG8=","templateWidth":24,"templateHeight":24}]}"""
+
+        val imported = WorkflowTransferCodec.decode(legacy)
+        val imageClick = imported.steps.single() as Step.ImageClick
+        val importedBundle = WorkflowTransferCodec.decodeLibrary(
+            """{"formatVersion":2,"workflows":[$legacy],"folders":[],"workflowFolderIds":{}}""",
+        )
+
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, imported.schemaVersion)
+        assertEquals(ImageClickSelectionMode.BestMatch, imageClick.selectionMode)
+        assertEquals(20, imageClick.maxClicks)
+        assertEquals(200, imageClick.clickIntervalMillis)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, importedBundle.workflows.single().schemaVersion)
+        assertTrue(
+            WorkflowTransferCodec.encode(imported)
+                .contains("\"schemaVersion\": ${Workflow.CURRENT_SCHEMA_VERSION}"),
+        )
     }
 
     @Test
@@ -151,11 +179,18 @@ class WorkflowTransferCodecTest {
                 """{"formatVersion":999,"workflows":[],"folders":[],"workflowFolderIds":{}}""",
             )
         }
+        val futureSingle = assertThrows(WorkflowTransferException::class.java) {
+            WorkflowTransferCodec.decodeLibrary(
+                """{"formatVersion":999,"id":"single","name":"Single","steps":[]}""",
+            )
+        }
 
         assertEquals(WorkflowTransferErrorCode.InvalidContent, invalid.code)
         assertEquals(WorkflowTransferErrorCode.RootNotObject, wrongRoot.code)
         assertEquals(WorkflowTransferErrorCode.UnsupportedBundleVersion, future.code)
         assertEquals("999", future.arguments["version"])
+        assertEquals(WorkflowTransferErrorCode.UnsupportedBundleVersion, futureSingle.code)
+        assertEquals("999", futureSingle.arguments["version"])
     }
 
     @Test
@@ -337,35 +372,35 @@ class WorkflowTransferCodecTest {
     fun previousSchemaRemainsImportable() {
         val previous = """{"schemaVersion":1,"id":"old","name":"Old","steps":[{"type":"delay","id":"wait","durationMillis":100,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
-        assertEquals(1, WorkflowTransferCodec.decode(previous).schemaVersion)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, WorkflowTransferCodec.decode(previous).schemaVersion)
     }
 
     @Test
     fun schemaTwoRemainsImportable() {
         val previous = """{"schemaVersion":2,"id":"old-2","name":"Old 2","steps":[{"type":"delay","id":"wait","durationMillis":100,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
-        assertEquals(2, WorkflowTransferCodec.decode(previous).schemaVersion)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, WorkflowTransferCodec.decode(previous).schemaVersion)
     }
 
     @Test
     fun schemaThreeRemainsImportable() {
         val previous = """{"schemaVersion":3,"id":"old-3","name":"Old 3","steps":[{"type":"tap","id":"tap","x":100,"y":200,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
-        assertEquals(3, WorkflowTransferCodec.decode(previous).schemaVersion)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, WorkflowTransferCodec.decode(previous).schemaVersion)
     }
 
     @Test
     fun schemaFourRemainsImportable() {
         val previous = """{"schemaVersion":4,"id":"old-4","name":"Old 4","steps":[{"type":"delay","id":"wait","durationMillis":100,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
-        assertEquals(4, WorkflowTransferCodec.decode(previous).schemaVersion)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, WorkflowTransferCodec.decode(previous).schemaVersion)
     }
 
     @Test
     fun schemaFiveRemainsImportable() {
         val previous = """{"schemaVersion":5,"id":"old-5","name":"Old 5","steps":[{"type":"delay","id":"wait","durationMillis":100,"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
-        assertEquals(5, WorkflowTransferCodec.decode(previous).schemaVersion)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, WorkflowTransferCodec.decode(previous).schemaVersion)
     }
 
     @Test
@@ -409,7 +444,7 @@ class WorkflowTransferCodecTest {
     fun schemaTenRemainsImportable() {
         val previous = """{"schemaVersion":10,"id":"old-10","name":"Old 10","steps":[{"type":"set_variable","id":"set","name":"status","value":{"type":"literal","value":"ready"},"timeoutMillis":null,"failurePolicy":{"type":"stop"}}]}"""
 
-        assertEquals(10, WorkflowTransferCodec.decode(previous).schemaVersion)
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, WorkflowTransferCodec.decode(previous).schemaVersion)
     }
 
     @Test

@@ -65,6 +65,12 @@ data class CoordinatePreflightIssue(
 
 data class ImageTemplatePreflightIssue(val stepId: String)
 
+data class ImageClickTimeoutPreflightWarning(
+    val stepId: String,
+    val minimumIntervalMillis: Long,
+    val effectiveTimeoutMillis: Long,
+)
+
 enum class SelectorPreflightExpectation {
     RequiredPresent,
     RequiredAbsent,
@@ -82,6 +88,7 @@ data class WorkflowPreflightReport(
     val imageCaptureSupported: Boolean,
     val coordinateIssues: List<CoordinatePreflightIssue> = emptyList(),
     val imageTemplateIssues: List<ImageTemplatePreflightIssue> = emptyList(),
+    val imageClickTimeoutWarnings: List<ImageClickTimeoutPreflightWarning> = emptyList(),
 ) {
     val validationIssues: List<ValidationIssue>
         get() = validation.issues
@@ -146,7 +153,44 @@ fun buildWorkflowPreflightReport(
         workflow.steps,
         isImageTemplateValid,
     ),
+    imageClickTimeoutWarnings = collectImageClickTimeoutPreflightWarnings(
+        workflow.steps,
+        workflow.defaultStepTimeoutMillis,
+    ),
     )
+}
+
+private fun collectImageClickTimeoutPreflightWarnings(
+    steps: List<Step>,
+    defaultTimeoutMillis: Long,
+): List<ImageClickTimeoutPreflightWarning> = buildList {
+    steps.forEach { step ->
+        when (step) {
+            is Step.ImageClick -> {
+                val minimumIntervalMillis = (step.maxClicks - 1).toLong() * step.clickIntervalMillis
+                val effectiveTimeoutMillis = step.timeoutMillis ?: defaultTimeoutMillis
+                if (step.selectionMode == com.aiindexfinger.model.ImageClickSelectionMode.AllMatches &&
+                    minimumIntervalMillis > effectiveTimeoutMillis
+                ) {
+                    add(
+                        ImageClickTimeoutPreflightWarning(
+                            step.id,
+                            minimumIntervalMillis,
+                            effectiveTimeoutMillis,
+                        ),
+                    )
+                }
+            }
+            is Step.Repeat -> addAll(
+                collectImageClickTimeoutPreflightWarnings(step.steps, defaultTimeoutMillis),
+            )
+            is Step.IfElse -> {
+                addAll(collectImageClickTimeoutPreflightWarnings(step.whenTrue, defaultTimeoutMillis))
+                addAll(collectImageClickTimeoutPreflightWarnings(step.whenFalse, defaultTimeoutMillis))
+            }
+            else -> Unit
+        }
+    }
 }
 
 private fun collectImageTemplatePreflightIssues(
@@ -215,6 +259,7 @@ private fun collectSelectorPreflightContexts(
 ): Pair<List<SelectorPreflightContext>, Set<String>?> {
     val contexts = mutableListOf<SelectorPreflightContext>()
     var guaranteedPackages = guaranteedLaunchPackages
+    var jumpSeen = false
     steps.forEach { step ->
         val guaranteedPackagesBeforeStep = guaranteedPackages
         fun add(
@@ -230,7 +275,7 @@ private fun collectSelectorPreflightContexts(
         }
         when (step) {
             is Step.LaunchApp -> {
-                guaranteedPackages = if (step.failurePolicy is FailurePolicy.Continue) {
+                guaranteedPackages = if (jumpSeen || step.failurePolicy is FailurePolicy.Continue) {
                     guaranteedPackagesBeforeStep
                 } else {
                     setOf(step.packageName.trim())
@@ -244,6 +289,30 @@ private fun collectSelectorPreflightContexts(
             is Step.InputText -> add(SelectorRole.InputText, step.selector)
             is Step.ReadNodeText -> add(SelectorRole.ReadNodeText, step.selector)
             is Step.Scroll -> add(SelectorRole.Scroll, step.selector)
+            is Step.ScrollUntil -> {
+                add(SelectorRole.ScrollUntil, step.selector)
+                when (val stopCondition = step.stopCondition) {
+                    is com.aiindexfinger.model.ScrollUntilStopCondition.NodeAppears -> add(
+                        SelectorRole.NodeCondition,
+                        stopCondition.selector,
+                        SelectorPreflightExpectation.ObserveOnly,
+                    )
+                    is com.aiindexfinger.model.ScrollUntilStopCondition.NodeDisappears -> add(
+                        SelectorRole.NodeCondition,
+                        stopCondition.selector,
+                        SelectorPreflightExpectation.ObserveOnly,
+                    )
+                    is com.aiindexfinger.model.ScrollUntilStopCondition.ConditionMet ->
+                        (stopCondition.condition as? com.aiindexfinger.model.Condition.NodeExists)?.let {
+                            add(
+                                SelectorRole.NodeCondition,
+                                it.selector,
+                                SelectorPreflightExpectation.ObserveOnly,
+                            )
+                        }
+                    else -> Unit
+                }
+            }
             is Step.WaitForNode -> add(
                 SelectorRole.WaitForNode,
                 step.selector,
@@ -267,6 +336,17 @@ private fun collectSelectorPreflightContexts(
                 } else {
                     combineGuaranteedLaunchPackages(trueResult.second, falseResult.second)
                 }
+            }
+            is Step.JumpIf -> {
+                (step.condition as? com.aiindexfinger.model.Condition.NodeExists)?.let {
+                    add(
+                        SelectorRole.NodeCondition,
+                        it.selector,
+                        SelectorPreflightExpectation.ObserveOnly,
+                    )
+                }
+                jumpSeen = true
+                guaranteedPackages = null
             }
             is Step.Repeat -> {
                 val result = collectSelectorPreflightContexts(step.steps, guaranteedPackages)

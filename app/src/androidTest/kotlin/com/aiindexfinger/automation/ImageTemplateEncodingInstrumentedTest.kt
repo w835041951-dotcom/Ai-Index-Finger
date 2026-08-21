@@ -3,12 +3,14 @@ package com.aiindexfinger.automation
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.aiindexfinger.model.ImageTemplateConstraints
 import com.aiindexfinger.model.Step
 import java.util.Base64
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -35,12 +37,43 @@ class ImageTemplateEncodingInstrumentedTest {
     }
 
     @Test
-    fun oversizedTemplateIsRejectedWithoutRecyclingSource() {
-        val source = patternedBitmap(257, 32)
+    fun oversizedTemplateIsLimitedToSupportedEdgeWithoutRecyclingSource() {
+        val source = patternedBitmap(1_200, 600)
 
-        assertNull(encodeTemplatePng(source))
+        val encoded = requireNotNull(encodeTemplatePng(source))
+
+        assertEquals(1_024, encoded.width)
+        assertEquals(512, encoded.height)
+        assertEquals(1_200, encoded.sourceWidth)
+        assertEquals(600, encoded.sourceHeight)
+        assertEquals(true, encoded.scaledDown)
         assertFalse(source.isRecycled)
 
+        source.recycle()
+    }
+
+    @Test
+    fun highDetailTemplateFallsBackToGrayscaleAndBudgetedSize() {
+        val source = noisyBitmap(512, 512)
+
+        val encoded = requireNotNull(encodeTemplatePng(source))
+
+        assertEquals(true, encoded.convertedToGrayscale)
+        assertTrue(encoded.pngByteCount <= ImageTemplateConstraints.MAX_PNG_BYTES)
+        assertTrue(encoded.width <= 512)
+        assertTrue(encoded.height <= 512)
+        source.recycle()
+    }
+
+    @Test
+    fun rescalingRemapsClickPointWithEndpointPreservation() {
+        val source = patternedBitmap(2_048, 1_024)
+
+        val encoded = requireNotNull(encodeTemplatePng(source, ScreenPoint(2_047, 1_023)))
+
+        assertEquals(1_024, encoded.width)
+        assertEquals(512, encoded.height)
+        assertEquals(ScreenPoint(1_023, 511), encoded.templateClickPoint)
         source.recycle()
     }
 
@@ -106,6 +139,16 @@ class ImageTemplateEncodingInstrumentedTest {
                 val y = index / width
                 0xff000000.toInt() or (x * 37 and 0xff shl 16) or
                     (y * 53 and 0xff shl 8) or (x * 17 + y * 29 and 0xff)
+            }
+            setPixels(pixels, 0, width, 0, 0, width, height)
+        }
+
+    private fun noisyBitmap(width: Int, height: Int): Bitmap =
+        Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+            var value = 0x12345678
+            val pixels = IntArray(width * height) {
+                value = value * 1_103_515_245 + 12_345
+                0xff000000.toInt() or (value and 0x00ffffff)
             }
             setPixels(pixels, 0, width, 0, 0, width, height)
         }

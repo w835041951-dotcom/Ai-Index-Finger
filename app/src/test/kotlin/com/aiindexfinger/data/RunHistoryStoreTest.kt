@@ -179,6 +179,46 @@ class RunHistoryStoreTest {
         }
 
     @Test
+    fun futureImageClickDiagnosticFieldsKeepHistoryReadOnly() = withTemporaryDirectory { directory ->
+        val file = directory.resolve("run-history.json")
+        val content = """[{"id":"future","workflowId":"workflow","workflowName":"Future","startedAtMillis":1,"durationMillis":2,"status":"Completed","diagnostics":[{"sequence":0,"stepId":"image","durationMillis":1,"attemptCount":1,"outcome":"Completed","imageClick":{"selectionMode":"BestMatch","candidateCount":1,"candidatesTruncated":false,"bestScorePermille":950,"bestScalePermille":1000,"plannedClickCount":1,"completedClickCount":1,"futureImageField":true}}]}]"""
+        file.writeText(content)
+        val store = RunHistoryStore(directory)
+
+        val result = store.loadDetailed() as RunHistoryLoadResult.Loaded
+
+        assertTrue(result.readOnly)
+        assertEquals(
+            RunImageClickSelectionMode.BestMatch,
+            result.records.single().diagnostics.single().imageClick?.selectionMode,
+        )
+        assertThrows(RunHistoryStorageException::class.java) {
+            store.append(record("new", 3))
+        }
+        assertEquals(content, file.readText())
+    }
+
+    @Test
+    fun futureImageClickSelectionModeRemainsReadableAsUnknownAndReadOnly() = withTemporaryDirectory { directory ->
+        val file = directory.resolve("run-history.json")
+        val content = """[{"id":"future","workflowId":"workflow","workflowName":"Future","startedAtMillis":1,"durationMillis":2,"status":"Completed","diagnostics":[{"sequence":0,"stepId":"image","durationMillis":1,"attemptCount":1,"outcome":"Completed","imageClick":{"selectionMode":"FutureSelection","candidateCount":1,"candidatesTruncated":false,"bestScorePermille":950,"bestScalePermille":1000,"plannedClickCount":1,"completedClickCount":1}}]}]"""
+        file.writeText(content)
+        val store = RunHistoryStore(directory)
+
+        val result = store.loadDetailed() as RunHistoryLoadResult.Loaded
+
+        assertTrue(result.readOnly)
+        assertEquals(
+            RunImageClickSelectionMode.Unknown,
+            result.records.single().diagnostics.single().imageClick?.selectionMode,
+        )
+        assertThrows(RunHistoryStorageException::class.java) {
+            store.append(record("new", 3))
+        }
+        assertEquals(content, file.readText())
+    }
+
+    @Test
     fun clearRemovesCommittedAndInterruptedTemporaryHistory() = withTemporaryDirectory { directory ->
         val file = directory.resolve("run-history.json")
         val temporaryFile = directory.resolve("run-history.json.tmp")

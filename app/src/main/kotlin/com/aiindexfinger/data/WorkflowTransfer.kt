@@ -6,6 +6,7 @@ import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.WorkflowValidator
 import com.aiindexfinger.model.ValidationIssue
+import com.aiindexfinger.model.normalizedForCurrentSchema
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -74,13 +75,19 @@ object WorkflowTransferCodec {
 
     fun encode(workflow: Workflow): String {
         validate(workflow)
-        return enforceTransferSize(json.encodeToString(Workflow.serializer(), workflow))
+        return enforceTransferSize(
+            json.encodeToString(Workflow.serializer(), workflow.normalizedForCurrentSchema()),
+        )
     }
 
     fun encodeBundle(workflows: List<Workflow>): String = encodeLibrary(WorkflowLibrary(workflows = workflows))
 
     fun encodeLibrary(library: WorkflowLibrary): String {
-        val normalized = library.normalized()
+        val normalizedInput = library.normalized()
+        normalizedInput.workflows.forEach(::validate)
+        val normalized = normalizedInput.copy(
+            workflows = normalizedInput.workflows.map(Workflow::normalizedForCurrentSchema),
+        )
         transferRequire(
             normalized.workflows.size <= MAX_BUNDLE_WORKFLOWS,
             WorkflowTransferErrorCode.TooManyWorkflows,
@@ -115,7 +122,7 @@ object WorkflowTransferCodec {
         val workflow = runCatching {
             json.decodeFromJsonElement(Workflow.serializer(), root)
         }.getOrElse { throw WorkflowTransferException(WorkflowTransferErrorCode.InvalidContent, cause = it) }
-        val normalized = workflow.copy(name = workflow.name.trim())
+        val normalized = workflow.normalizedForCurrentSchema().copy(name = workflow.name.trim())
         validate(normalized)
         return normalized
     }
@@ -128,7 +135,6 @@ object WorkflowTransferCodec {
             .getOrElse { throw WorkflowTransferException(WorkflowTransferErrorCode.InvalidContent, cause = it) }
         val objectRoot = root as? JsonObject
             ?: throw WorkflowTransferException(WorkflowTransferErrorCode.RootNotObject)
-        if ("workflows" !in objectRoot) return WorkflowLibrary(workflows = listOf(decode(content)))
         objectRoot["formatVersion"]?.jsonPrimitive?.intOrNull?.let { version ->
             transferRequire(
                 version <= CURRENT_BUNDLE_FORMAT_VERSION,
@@ -136,6 +142,7 @@ object WorkflowTransferCodec {
                 mapOf("version" to version.toString()),
             )
         }
+        if ("workflows" !in objectRoot) return WorkflowLibrary(workflows = listOf(decode(content)))
         (objectRoot["workflows"] as? JsonArray).orEmpty().forEach { element ->
             (element as? JsonObject)?.let(::requireSupportedWorkflowVersion)
         }
@@ -165,7 +172,7 @@ object WorkflowTransferCodec {
             WorkflowTransferErrorCode.DuplicateFolderNames,
         )
         val normalizedWorkflows = bundle.workflows.map { workflow ->
-            workflow.copy(name = workflow.name.trim())
+            workflow.normalizedForCurrentSchema().copy(name = workflow.name.trim())
         }
         normalizedWorkflows.forEach(::validate)
         return WorkflowLibrary(

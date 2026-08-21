@@ -46,6 +46,19 @@ class StepTreeEditorTest {
         assertNull(steps.uniquePathTo("missing"))
         assertNull(steps.uniquePathTo("same"))
     }
+
+    @Test
+    fun `rejects nested paths through duplicate container ids`() {
+        val steps = listOf(
+            Step.Repeat("duplicate", 1, listOf(Step.Delay("first", 1))),
+            Step.Repeat("duplicate", 1, listOf(Step.Delay("second", 1))),
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            steps.stepsAt(root.child("duplicate", StepBranch.RepeatBody))
+        }
+    }
+
     private val root = StepListPath()
     private val falseBranch = root.child("condition", StepBranch.IfFalse)
     private val nestedRepeat = falseBranch.child("repeat", StepBranch.RepeatBody)
@@ -122,6 +135,99 @@ class StepTreeEditorTest {
     }
 
     @Test
+    fun `wraps a same-container range in repeat without replacing descendant ids`() {
+        val tree = listOf(
+            Step.Delay("before", 1),
+            Step.Delay("first", 2),
+            Step.GlobalAction("second", SystemAction.Back),
+            Step.Delay("after", 3),
+        )
+
+        val wrapped = tree.wrapRangeInRepeat(root, 1, 2, "repeat", 3)
+
+        assertEquals(listOf("before", "repeat", "after"), wrapped.map { it.id })
+        assertEquals(
+            listOf("first", "second"),
+            (wrapped[1] as Step.Repeat).steps.map { it.id },
+        )
+        assertEquals(
+            StepPath(root.child("repeat", StepBranch.RepeatBody), 1),
+            wrapped.uniquePathTo("second"),
+        )
+    }
+
+    @Test
+    fun `unwraps repeat in place and preserves its child order`() {
+        val tree = listOf(
+            Step.Delay("before", 1),
+            Step.Repeat(
+                "repeat",
+                2,
+                listOf(Step.Delay("first", 2), Step.GlobalAction("second", SystemAction.Home)),
+            ),
+            Step.Delay("after", 3),
+        )
+
+        val unwrapped = tree.unwrapRepeat(StepPath(root, 1))
+
+        assertEquals(listOf("before", "first", "second", "after"), unwrapped.map { it.id })
+        assertEquals(StepPath(root, 2), unwrapped.uniquePathTo("second"))
+    }
+
+    @Test
+    fun `moves a same-container range to its final destination index`() {
+        val tree = listOf(
+            Step.Delay("one", 1),
+            Step.Delay("two", 2),
+            Step.Delay("three", 3),
+            Step.Delay("four", 4),
+        )
+
+        val moved = tree.moveStepRange(root, 1, 2, 0)
+
+        assertEquals(listOf("two", "three", "one", "four"), moved.map { it.id })
+    }
+
+    @Test
+    fun `moves a range forward to the end using index after removal`() {
+        val tree = listOf(
+            Step.Delay("one", 1),
+            Step.Delay("two", 2),
+            Step.Delay("three", 3),
+            Step.Delay("four", 4),
+        )
+
+        val moved = tree.moveStepRange(root, 0, 1, destinationIndexAfterRemoval = 2)
+
+        assertEquals(listOf("three", "four", "one", "two"), moved.map { it.id })
+        assertEquals(tree.map { it.id }, tree.moveStepRange(root, 1, 2, destinationIndexAfterRemoval = 1).map { it.id })
+    }
+
+    @Test
+    fun `renames a label and every same-scope jump target atomically`() {
+        val tree = listOf(
+            Step.Label("label", "retry"),
+            Step.JumpIf("jump", "retry"),
+            Step.Repeat("repeat", 1, listOf(Step.JumpIf("nested-jump", "retry"))),
+            Step.IfElse(
+                "if",
+                Condition.Equals(Value.Literal("yes"), Value.Literal("yes")),
+                whenTrue = listOf(Step.JumpIf("branch-jump", "retry")),
+            ),
+        )
+
+        val renamed = tree.renameLabel(StepPath(root, 0), "again")
+
+        assertEquals("again", (renamed[0] as Step.Label).name)
+        assertEquals("again", (renamed[1] as Step.JumpIf).targetLabel)
+        assertEquals("retry", ((renamed[2] as Step.Repeat).steps.single() as Step.JumpIf).targetLabel)
+        assertEquals(
+            "retry",
+            ((renamed[3] as Step.IfElse).whenTrue.single() as Step.JumpIf).targetLabel,
+        )
+    }
+
+    @Test
     fun `rejects missing containers incompatible branches and invalid indexes`() {
         val tree = nestedTree()
 
@@ -136,6 +242,37 @@ class StepTreeEditorTest {
         }
         assertFailsWith<IllegalArgumentException> {
             tree.moveStep(StepPath(nestedRepeat, 0), 2)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            tree.wrapRangeInRepeat(root, 0, 1, "repeat", 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            tree.wrapRangeInRepeat(root, 0, 0, "condition", 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            tree.wrapRangeInRepeat(falseBranch, 0, 0, "condition", 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            tree.wrapRangeInRepeat(falseBranch, 0, 0, "true-action", 1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            listOf(Step.Delay("only", 1)).unwrapRepeat(StepPath(root, 0))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            tree.moveStepRange(root, 0, 0, destinationIndexAfterRemoval = 2)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            emptyList<Step>().moveStepRange(root, 0, 0, destinationIndexAfterRemoval = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            listOf(Step.Label("first", "one"), Step.Label("second", "two"))
+                .renameLabel(StepPath(root, 0), "two")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            listOf(Step.Label("label", "one")).renameLabel(StepPath(root, 0), " ")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            listOf(Step.Delay("delay", 1)).renameLabel(StepPath(root, 0), "name")
         }
     }
 

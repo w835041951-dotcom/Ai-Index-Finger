@@ -3,12 +3,16 @@ package com.aiindexfinger.executor
 import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.ComparisonOperator
 import com.aiindexfinger.model.FailurePolicy
+import com.aiindexfinger.model.ImageClickSelectionMode
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.RecordedBounds
 import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.RecordedControl
+import com.aiindexfinger.model.ReadNodeTextCaseTransform
+import com.aiindexfinger.model.ReadNodeTextPostProcess
 import com.aiindexfinger.model.ScrollDirection
+import com.aiindexfinger.model.ScrollUntilStopCondition
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.SystemAction
 import com.aiindexfinger.model.TextInputMethod
@@ -217,6 +221,210 @@ class WorkflowExecutorTest {
     }
 
     @Test
+    fun `jumps forward to a same-scope label`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "jump-forward",
+            name = "Jump forward",
+            steps = listOf(
+                Step.Label("start", "start"),
+                Step.JumpIf("jump", "done"),
+                Step.Click("skipped", selector),
+                Step.Label("done-label", "done"),
+                Step.Click("performed", selector),
+            ),
+        )
+
+        val execution = WorkflowExecutor(driver).runWithDiagnostics(workflow)
+
+        assertEquals(RunResult.Completed, execution.result)
+        assertEquals(1, driver.clickCount)
+        assertEquals(
+            listOf("start", "jump", "done-label", "performed"),
+            execution.diagnostics.map { it.stepId },
+        )
+    }
+
+    @Test
+    fun `does not jump when a jump condition is false`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "jump-condition",
+            name = "Jump condition",
+            steps = listOf(
+                Step.JumpIf(
+                    "jump",
+                    "done",
+                    Condition.Equals(Value.Literal("no"), Value.Literal("yes")),
+                ),
+                Step.Click("before-label", selector),
+                Step.Label("done-label", "done"),
+                Step.Click("after-label", selector),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(2, driver.clickCount)
+    }
+
+    @Test
+    fun `jumps use the current nested list scope`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "nested-jump",
+            name = "Nested jump",
+            steps = listOf(
+                Step.Repeat(
+                    "repeat",
+                    1,
+                    listOf(
+                        Step.JumpIf("jump", "done"),
+                        Step.Click("skipped", selector),
+                        Step.Label("done-label", "done"),
+                        Step.Click("performed", selector),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.clickCount)
+    }
+
+    @Test
+    fun `backward jumps consume the workflow execution budget`() = runTest {
+        val driver = FakeDriver()
+        val workflow = Workflow(
+            id = "jump-budget",
+            name = "Jump budget",
+            steps = listOf(
+                Step.Label("loop-label", "loop"),
+                Step.Click("click", selector),
+                Step.JumpIf("jump", "loop"),
+            ),
+        )
+
+        val result = WorkflowExecutor(driver, maxExecutedSteps = 5).run(workflow)
+
+        assertEquals(ExecutionErrorCode.ExecutionLimitExceeded, assertIs<RunResult.Failed>(result).error.code)
+        assertEquals(2, driver.clickCount)
+    }
+
+    @Test
+    fun `scroll until stops when a target appears`() = runTest {
+        val driver = FakeDriver(
+            nodeExistsResults = listOf(false, true),
+            scrollProgressResults = listOf(ScrollActionResult.Moved),
+        )
+        val workflow = scrollUntilWorkflow(
+            ScrollUntilStopCondition.NodeAppears(selector),
+            maxScrolls = 5,
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until stops when a target disappears`() = runTest {
+        val driver = FakeDriver(
+            nodeExistsResults = listOf(true, false),
+            scrollProgressResults = listOf(ScrollActionResult.Moved),
+        )
+        val workflow = scrollUntilWorkflow(
+            ScrollUntilStopCondition.NodeDisappears(selector),
+            maxScrolls = 5,
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(1, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until stops immediately when its condition already holds`() = runTest {
+        val driver = FakeDriver()
+        val workflow = scrollUntilWorkflow(
+            ScrollUntilStopCondition.ConditionMet(
+                Condition.Equals(Value.Literal("ready"), Value.Literal("ready")),
+            ),
+        )
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(0, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until requires two no-progress results before stopping`() = runTest {
+        val driver = FakeDriver(
+            scrollProgressResults = listOf(ScrollActionResult.NoProgress, ScrollActionResult.NoProgress),
+        )
+        val workflow = scrollUntilWorkflow(ScrollUntilStopCondition.NoProgress)
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(2, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until checks its target after every no-progress result`() = runTest {
+        val driver = FakeDriver(
+            nodeExistsResults = listOf(false, false, false, true),
+            scrollProgressResults = listOf(ScrollActionResult.NoProgress, ScrollActionResult.NoProgress),
+        )
+        val workflow = scrollUntilWorkflow(ScrollUntilStopCondition.NodeAppears(selector))
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(2, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until fails when its target is not met before the maximum`() = runTest {
+        val driver = FakeDriver(
+            nodeExistsResults = listOf(false),
+            scrollProgressResults = listOf(ScrollActionResult.Moved, ScrollActionResult.Moved),
+        )
+        val workflow = scrollUntilWorkflow(
+            ScrollUntilStopCondition.NodeAppears(selector),
+            maxScrolls = 2,
+        )
+
+        val result = WorkflowExecutor(driver).run(workflow)
+
+        assertEquals(ExecutionErrorCode.ScrollUntilMaxReached, assertIs<RunResult.Failed>(result).error.code)
+        assertEquals(2, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until maximum stop completes at its configured count`() = runTest {
+        val driver = FakeDriver(scrollProgressResults = listOf(ScrollActionResult.Moved, ScrollActionResult.Moved))
+        val workflow = scrollUntilWorkflow(ScrollUntilStopCondition.MaxScrolls, maxScrolls = 2)
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(2, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until maximum stop completes even when no progress is reported`() = runTest {
+        val driver = FakeDriver(
+            scrollProgressResults = listOf(ScrollActionResult.NoProgress, ScrollActionResult.NoProgress),
+        )
+        val workflow = scrollUntilWorkflow(ScrollUntilStopCondition.MaxScrolls, maxScrolls = 2)
+
+        assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+        assertEquals(2, driver.scrollCount)
+    }
+
+    @Test
+    fun `scroll until consumes the workflow execution budget for each scroll`() = runTest {
+        val driver = FakeDriver(scrollProgressResults = listOf(ScrollActionResult.Moved))
+        val workflow = scrollUntilWorkflow(ScrollUntilStopCondition.MaxScrolls, maxScrolls = 2)
+
+        val result = WorkflowExecutor(driver, maxExecutedSteps = 1).run(workflow)
+
+        assertEquals(ExecutionErrorCode.ExecutionLimitExceeded, assertIs<RunResult.Failed>(result).error.code)
+        assertEquals(0, driver.scrollCount)
+    }
+
+    @Test
     fun `diagnostics record nested steps in start order without user values`() = runTest {
         var nanos = 0L
         val workflow = Workflow(
@@ -284,6 +492,145 @@ class WorkflowExecutorTest {
         assertEquals("Order-42", driver.lastInputText)
     }
 
+        @Test
+        fun `renders an InputText value template directly`() = runTest {
+            val driver = FakeDriver()
+            val workflow = Workflow(
+                id = "template-input",
+                name = "Template input",
+                steps = listOf(
+                    Step.SetVariable("set", "name", Value.Literal("Ada")),
+                    Step.InputText(
+                        "input",
+                        selector,
+                        text = "",
+                        value = Value.Template("Hello ${'$'}{name}"),
+                    ),
+                ),
+            )
+
+            assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+            assertEquals("Hello Ada", driver.lastInputText)
+        }
+
+        @Test
+        fun `legacy InputText variable source remains supported`() = runTest {
+            val driver = FakeDriver()
+            val workflow = Workflow(
+                id = "legacy-input",
+                name = "Legacy input",
+                steps = listOf(
+                    Step.SetVariable("set", "name", Value.Literal("Ada")),
+                    Step.InputText("input", selector, text = "", variableName = "name"),
+                ),
+            )
+
+            assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+            assertEquals("Ada", driver.lastInputText)
+        }
+
+        @Test
+        fun `processes ReadNodeText before storing its variable`() = runTest {
+            val driver = FakeDriver(nodeTextResult = "  ORDER-42  ")
+            val workflow = Workflow(
+                id = "processed-read",
+                name = "Processed read",
+                steps = listOf(
+                    Step.ReadNodeText(
+                        "read",
+                        selector,
+                        "order",
+                        postProcess = ReadNodeTextPostProcess(
+                            trim = true,
+                            splitDelimiter = "-",
+                            splitIndex = 1,
+                            caseTransform = ReadNodeTextCaseTransform.Lowercase,
+                        ),
+                    ),
+                    Step.InputText("input", selector, text = "", variableName = "order"),
+                ),
+            )
+
+            assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+            assertEquals("42", driver.lastInputText)
+        }
+
+        @Test
+        fun `uses a ReadNodeText default when the attribute is missing`() = runTest {
+            val driver = FakeDriver(nodeTextResult = null)
+            val workflow = Workflow(
+                id = "default-read",
+                name = "Default read",
+                steps = listOf(
+                    Step.ReadNodeText("read", selector, "value", defaultValue = "fallback"),
+                    Step.InputText("input", selector, text = "", variableName = "value"),
+                ),
+            )
+
+            assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+            assertEquals("fallback", driver.lastInputText)
+        }
+
+        @Test
+        fun `uses a ReadNodeText default when the target is missing`() = runTest {
+            val driver = FakeDriver(readTargetFound = false)
+            val workflow = Workflow(
+                id = "missing-read",
+                name = "Missing read",
+                steps = listOf(
+                    Step.ReadNodeText("read", selector, "value", defaultValue = "fallback"),
+                    Step.InputText("input", selector, text = "", variableName = "value"),
+                ),
+            )
+
+            assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+            assertEquals("fallback", driver.lastInputText)
+        }
+
+        @Test
+        fun `uses a ReadNodeText default when processing does not match`() = runTest {
+            val driver = FakeDriver(nodeTextResult = "unmatched")
+            val workflow = Workflow(
+                id = "processed-default",
+                name = "Processed default",
+                steps = listOf(
+                    Step.ReadNodeText(
+                        "read",
+                        selector,
+                        "value",
+                        postProcess = ReadNodeTextPostProcess(regex = "ID:(\\w+)"),
+                        defaultValue = "fallback",
+                    ),
+                    Step.InputText("input", selector, text = "", variableName = "value"),
+                ),
+            )
+
+            assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+            assertEquals("fallback", driver.lastInputText)
+        }
+
+        @Test
+        fun `fails when ReadNodeText processing does not match without a default`() = runTest {
+            val driver = FakeDriver(nodeTextResult = "unmatched")
+            val workflow = Workflow(
+                id = "processed-failure",
+                name = "Processed failure",
+                steps = listOf(
+                    Step.ReadNodeText(
+                        "read",
+                        selector,
+                        "value",
+                        postProcess = ReadNodeTextPostProcess(regex = "ID:(\\w+)"),
+                    ),
+                ),
+            )
+
+            assertEquals(
+                ExecutionErrorCode.ReadValueProcessingFailed,
+                assertIs<RunResult.Failed>(WorkflowExecutor(driver).run(workflow)).error.code,
+            )
+        }
+
     @Test
     fun `reads node text into a variable for later input`() = runTest {
         val driver = FakeDriver(nodeTextResult = "captured text")
@@ -320,6 +667,22 @@ class WorkflowExecutorTest {
         assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
         assertEquals(0, driver.clickCount)
         assertEquals(1, driver.systemActionCount)
+    }
+
+    @Test
+    fun `forwards extended system actions to the driver`() = runTest {
+        listOf(SystemAction.Notifications, SystemAction.QuickSettings, SystemAction.PowerDialog, SystemAction.LockScreen)
+            .forEach { action ->
+                val driver = FakeDriver()
+                val workflow = Workflow(
+                    id = "global-$action",
+                    name = "Global",
+                    steps = listOf(Step.GlobalAction("action", action)),
+                )
+
+                assertEquals(RunResult.Completed, WorkflowExecutor(driver).run(workflow))
+                assertEquals(action, driver.lastSystemAction)
+            }
     }
 
     @Test
@@ -1027,6 +1390,55 @@ class WorkflowExecutorTest {
         }
     }
 
+    @Test
+    fun `partial image click suppresses retry and records current progress`() = runTest {
+        val progress = ImageClickExecutionDiagnostic(
+            selectionMode = ImageClickSelectionMode.AllMatches,
+            candidateCount = 3,
+            candidatesTruncated = false,
+            bestScorePermille = 990,
+            bestScalePermille = 1_000,
+            plannedClickCount = 3,
+            completedClickCount = 1,
+            failedClickIndex = 2,
+        )
+        val driver = FakeDriver(
+            imageClickResult = ImageClickResult.PartialExecution(progress),
+            imageClickProgress = listOf(progress),
+        )
+        val workflow = imageClickWorkflow().copy(
+            steps = listOf(
+                (imageClickWorkflow().steps.single() as Step.ImageClick).copy(
+                    failurePolicy = FailurePolicy.Retry(2, delayMillis = 0),
+                ),
+            ),
+        )
+
+        val execution = WorkflowExecutor(driver).runWithDiagnostics(workflow)
+
+        assertEquals(ExecutionErrorCode.ImageClickPartialExecution, assertIs<RunResult.Failed>(execution.result).error.code)
+        assertEquals(1, driver.imageClickCount)
+        assertEquals(true, requireNotNull(execution.diagnostics.single().imageClick).retrySuppressed)
+        assertEquals(1, execution.diagnostics.single().imageClick?.completedClickCount)
+    }
+
+    @Test
+    fun `zero click image failure still follows retry policy`() = runTest {
+        val driver = FakeDriver(imageClickResult = ImageClickResult.GestureFailed)
+        val workflow = imageClickWorkflow().copy(
+            steps = listOf(
+                (imageClickWorkflow().steps.single() as Step.ImageClick).copy(
+                    failurePolicy = FailurePolicy.Retry(1, delayMillis = 0),
+                ),
+            ),
+        )
+
+        val result = WorkflowExecutor(driver).run(workflow)
+
+        assertEquals(ExecutionErrorCode.ImageGestureFailed, assertIs<RunResult.Failed>(result).error.code)
+        assertEquals(2, driver.imageClickCount)
+    }
+
     private fun imageClickWorkflow() = Workflow(
         id = "image-click",
         name = "Image click",
@@ -1037,6 +1449,23 @@ class WorkflowExecutorTest {
                 templatePngBase64 = "a".repeat(16),
                 templateWidth = 12,
                 templateHeight = 12,
+            ),
+        ),
+    )
+
+    private fun scrollUntilWorkflow(
+        stopCondition: ScrollUntilStopCondition,
+        maxScrolls: Int? = null,
+    ) = Workflow(
+        id = "scroll-until",
+        name = "Scroll until",
+        steps = listOf(
+            Step.ScrollUntil(
+                id = "scroll-until",
+                selector = selector,
+                direction = ScrollDirection.Forward,
+                stopCondition = stopCondition,
+                maxScrolls = maxScrolls,
             ),
         ),
     )
@@ -1064,9 +1493,12 @@ class WorkflowExecutorTest {
         private val clickGate: CompletableDeferred<Unit>? = null,
         private val failClicksBeforeSuccess: Int = 0,
         private val nodeExistsResult: Boolean = true,
+        private val nodeExistsResults: List<Boolean> = emptyList(),
         private val nodeTextResult: String? = "node text",
         private val imageClickResult: ImageClickResult = ImageClickResult.Clicked(1_000),
+        private val imageClickProgress: List<ImageClickExecutionDiagnostic> = emptyList(),
         private val scrollResult: Boolean = true,
+        private val scrollProgressResults: List<ScrollActionResult> = emptyList(),
         private val launchResult: Boolean = true,
         private val longClickResult: Boolean = true,
         private val inputTextResult: NodeActionResult = NodeActionResult.Succeeded,
@@ -1074,17 +1506,23 @@ class WorkflowExecutorTest {
         private val tapResult: GestureActionResult = GestureActionResult.Succeeded,
         private val systemActionResult: Boolean = true,
         private val targetFound: Boolean = true,
+        private val readTargetFound: Boolean = targetFound,
     ) : AutomationDriver {
         var clickCount = 0
+        var imageClickCount = 0
         var longClickCount = 0
+        var scrollCount = 0
         var lastTap: Pair<Int, Int>? = null
         var lastScrollDirection: ScrollDirection? = null
         var lastInputText: String? = null
         var lastInputMethod: TextInputMethod? = null
         var lastReadAttribute: NodeAttribute? = null
         var systemActionCount = 0
+        var lastSystemAction: SystemAction? = null
         var lastLaunchPackage: String? = null
         var lastIntentAction: String? = null
+        private var nodeExistsIndex = 0
+        private var scrollProgressIndex = 0
 
         override suspend fun launchApp(packageName: String, intentAction: String?): Boolean {
             lastLaunchPackage = packageName
@@ -1107,7 +1545,7 @@ class WorkflowExecutorTest {
             selector: NodeSelector,
             attribute: NodeAttribute,
         ): NodeReadResult {
-            if (!targetFound) return NodeReadResult.TargetNotFound
+            if (!readTargetFound) return NodeReadResult.TargetNotFound
             lastReadAttribute = attribute
             return nodeTextResult?.let(NodeReadResult::Value) ?: NodeReadResult.AttributeMissing
         }
@@ -1128,8 +1566,19 @@ class WorkflowExecutorTest {
             direction: ScrollDirection,
         ): NodeActionResult {
             if (!targetFound) return NodeActionResult.TargetNotFound
+            scrollCount++
             lastScrollDirection = direction
             return scrollResult.toNodeActionResult()
+        }
+
+        override suspend fun scrollNodeWithProgress(
+            selector: NodeSelector,
+            direction: ScrollDirection,
+        ): ScrollActionResult {
+            if (scrollProgressResults.isEmpty()) return super.scrollNodeWithProgress(selector, direction)
+            scrollCount++
+            lastScrollDirection = direction
+            return scrollProgressResults.getOrElse(scrollProgressIndex++) { scrollProgressResults.last() }
         }
 
         override suspend fun swipe(
@@ -1142,6 +1591,7 @@ class WorkflowExecutorTest {
 
         override suspend fun performSystemAction(action: SystemAction): Boolean {
             systemActionCount++
+            lastSystemAction = action
             return systemActionResult
         }
 
@@ -1152,9 +1602,19 @@ class WorkflowExecutorTest {
             return (clickResult && clickCount > failClicksBeforeSuccess).toNodeActionResult()
         }
 
-        override suspend fun clickImage(step: Step.ImageClick): ImageClickResult = imageClickResult
+        override suspend fun clickImage(
+            step: Step.ImageClick,
+            onProgress: (ImageClickExecutionDiagnostic) -> Unit,
+        ): ImageClickResult {
+            imageClickCount++
+            imageClickProgress.forEach(onProgress)
+            return imageClickResult
+        }
 
-        override suspend fun nodeExists(selector: NodeSelector) = nodeExistsResult
+        override suspend fun nodeExists(selector: NodeSelector): Boolean = when {
+            nodeExistsResults.isEmpty() -> nodeExistsResult
+            else -> nodeExistsResults.getOrElse(nodeExistsIndex++) { nodeExistsResults.last() }
+        }
 
         private fun Boolean.toNodeActionResult(): NodeActionResult =
             if (this) NodeActionResult.Succeeded else NodeActionResult.ActionFailed

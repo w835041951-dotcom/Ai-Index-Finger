@@ -34,7 +34,43 @@ class StepExecutionSettingsTest {
 
     @Test
     fun `updates image click settings without changing template`() {
-        val original = Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24)
+        val original = Step.ImageClick(
+            "image",
+            "com.example",
+            "aGVsbG8=",
+            24,
+            24,
+            selectionMode = ImageClickSelectionMode.AllMatches,
+            maxClicks = 60,
+            clickIntervalMillis = 800,
+        )
+
+        assertEquals(
+            original.copy(timeoutMillis = 3_000, failurePolicy = FailurePolicy.Continue),
+            original.withExecutionSettings(3_000, FailurePolicy.Continue),
+        )
+    }
+
+    @Test
+    fun `updates jump settings without changing its target`() {
+        val original = Step.JumpIf("jump", "target", Condition.Equals(Value.Literal("a"), Value.Literal("a")))
+
+        assertEquals(
+            original.copy(timeoutMillis = 3_000, failurePolicy = FailurePolicy.Continue),
+            original.withExecutionSettings(3_000, FailurePolicy.Continue),
+        )
+    }
+
+    @Test
+    fun `updates scroll until settings without changing its stop configuration`() {
+        val selector = NodeSelector("com.example", text = "List")
+        val original = Step.ScrollUntil(
+            "scroll-until",
+            selector,
+            ScrollDirection.Forward,
+            ScrollUntilStopCondition.NodeAppears(selector),
+            maxScrolls = 10,
+        )
 
         assertEquals(
             original.copy(timeoutMillis = 3_000, failurePolicy = FailurePolicy.Continue),

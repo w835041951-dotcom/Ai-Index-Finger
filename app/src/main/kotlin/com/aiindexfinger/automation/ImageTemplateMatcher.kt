@@ -1,5 +1,6 @@
 package com.aiindexfinger.automation
 
+import com.aiindexfinger.model.ImageClickSelectionMode
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -10,7 +11,6 @@ data class LumaImage(
     val pixels: ByteArray,
 ) {
     init {
-        require(width > 0 && height > 0)
         require(pixels.size == width * height)
     }
 
@@ -24,10 +24,29 @@ sealed interface TemplateMatchResult {
         val scorePermille: Int,
         val width: Int = 1,
         val height: Int = 1,
+        val scalePermille: Int = 1_000,
     ) : TemplateMatchResult
 
     data object NoMatch : TemplateMatchResult
     data object Ambiguous : TemplateMatchResult
+}
+
+typealias TemplateMatchCandidate = TemplateMatchResult.Unique
+
+val TemplateMatchCandidate.left: Int
+    get() = centerX - width / 2
+
+val TemplateMatchCandidate.top: Int
+    get() = centerY - height / 2
+
+internal data class TemplateMatchPlan(
+    val candidates: List<TemplateMatchCandidate>,
+    val rawCandidateCount: Int,
+    val candidatesTruncated: Boolean,
+) {
+    init {
+        require(candidates.size <= MAX_RAW_CANDIDATES) { "Too many template match candidates" }
+    }
 }
 
 internal fun matchTemplate(
@@ -38,15 +57,49 @@ internal fun matchTemplate(
     scaleTolerancePermille: Int = 0,
     searchRegions: List<ImageCropBounds>? = null,
     checkCancellation: () -> Unit = {},
-): TemplateMatchResult = matchTemplateInternal(
+): TemplateMatchResult = matchTemplatePlan(
     screen,
     template,
     minimumScorePermille,
-    ambiguityMarginPermille,
     scaleTolerancePermille,
     searchRegions,
     checkCancellation,
+).candidates.firstOrNull() ?: TemplateMatchResult.NoMatch
+
+@Suppress("UNUSED_PARAMETER")
+internal fun matchTemplatePlan(
+    screen: LumaImage,
+    template: LumaImage,
+    minimumScorePermille: Int,
+    scaleTolerancePermille: Int = 0,
+    searchRegions: List<ImageCropBounds>? = null,
+    checkCancellation: () -> Unit = {},
+): TemplateMatchPlan = matchTemplateInternal(
+    screen = screen,
+    template = template,
+    minimumScorePermille = minimumScorePermille,
+    scaleTolerancePermille = scaleTolerancePermille,
+    searchRegions = searchRegions,
+    checkCancellation = checkCancellation,
 )
+
+internal fun selectTemplateMatchCandidates(
+    plan: TemplateMatchPlan,
+    selectionMode: ImageClickSelectionMode,
+    maxClicks: Int,
+): List<TemplateMatchCandidate> {
+    require(maxClicks in 1..MAX_RAW_CANDIDATES) { "Image click count is out of range" }
+    return when (selectionMode) {
+        ImageClickSelectionMode.BestMatch -> plan.candidates
+            .sortedWith(compareByDescending<TemplateMatchCandidate> { it.scorePermille }
+                .thenBy { it.centerY }
+                .thenBy { it.centerX })
+            .take(1)
+        ImageClickSelectionMode.AllMatches -> plan.candidates
+            .sortedWith(compareBy<TemplateMatchCandidate> { it.centerY }.thenBy { it.centerX })
+            .take(maxClicks)
+    }
+}
 
 internal fun matchTemplateMeasured(
     screen: LumaImage,
@@ -58,71 +111,78 @@ internal fun matchTemplateMeasured(
     checkCancellation: () -> Unit = {},
 ): TemplateMatchMeasurement {
     val work = TemplateMatchingWork()
-    val result = matchTemplateInternal(
-        screen,
-        template,
-        minimumScorePermille,
-        ambiguityMarginPermille,
-        scaleTolerancePermille,
-        searchRegions,
-        checkCancellation,
-        work,
+    val plan = matchTemplateInternal(
+        screen = screen,
+        template = template,
+        minimumScorePermille = minimumScorePermille,
+        scaleTolerancePermille = scaleTolerancePermille,
+        searchRegions = searchRegions,
+        checkCancellation = checkCancellation,
+        work = work,
     )
-    return TemplateMatchMeasurement(result, work.exactEvaluations, work.fineEvaluations)
+    return TemplateMatchMeasurement(plan, work.exactEvaluations, work.fineEvaluations)
 }
 
+@Suppress("UNUSED_PARAMETER")
 private fun matchTemplateInternal(
     screen: LumaImage,
     template: LumaImage,
     minimumScorePermille: Int,
-    ambiguityMarginPermille: Int,
     scaleTolerancePermille: Int,
     searchRegions: List<ImageCropBounds>?,
     checkCancellation: () -> Unit,
     work: TemplateMatchingWork? = null,
-): TemplateMatchResult {
+): TemplateMatchPlan {
     require(scaleTolerancePermille in SUPPORTED_SCALE_TOLERANCES) { "Unsupported scale tolerance" }
-    if (templateVariance(template) < MIN_TEMPLATE_VARIANCE) return TemplateMatchResult.NoMatch
+    if (templateVariance(template) < MIN_TEMPLATE_VARIANCE) return TemplateMatchPlan(emptyList(), 0, false)
 
     val scaledTemplates = scalePermilles(scaleTolerancePermille).map { scalePermille ->
         checkCancellation()
-        scaleLumaImage(template, scalePermille)
+        scalePermille to scaleLumaImage(template, scalePermille)
     }
-    val exactMatches = distinctPositions(
-        scaledTemplates.flatMap { scaledTemplate ->
-            findExactCandidates(screen, scaledTemplate, searchRegions, checkCancellation, work)
-        },
-    )
-    if (exactMatches.size > 1) return TemplateMatchResult.Ambiguous
-
-    val refined = scaledTemplates.flatMap { scaledTemplate ->
+    var rawCandidateCount = 0
+    var candidatesTruncated = false
+    val rawCandidates = scaledTemplates.flatMap { (scalePermille, scaledTemplate) ->
         checkCancellation()
-        findCandidates(
+        val exact = findExactCandidates(
             screen,
             scaledTemplate,
             searchRegions,
             checkCancellation,
             work,
         )
+        val refined = if (exact.truncated) {
+            emptyList()
+        } else {
+            findCandidates(
+                screen,
+                scaledTemplate,
+                searchRegions,
+                checkCancellation,
+                work,
+            )
+        }
+        val scaleCandidates = (exact.candidates + refined)
+            .map { candidate -> candidate.copy(scalePermille = scalePermille) }
+            .sortedWith(scoredPositionOrder)
+        rawCandidateCount += scaleCandidates.size.coerceAtMost(MAX_RAW_CANDIDATES_PER_SCALE)
+        candidatesTruncated = candidatesTruncated || exact.truncated ||
+            scaleCandidates.size > MAX_RAW_CANDIDATES_PER_SCALE
+        scaleCandidates.take(MAX_RAW_CANDIDATES_PER_SCALE)
     }
-    val distinct = distinctPositions(exactMatches + refined)
-    val best = distinct.firstOrNull() ?: return TemplateMatchResult.NoMatch
-    if (best.scorePermille < minimumScorePermille) return TemplateMatchResult.NoMatch
-    val second = distinct.getOrNull(1)
-    if (second != null && second.scorePermille >= minimumScorePermille &&
-        (best.scorePermille == second.scorePermille ||
-            best.scorePermille - second.scorePermille < ambiguityMarginPermille)
-    ) {
-        return TemplateMatchResult.Ambiguous
-    }
-    return TemplateMatchResult.Unique(
-        centerX = best.centerX,
-        centerY = best.centerY,
-        scorePermille = best.scorePermille,
-        width = best.width,
-        height = best.height,
+    val candidates = nonMaximumSuppression(rawCandidates)
+        .filter { it.scorePermille >= minimumScorePermille }
+    return TemplateMatchPlan(
+        candidates = candidates,
+        rawCandidateCount = rawCandidateCount,
+        candidatesTruncated = candidatesTruncated,
     )
 }
+
+private data class CandidateSearch(
+    val candidates: List<ScoredPosition>,
+    val truncated: Boolean,
+)
 
 private fun findExactCandidates(
     screen: LumaImage,
@@ -130,9 +190,9 @@ private fun findExactCandidates(
     searchRegions: List<ImageCropBounds>?,
     checkCancellation: () -> Unit,
     work: TemplateMatchingWork?,
-): List<ScoredPosition> {
-    if (template.width > screen.width || template.height > screen.height) return emptyList()
-    val regions = normalizedSearchRegions(screen, template, searchRegions) ?: return emptyList()
+): CandidateSearch {
+    if (template.width > screen.width || template.height > screen.height) return CandidateSearch(emptyList(), false)
+    val regions = normalizedSearchRegions(screen, template, searchRegions) ?: return CandidateSearch(emptyList(), false)
     val anchors = exactMatchAnchors(template)
     val accepted = mutableListOf<ScoredPosition>()
     regions.forEach { region ->
@@ -156,14 +216,19 @@ private fun findExactCandidates(
                     template.width,
                     template.height,
                 )
-                if (accepted.all { existing -> positionsAreSeparated(existing, candidate) }) {
+                if (accepted.all { existing ->
+                        intersectionOverUnion(existing, candidate) < NMS_IOU_THRESHOLD
+                    }
+                ) {
+                    if (accepted.size == MAX_RAW_CANDIDATES_PER_SCALE) {
+                        return CandidateSearch(accepted, truncated = true)
+                    }
                     accepted += candidate
-                    if (accepted.size > 1) return accepted
                 }
             }
         }
     }
-    return accepted
+    return CandidateSearch(accepted, truncated = false)
 }
 
 private fun exactMatchAnchors(template: LumaImage): IntArray {
@@ -191,18 +256,25 @@ private fun pixelsEqual(
     return true
 }
 
-private fun distinctPositions(candidates: List<ScoredPosition>): List<ScoredPosition> = candidates
-    .sortedByDescending { it.scorePermille }
-    .fold(mutableListOf()) { accepted, candidate ->
-        if (accepted.all { existing -> positionsAreSeparated(existing, candidate) }) {
+private fun nonMaximumSuppression(candidates: List<ScoredPosition>): List<TemplateMatchCandidate> = candidates
+    .sortedWith(scoredPositionOrder)
+    .fold(mutableListOf<ScoredPosition>()) { accepted, candidate ->
+        if (accepted.all { existing -> intersectionOverUnion(existing, candidate) < NMS_IOU_THRESHOLD }) {
             accepted += candidate
         }
         accepted
     }
+    .map(ScoredPosition::toTemplateMatchCandidate)
 
-private fun positionsAreSeparated(first: ScoredPosition, second: ScoredPosition): Boolean =
-    abs(first.centerX - second.centerX) >= minOf(first.width, second.width) / 2 ||
-        abs(first.centerY - second.centerY) >= minOf(first.height, second.height) / 2
+private fun intersectionOverUnion(first: ScoredPosition, second: ScoredPosition): Float {
+    val intersectionWidth = (minOf(first.left + first.width, second.left + second.width) -
+        maxOf(first.left, second.left)).coerceAtLeast(0)
+    val intersectionHeight = (minOf(first.top + first.height, second.top + second.height) -
+        maxOf(first.top, second.top)).coerceAtLeast(0)
+    val intersection = intersectionWidth.toLong() * intersectionHeight
+    val union = first.width.toLong() * first.height + second.width.toLong() * second.height - intersection
+    return if (union == 0L) 0f else intersection.toFloat() / union
+}
 
 private fun findCandidates(
     screen: LumaImage,
@@ -308,10 +380,12 @@ private fun axisPositions(start: Int, end: Int, stride: Int): Sequence<Int> = se
 }
 
 internal data class TemplateMatchMeasurement(
-    val result: TemplateMatchResult,
+    val plan: TemplateMatchPlan,
     val exactEvaluations: Int,
     val fineEvaluations: Int,
-)
+) {
+    val result: TemplateMatchResult get() = plan.candidates.firstOrNull() ?: TemplateMatchResult.NoMatch
+}
 
 private class TemplateMatchingWork(
     var exactEvaluations: Int = 0,
@@ -392,16 +466,32 @@ private data class ScoredPosition(
     val scorePermille: Int,
     val width: Int,
     val height: Int,
+    val scalePermille: Int = 1_000,
 ) {
     val centerX: Int
         get() = left + width / 2
     val centerY: Int
         get() = top + height / 2
+
+    fun toTemplateMatchCandidate(): TemplateMatchCandidate = TemplateMatchCandidate(
+        centerX = centerX,
+        centerY = centerY,
+        scorePermille = scorePermille,
+        width = width,
+        height = height,
+        scalePermille = scalePermille,
+    )
 }
 
 private const val MIN_TEMPLATE_VARIANCE = 4
 private const val MAX_COARSE_SAMPLES = 64
 private const val MAX_FINE_SAMPLES = 512
+private const val MAX_RAW_CANDIDATES_PER_SCALE = 100
+private const val MAX_RAW_CANDIDATES = MAX_RAW_CANDIDATES_PER_SCALE * 5
 private const val MAX_COARSE_CANDIDATES = 12
-private const val MAX_REFINED_CANDIDATES = 24
+private const val MAX_REFINED_CANDIDATES = MAX_RAW_CANDIDATES_PER_SCALE
+private const val NMS_IOU_THRESHOLD = 0.5f
 private val SUPPORTED_SCALE_TOLERANCES = setOf(0, 50, 100)
+private val scoredPositionOrder = compareByDescending<ScoredPosition> { it.scorePermille }
+    .thenBy { it.centerY }
+    .thenBy { it.centerX }

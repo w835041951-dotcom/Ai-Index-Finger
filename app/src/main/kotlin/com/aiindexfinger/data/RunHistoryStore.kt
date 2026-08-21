@@ -4,6 +4,7 @@ import android.content.Context
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.StepExecutionDiagnostic
 import com.aiindexfinger.executor.StepExecutionOutcome
+import com.aiindexfinger.model.ImageClickSelectionMode
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.Step
 import kotlinx.serialization.Serializable
@@ -44,7 +45,28 @@ data class RunStepDiagnostic(
     val failureArguments: Map<String, String> = emptyMap(),
     val failedStepId: String? = null,
     val failedStepLocation: RunStepLocation? = null,
+    val imageClick: RunImageClickDiagnostic? = null,
 )
+
+@Serializable
+data class RunImageClickDiagnostic(
+    val selectionMode: RunImageClickSelectionMode = RunImageClickSelectionMode.Unknown,
+    val candidateCount: Int,
+    val candidatesTruncated: Boolean,
+    val bestScorePermille: Int?,
+    val bestScalePermille: Int?,
+    val plannedClickCount: Int,
+    val completedClickCount: Int,
+    val failedClickIndex: Int? = null,
+    val retrySuppressed: Boolean = false,
+)
+
+@Serializable
+enum class RunImageClickSelectionMode {
+    BestMatch,
+    AllMatches,
+    Unknown,
+}
 
 @Serializable
 data class RunStepLocation(
@@ -192,7 +214,8 @@ class RunHistoryStore private constructor(
                         "outcome",
                         RunStepOutcome.entries.mapTo(mutableSetOf(), RunStepOutcome::name),
                     ) || diagnostic.hasUnsupportedLocation("location") ||
-                        diagnostic.hasUnsupportedLocation("failedStepLocation")
+                    diagnostic.hasUnsupportedLocation("failedStepLocation") ||
+                    diagnostic.hasUnsupportedImageClickDiagnostic("imageClick")
                 }
         }
     }
@@ -215,6 +238,15 @@ class RunHistoryStore private constructor(
         }
     }
 
+    private fun JsonObject.hasUnsupportedImageClickDiagnostic(key: String): Boolean {
+        val imageClick = this[key] as? JsonObject ?: return this[key] != null
+        return imageClick.hasUnknownKeys(RUN_IMAGE_CLICK_DIAGNOSTIC_KEYS) ||
+            imageClick.hasUnknownEnum(
+                "selectionMode",
+                RunImageClickSelectionMode.entries.mapTo(mutableSetOf(), RunImageClickSelectionMode::name),
+            )
+    }
+
     private companion object {
         val FILE_LOCK = Any()
         const val FILE_NAME = "run-history.json"
@@ -227,7 +259,12 @@ class RunHistoryStore private constructor(
         )
         val RUN_DIAGNOSTIC_KEYS = setOf(
             "sequence", "stepId", "durationMillis", "attemptCount", "outcome", "location",
-            "failureCode", "failureArguments", "failedStepId", "failedStepLocation",
+            "failureCode", "failureArguments", "failedStepId", "failedStepLocation", "imageClick",
+        )
+        val RUN_IMAGE_CLICK_DIAGNOSTIC_KEYS = setOf(
+            "selectionMode", "candidateCount", "candidatesTruncated", "bestScorePermille",
+            "bestScalePermille", "plannedClickCount", "completedClickCount", "failedClickIndex",
+            "retrySuppressed",
         )
         val RUN_LOCATION_KEYS = setOf("segments")
         val RUN_LOCATION_SEGMENT_KEYS = setOf("index", "branch")
@@ -286,6 +323,19 @@ fun RunResult.toRunRecord(
                 failureArguments = diagnostic.error?.arguments.orEmpty(),
                 failedStepId = diagnostic.failedStepId,
                 failedStepLocation = diagnostic.failedStepId?.let(workflow.steps::uniqueRunLocationTo),
+                imageClick = diagnostic.imageClick?.let { imageClick ->
+                    RunImageClickDiagnostic(
+                        selectionMode = imageClick.selectionMode.toRunImageClickSelectionMode(),
+                        candidateCount = imageClick.candidateCount,
+                        candidatesTruncated = imageClick.candidatesTruncated,
+                        bestScorePermille = imageClick.bestScorePermille,
+                        bestScalePermille = imageClick.bestScalePermille,
+                        plannedClickCount = imageClick.plannedClickCount,
+                        completedClickCount = imageClick.completedClickCount,
+                        failedClickIndex = imageClick.failedClickIndex,
+                        retrySuppressed = imageClick.retrySuppressed,
+                    )
+                },
             )
         },
     )
@@ -305,6 +355,11 @@ private fun StepExecutionOutcome.toRunStepOutcome(): RunStepOutcome = when (this
     StepExecutionOutcome.ContinuedAfterFailure -> RunStepOutcome.ContinuedAfterFailure
     StepExecutionOutcome.Failed -> RunStepOutcome.Failed
     StepExecutionOutcome.Cancelled -> RunStepOutcome.Cancelled
+}
+
+private fun ImageClickSelectionMode.toRunImageClickSelectionMode(): RunImageClickSelectionMode = when (this) {
+    ImageClickSelectionMode.BestMatch -> RunImageClickSelectionMode.BestMatch
+    ImageClickSelectionMode.AllMatches -> RunImageClickSelectionMode.AllMatches
 }
 
 internal fun List<Step>.uniqueRunLocationTo(stepId: String): RunStepLocation? {

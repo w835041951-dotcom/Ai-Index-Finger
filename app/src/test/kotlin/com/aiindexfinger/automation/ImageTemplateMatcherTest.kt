@@ -1,5 +1,6 @@
 package com.aiindexfinger.automation
 
+import com.aiindexfinger.model.ImageClickSelectionMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -111,26 +112,64 @@ class ImageTemplateMatcherTest {
     }
 
     @Test
-    fun `rejects two equally strong spatially distinct matches`() {
+    fun `plans every spatially distinct exact match in screen order`() {
         val template = pattern(12, 12)
         val screen = canvas(48, 40, listOf(3 to 4, 29 to 20), template)
 
-        val measurement = matchTemplateMeasured(screen, template, 920, 25)
+        val plan = matchTemplatePlan(screen, template, 920)
 
-        assertEquals(TemplateMatchResult.Ambiguous, measurement.result)
-        assertEquals(0, measurement.fineEvaluations)
+        assertEquals(
+            listOf(
+                TemplateMatchResult.Unique(9, 10, 1_000, 12, 12),
+                TemplateMatchResult.Unique(35, 26, 1_000, 12, 12),
+            ),
+            plan.candidates,
+        )
+        assertEquals(
+            listOf(TemplateMatchResult.Unique(9, 10, 1_000, 12, 12)),
+            selectTemplateMatchCandidates(plan, ImageClickSelectionMode.BestMatch, 20),
+        )
+        assertEquals(
+            plan.candidates,
+            selectTemplateMatchCandidates(plan, ImageClickSelectionMode.AllMatches, 20),
+        )
     }
 
     @Test
-    fun `equal spatially distinct matches remain ambiguous with zero margin`() {
+    fun `keeps nearby exact matches when their overlap is below NMS threshold`() {
+        val template = periodicPattern(12, 12)
+        val screen = LumaImage(
+            width = 17,
+            height = 12,
+            pixels = ByteArray(17 * 12) { index ->
+                val x = index % 17
+                val y = index / 17
+                (20 + (x % 5) * 30 + y * 3).toByte()
+            },
+        )
+
+        assertEquals(
+            listOf(TemplateMatchResult.Unique(6, 6, 1_000, 12, 12), TemplateMatchResult.Unique(11, 6, 1_000, 12, 12)),
+            matchTemplatePlan(screen, template, 1_000).candidates,
+        )
+    }
+
+    @Test
+    fun `best match breaks exact-score ties from top to bottom then left to right`() {
         val template = pattern(12, 12)
-        val screen = canvas(48, 40, listOf(3 to 4, 29 to 20), template)
+        val screen = canvas(64, 40, listOf(29 to 4, 3 to 4, 40 to 20), template)
 
-        assertEquals(TemplateMatchResult.Ambiguous, matchTemplate(screen, template, 920, 0))
+        val selected = selectTemplateMatchCandidates(
+            matchTemplatePlan(screen, template, 920),
+            ImageClickSelectionMode.BestMatch,
+            20,
+        )
+
+        assertEquals(listOf(TemplateMatchResult.Unique(9, 10, 1_000, 12, 12)), selected)
     }
 
     @Test
-    fun `exact target still requires configured lead over near match`() {
+    fun `best match ignores the legacy ambiguity margin`() {
         val template = pattern(12, 12)
         val nearMatch = template.pixels.map { value ->
             ((value.toInt() and 0xff) + 2).coerceAtMost(255).toByte()
@@ -141,7 +180,7 @@ class ImageTemplateMatcherTest {
         val screen = LumaImage(48, 40, pixels)
 
         assertEquals(
-            TemplateMatchResult.Ambiguous,
+            TemplateMatchResult.Unique(9, 10, 1_000, 12, 12),
             matchTemplate(screen, template, 920, ambiguityMarginPermille = 25),
         )
         assertEquals(
@@ -155,7 +194,10 @@ class ImageTemplateMatcherTest {
         val template = pattern(12, 12)
         val screen = canvas(48, 40, listOf(3 to 4, 29 to 19), template)
 
-        assertEquals(TemplateMatchResult.Ambiguous, matchTemplate(screen, template, 920, 25))
+        assertEquals(
+            listOf(9 to 10, 35 to 25),
+            matchTemplatePlan(screen, template, 920).candidates.map { it.centerX to it.centerY },
+        )
         assertEquals(
             TemplateMatchResult.Unique(35, 25, 1_000, 12, 12),
             matchTemplate(
@@ -189,7 +231,7 @@ class ImageTemplateMatcherTest {
             matchTemplate(screen, template, 1_000, 25),
         )
         assertEquals(
-            TemplateMatchResult.Unique(28, 24, 1_000, 22, 22),
+            TemplateMatchResult.Unique(28, 24, 1_000, 22, 22, 1_100),
             matchTemplate(screen, template, 1_000, 25, 100),
         )
     }
@@ -214,6 +256,7 @@ class ImageTemplateMatcherTest {
                         1_000,
                         scaled.width,
                         scaled.height,
+                        scale,
                     ),
                     matchTemplate(
                         canvas(80, 64, listOf(left to top), scaled),
@@ -245,7 +288,7 @@ class ImageTemplateMatcherTest {
             matchTemplate(screen, template, 1_000, 25, searchRegions = targetRegion),
         )
         assertEquals(
-            TemplateMatchResult.Unique(56, 28, 1_000, 22, 22),
+            TemplateMatchResult.Unique(56, 28, 1_000, 22, 22, 1_100),
             matchTemplate(screen, template, 1_000, 25, 100, targetRegion),
         )
     }
@@ -278,7 +321,7 @@ class ImageTemplateMatcherTest {
     }
 
     @Test
-    fun `targets at different scales and positions remain ambiguous`() {
+    fun `targets at different scales and positions remain separate candidates`() {
         val template = pattern(20, 20)
         val enlarged = scaleLumaImage(template, 1_100)
         val pixels = canvas(80, 64, listOf(3 to 3), template).pixels.copyOf()
@@ -289,7 +332,30 @@ class ImageTemplateMatcherTest {
         }
         val screen = LumaImage(80, 64, pixels)
 
-        assertEquals(TemplateMatchResult.Ambiguous, matchTemplate(screen, template, 950, 25, 100))
+        val plan = matchTemplatePlan(screen, template, 950, 100)
+
+        assertEquals(2, plan.candidates.size)
+        assertEquals(TemplateMatchResult.Unique(13, 13, 1_000, 20, 20, 1_000), plan.candidates.first())
+    }
+
+    @Test
+    fun `caps raw exact candidates and records truncation`() {
+        val template = nonRepeatingPattern(12, 12)
+        val positions = buildList {
+            repeat(11) { row ->
+                repeat(10) { column -> add(column * 14 to row * 14) }
+            }
+        }
+
+        val plan = matchTemplatePlan(canvas(152, 166, positions, template), template, 1_000)
+
+        assertEquals(100, plan.rawCandidateCount)
+        assertEquals(true, plan.candidatesTruncated)
+        assertTrue(plan.candidates.size <= 100)
+        assertEquals(
+            plan.candidates.size,
+            selectTemplateMatchCandidates(plan, ImageClickSelectionMode.AllMatches, 100).size,
+        )
     }
 
     @Test(expected = CancellationException::class)
@@ -310,6 +376,24 @@ class ImageTemplateMatcherTest {
             val x = index % width
             val y = index / width
             if ((x + y) % 3 == 0) 230.toByte() else (20 + x * 3 + y).toByte()
+        },
+    )
+
+    private fun nonRepeatingPattern(width: Int, height: Int) = LumaImage(
+        width,
+        height,
+        ByteArray(width * height) { index ->
+            ((index * 73 + index / width * 41 + 19) % 251).toByte()
+        },
+    )
+
+    private fun periodicPattern(width: Int, height: Int) = LumaImage(
+        width,
+        height,
+        ByteArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            (20 + (x % 5) * 30 + y * 3).toByte()
         },
     )
 

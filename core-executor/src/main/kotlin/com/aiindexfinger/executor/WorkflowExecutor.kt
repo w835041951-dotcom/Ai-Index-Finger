@@ -2,10 +2,12 @@ package com.aiindexfinger.executor
 
 import com.aiindexfinger.model.Condition
 import com.aiindexfinger.model.FailurePolicy
+import com.aiindexfinger.model.ImageClickSelectionMode
 import com.aiindexfinger.model.NodeSelector
 import com.aiindexfinger.model.NodeAttribute
 import com.aiindexfinger.model.RecordedClickTargetMode
 import com.aiindexfinger.model.ScrollDirection
+import com.aiindexfinger.model.ScrollUntilStopCondition
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.SystemAction
 import com.aiindexfinger.model.TextInputMethod
@@ -13,6 +15,7 @@ import com.aiindexfinger.model.Value
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowLimits
 import com.aiindexfinger.model.ValidationIssue
+import com.aiindexfinger.model.applyTo
 import com.aiindexfinger.model.readinessIssues
 import com.aiindexfinger.model.evaluate
 import com.aiindexfinger.model.renderTemplate
@@ -28,10 +31,22 @@ import kotlinx.coroutines.withTimeoutOrNull
 interface AutomationDriver {
     suspend fun launchApp(packageName: String, intentAction: String? = null): Boolean
     suspend fun clickNode(selector: NodeSelector): NodeActionResult
-    suspend fun clickImage(step: Step.ImageClick): ImageClickResult
+    suspend fun clickImage(
+        step: Step.ImageClick,
+        onProgress: (ImageClickExecutionDiagnostic) -> Unit = {},
+    ): ImageClickResult
     suspend fun longClickNode(selector: NodeSelector): NodeActionResult
     suspend fun tap(x: Int, y: Int): GestureActionResult
     suspend fun scrollNode(selector: NodeSelector, direction: ScrollDirection): NodeActionResult
+    suspend fun scrollNodeWithProgress(
+        selector: NodeSelector,
+        direction: ScrollDirection,
+    ): ScrollActionResult = when (scrollNode(selector, direction)) {
+        NodeActionResult.Succeeded -> ScrollActionResult.Moved
+        NodeActionResult.TargetNotFound -> ScrollActionResult.TargetNotFound
+        NodeActionResult.ActionFailed,
+        NodeActionResult.ClipboardUnavailable -> ScrollActionResult.ActionFailed
+    }
     suspend fun inputTextNode(
         selector: NodeSelector,
         text: String,
@@ -56,6 +71,13 @@ enum class NodeActionResult {
     ClipboardUnavailable,
 }
 
+sealed interface ScrollActionResult {
+    data object Moved : ScrollActionResult
+    data object NoProgress : ScrollActionResult
+    data object TargetNotFound : ScrollActionResult
+    data object ActionFailed : ScrollActionResult
+}
+
 sealed interface GestureActionResult {
     data object Succeeded : GestureActionResult
     data class CoordinatesOutOfBounds(
@@ -72,7 +94,12 @@ sealed interface NodeReadResult {
 }
 
 sealed interface ImageClickResult {
-    data class Clicked(val scorePermille: Int) : ImageClickResult
+    data class Clicked(
+        val scorePermille: Int,
+        val diagnostic: ImageClickExecutionDiagnostic? = null,
+    ) : ImageClickResult
+    data class PartialExecution(val diagnostic: ImageClickExecutionDiagnostic) : ImageClickResult
+    data class TargetWindowChanged(val diagnostic: ImageClickExecutionDiagnostic) : ImageClickResult
     data object Unsupported : ImageClickResult
     data object WrongPackage : ImageClickResult
     data object MissingOrInvalidTemplate : ImageClickResult
@@ -80,6 +107,27 @@ sealed interface ImageClickResult {
     data object Ambiguous : ImageClickResult
     data object CaptureFailed : ImageClickResult
     data object GestureFailed : ImageClickResult
+}
+
+data class ImageClickExecutionDiagnostic(
+    val selectionMode: ImageClickSelectionMode,
+    val candidateCount: Int,
+    val candidatesTruncated: Boolean,
+    val bestScorePermille: Int?,
+    val bestScalePermille: Int?,
+    val plannedClickCount: Int,
+    val completedClickCount: Int,
+    val failedClickIndex: Int? = null,
+    val retrySuppressed: Boolean = false,
+) {
+    init {
+        require(candidateCount >= 0) { "Image candidate count must not be negative" }
+        require(plannedClickCount >= 0) { "Planned image click count must not be negative" }
+        require(completedClickCount in 0..plannedClickCount) { "Completed image click count is invalid" }
+        require(failedClickIndex == null || failedClickIndex in 1..plannedClickCount) {
+            "Failed image click index is invalid"
+        }
+    }
 }
 
 sealed interface RunState {
@@ -111,16 +159,22 @@ enum class ExecutionErrorCode {
     ImageTemplateInvalid,
     ImageTemplateNotFound,
     ImageTemplateAmbiguous,
+    ImageClickPartialExecution,
+    ImageClickTargetWindowChanged,
+    ImageClickPartialTimedOut,
     ScreenCaptureFailed,
     ImageGestureFailed,
     SystemActionFailed,
     TargetNotScrollable,
+    ScrollUntilNoProgress,
+    ScrollUntilMaxReached,
     AppLaunchFailed,
     TargetNotLongClickable,
     TargetNotFound,
     UndefinedVariable,
     TextInputFailed,
     MissingNodeAttribute,
+    ReadValueProcessingFailed,
     SwipeFailed,
     TapFailed,
     CoordinatesOutOfBounds,
@@ -140,6 +194,7 @@ data class StepExecutionDiagnostic(
     val outcome: StepExecutionOutcome,
     val error: ExecutionError? = null,
     val failedStepId: String? = null,
+    val imageClick: ImageClickExecutionDiagnostic? = null,
 )
 
 enum class StepExecutionOutcome {
@@ -201,7 +256,12 @@ class WorkflowExecutor(
     }
 
     private suspend fun executeSteps(steps: List<Step>, context: ExecutionContext) {
-        for (step in steps) {
+        val labelIndexes = steps.mapIndexedNotNull { index, step ->
+            (step as? Step.Label)?.let { label -> label.name to index }
+        }.toMap()
+        var index = 0
+        while (index < steps.size) {
+            val step = steps[index]
             stepGate?.let { gate ->
                 mutableState.value = RunState.Paused(context.workflow.id, step.id)
                 gate.receive()
@@ -220,6 +280,7 @@ class WorkflowExecutor(
                     error = policyResult.error,
                     failedStepId = policyResult.failedStepId,
                 )
+                index = policyResult.jumpTargetLabel?.let(labelIndexes::getValue) ?: index + 1
             } catch (cancelled: CancellationException) {
                 context.recordDiagnostic(step, sequence, startedAtNanos, 1, StepExecutionOutcome.Cancelled)
                 throw cancelled
@@ -243,6 +304,8 @@ class WorkflowExecutor(
         val attempts = retry?.attempts?.plus(1) ?: 1
 
         repeat(attempts) { attempt ->
+            context.activeImageClickDiagnostic = null
+            var jumpTargetLabel: String? = null
             context.executedSteps++
             if (context.executedSteps > maxExecutedSteps) {
                 throw StepFailure(
@@ -256,25 +319,38 @@ class WorkflowExecutor(
             try {
                 val timeoutMillis = step.timeoutMillis ?: context.workflow.defaultStepTimeoutMillis
                 val completed = withTimeoutOrNull(timeoutMillis) {
-                    executeStep(step, context)
+                    jumpTargetLabel = executeStep(step, context)
                     true
                 }
                 if (completed == null) throw OwnedStepTimeout()
-                return PolicyExecutionResult(attempt + 1, StepExecutionOutcome.Completed)
+                return PolicyExecutionResult(
+                    attempt + 1,
+                    StepExecutionOutcome.Completed,
+                    jumpTargetLabel = jumpTargetLabel,
+                )
             } catch (error: OwnedStepTimeout) {
-                if (attempt + 1 < attempts) {
+                val partialImageClick = context.activeImageClickDiagnostic?.completedClickCount ?: 0 > 0
+                if (partialImageClick) context.suppressImageClickRetry()
+                val timeoutError = ExecutionError(
+                    if (partialImageClick) {
+                        ExecutionErrorCode.ImageClickPartialTimedOut
+                    } else {
+                        ExecutionErrorCode.StepTimedOut
+                    },
+                )
+                if (attempt + 1 < attempts && !partialImageClick) {
                     delay(retry?.delayMillis ?: 0)
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
                     return PolicyExecutionResult(
                         attempt + 1,
                         StepExecutionOutcome.ContinuedAfterFailure,
-                        ExecutionError(ExecutionErrorCode.StepTimedOut),
+                        timeoutError,
                         step.id,
                     )
                 } else {
                     throw StepFailure(
                         step.id,
-                        ExecutionError(ExecutionErrorCode.StepTimedOut),
+                        timeoutError,
                         attempt + 1,
                         error,
                     )
@@ -288,7 +364,9 @@ class WorkflowExecutor(
                     else -> ExecutionError(ExecutionErrorCode.StepFailed)
                 }
                 val failedStepId = (error as? StepFailure)?.stepId ?: step.id
-                if (attempt + 1 < attempts) {
+                val partialImageClick = context.activeImageClickDiagnostic?.completedClickCount ?: 0 > 0
+                if (partialImageClick) context.suppressImageClickRetry()
+                if (attempt + 1 < attempts && !partialImageClick) {
                     delay(retry?.delayMillis ?: 0)
                 } else if (step.failurePolicy is FailurePolicy.Continue) {
                     return PolicyExecutionResult(
@@ -305,7 +383,7 @@ class WorkflowExecutor(
         error("Execution policy completed without a result")
     }
 
-    private suspend fun executeStep(step: Step, context: ExecutionContext) {
+    private suspend fun executeStep(step: Step, context: ExecutionContext): String? {
         when (step) {
             is Step.Click -> requireNodeAction(
                 driver.clickNode(step.selector),
@@ -321,15 +399,23 @@ class WorkflowExecutor(
                     ExecutionErrorCode.TapFailed,
                 )
             }
-            is Step.ImageClick -> when (driver.clickImage(step)) {
-                is ImageClickResult.Clicked -> Unit
-                ImageClickResult.Unsupported -> fail(ExecutionErrorCode.ImageClickUnsupported)
-                ImageClickResult.WrongPackage -> fail(ExecutionErrorCode.ImageClickWrongPackage)
-                ImageClickResult.MissingOrInvalidTemplate -> fail(ExecutionErrorCode.ImageTemplateInvalid)
-                ImageClickResult.NoMatch -> fail(ExecutionErrorCode.ImageTemplateNotFound)
-                ImageClickResult.Ambiguous -> fail(ExecutionErrorCode.ImageTemplateAmbiguous)
-                ImageClickResult.CaptureFailed -> fail(ExecutionErrorCode.ScreenCaptureFailed)
-                ImageClickResult.GestureFailed -> fail(ExecutionErrorCode.ImageGestureFailed)
+            is Step.ImageClick -> when (val result = driver.clickImage(step, context::updateImageClickDiagnostic)) {
+                is ImageClickResult.Clicked -> result.diagnostic?.let(context::updateImageClickDiagnostic)
+                is ImageClickResult.PartialExecution -> {
+                    context.updateImageClickDiagnostic(result.diagnostic)
+                    fail(ExecutionErrorCode.ImageClickPartialExecution)
+                }
+                is ImageClickResult.TargetWindowChanged -> {
+                    context.updateImageClickDiagnostic(result.diagnostic)
+                    fail(ExecutionErrorCode.ImageClickTargetWindowChanged)
+                }
+                ImageClickResult.Unsupported -> failImageClick(context, ExecutionErrorCode.ImageClickUnsupported)
+                ImageClickResult.WrongPackage -> failImageClick(context, ExecutionErrorCode.ImageClickWrongPackage)
+                ImageClickResult.MissingOrInvalidTemplate -> failImageClick(context, ExecutionErrorCode.ImageTemplateInvalid)
+                ImageClickResult.NoMatch -> failImageClick(context, ExecutionErrorCode.ImageTemplateNotFound)
+                ImageClickResult.Ambiguous -> failImageClick(context, ExecutionErrorCode.ImageTemplateAmbiguous)
+                ImageClickResult.CaptureFailed -> failImageClick(context, ExecutionErrorCode.ScreenCaptureFailed)
+                ImageClickResult.GestureFailed -> failImageClick(context, ExecutionErrorCode.ImageGestureFailed)
             }
             is Step.Delay -> delay(step.durationMillis)
             is Step.GlobalAction -> if (!driver.performSystemAction(step.action)) {
@@ -342,12 +428,19 @@ class WorkflowExecutor(
                 val branch = if (evaluate(step.condition, context)) step.whenTrue else step.whenFalse
                 executeSteps(branch, context)
             }
+            is Step.Label -> Unit
+            is Step.JumpIf -> {
+                if (step.condition?.let { condition -> evaluate(condition, context) } ?: true) {
+                    return step.targetLabel
+                }
+            }
             is Step.Repeat -> repeat(step.times) { executeSteps(step.steps, context) }
             is Step.Scroll -> requireNodeAction(
                 driver.scrollNode(step.selector, step.direction),
                 ExecutionErrorCode.TargetNotScrollable,
                 mapOf("direction" to step.direction.name),
             )
+            is Step.ScrollUntil -> executeScrollUntil(step, context)
             is Step.LaunchApp -> if (!driver.launchApp(step.packageName, step.intentAction)) {
                 fail(
                     ExecutionErrorCode.AppLaunchFailed,
@@ -362,7 +455,9 @@ class WorkflowExecutor(
                 ExecutionErrorCode.TargetNotLongClickable,
             )
             is Step.InputText -> {
-                val text = step.variableName?.let { variableName ->
+                val text = step.value?.let { value ->
+                    resolve(value, context)
+                } ?: step.variableName?.let { variableName ->
                     context.variables[variableName]
                         ?: fail(
                             ExecutionErrorCode.UndefinedVariable,
@@ -377,12 +472,18 @@ class WorkflowExecutor(
             }
             is Step.ReadNodeText -> {
                 when (val result = driver.readNode(step.selector, step.attribute)) {
-                    is NodeReadResult.Value -> context.variables[step.variableName] = result.value
-                    NodeReadResult.TargetNotFound -> fail(ExecutionErrorCode.TargetNotFound)
-                    NodeReadResult.AttributeMissing -> fail(
-                        ExecutionErrorCode.MissingNodeAttribute,
-                        mapOf("attribute" to step.attribute.name),
-                    )
+                    is NodeReadResult.Value -> step.postProcess.applyTo(result.value)
+                        ?: step.defaultValue
+                        ?: fail(ExecutionErrorCode.ReadValueProcessingFailed)
+                    NodeReadResult.TargetNotFound -> step.defaultValue
+                        ?: fail(ExecutionErrorCode.TargetNotFound)
+                    NodeReadResult.AttributeMissing -> step.defaultValue
+                        ?: fail(
+                            ExecutionErrorCode.MissingNodeAttribute,
+                            mapOf("attribute" to step.attribute.name),
+                        )
+                }.let { value ->
+                    context.variables[step.variableName] = value
                 }
             }
             is Step.SetVariable -> context.variables[step.name] = resolve(step.value, context)
@@ -393,10 +494,83 @@ class WorkflowExecutor(
             is Step.Tap -> requireGestureAction(driver.tap(step.x, step.y), ExecutionErrorCode.TapFailed)
             is Step.WaitForNode -> waitForNode(step)
         }
+        return null
     }
 
     private suspend fun waitForNode(step: Step.WaitForNode) {
         while (driver.nodeExists(step.selector) != step.mustExist) delay(NODE_POLL_INTERVAL_MILLIS)
+    }
+
+    private suspend fun executeScrollUntil(step: Step.ScrollUntil, context: ExecutionContext) {
+        var completedScrolls = 0
+        var consecutiveNoProgress = 0
+        while (true) {
+            if (scrollUntilStopReached(step.stopCondition, context)) return
+            step.maxScrolls?.let { maxScrolls ->
+                if (completedScrolls >= maxScrolls) {
+                    if (step.stopCondition is ScrollUntilStopCondition.MaxScrolls) return
+                    fail(
+                        ExecutionErrorCode.ScrollUntilMaxReached,
+                        mapOf("maxScrolls" to maxScrolls.toString()),
+                    )
+                }
+            }
+            consumeNestedExecution(step, context)
+            when (driver.scrollNodeWithProgress(step.selector, step.direction)) {
+                ScrollActionResult.Moved -> {
+                    completedScrolls++
+                    consecutiveNoProgress = 0
+                    if (scrollUntilStopReached(step.stopCondition, context)) return
+                }
+                ScrollActionResult.NoProgress -> {
+                    completedScrolls++
+                    if (scrollUntilStopReached(step.stopCondition, context)) return
+                    step.maxScrolls?.let { maxScrolls ->
+                        if (completedScrolls >= maxScrolls) {
+                            if (step.stopCondition is ScrollUntilStopCondition.MaxScrolls) return
+                            fail(
+                                ExecutionErrorCode.ScrollUntilMaxReached,
+                                mapOf("maxScrolls" to maxScrolls.toString()),
+                            )
+                        }
+                    }
+                    consecutiveNoProgress++
+                    if (consecutiveNoProgress >= NO_PROGRESS_SCROLL_LIMIT) {
+                        if (step.stopCondition is ScrollUntilStopCondition.NoProgress) return
+                        fail(ExecutionErrorCode.ScrollUntilNoProgress)
+                    }
+                }
+                ScrollActionResult.TargetNotFound -> fail(ExecutionErrorCode.TargetNotFound)
+                ScrollActionResult.ActionFailed -> fail(
+                    ExecutionErrorCode.TargetNotScrollable,
+                    mapOf("direction" to step.direction.name),
+                )
+            }
+        }
+    }
+
+    private suspend fun scrollUntilStopReached(
+        stopCondition: ScrollUntilStopCondition,
+        context: ExecutionContext,
+    ): Boolean = when (stopCondition) {
+        is ScrollUntilStopCondition.NodeAppears -> driver.nodeExists(stopCondition.selector)
+        is ScrollUntilStopCondition.NodeDisappears -> !driver.nodeExists(stopCondition.selector)
+        is ScrollUntilStopCondition.ConditionMet -> evaluate(stopCondition.condition, context)
+        ScrollUntilStopCondition.NoProgress,
+        ScrollUntilStopCondition.MaxScrolls -> false
+    }
+
+    private fun consumeNestedExecution(step: Step, context: ExecutionContext) {
+        context.executedSteps++
+        if (context.executedSteps > maxExecutedSteps) {
+            throw StepFailure(
+                step.id,
+                ExecutionError(
+                    ExecutionErrorCode.ExecutionLimitExceeded,
+                    mapOf("limit" to maxExecutedSteps.toString()),
+                ),
+            )
+        }
     }
 
     private suspend fun evaluate(condition: Condition, context: ExecutionContext): Boolean = when (condition) {
@@ -451,6 +625,17 @@ class WorkflowExecutor(
     private fun fail(code: ExecutionErrorCode, arguments: Map<String, String> = emptyMap()): Nothing =
         throw ExecutionFailure(ExecutionError(code, arguments))
 
+    private fun failImageClick(
+        context: ExecutionContext,
+        fallbackCode: ExecutionErrorCode,
+    ): Nothing = fail(
+        if ((context.activeImageClickDiagnostic?.completedClickCount ?: 0) > 0) {
+            ExecutionErrorCode.ImageClickPartialExecution
+        } else {
+            fallbackCode
+        },
+    )
+
     private data class ExecutionContext(
         val workflow: Workflow,
         val nanoTime: () -> Long,
@@ -458,7 +643,16 @@ class WorkflowExecutor(
         val diagnostics: MutableList<StepExecutionDiagnostic> = mutableListOf(),
         var executedSteps: Long = 0,
         var nextDiagnosticSequence: Long = 0,
+        var activeImageClickDiagnostic: ImageClickExecutionDiagnostic? = null,
     ) {
+        fun updateImageClickDiagnostic(diagnostic: ImageClickExecutionDiagnostic) {
+            activeImageClickDiagnostic = diagnostic
+        }
+
+        fun suppressImageClickRetry() {
+            activeImageClickDiagnostic = activeImageClickDiagnostic?.copy(retrySuppressed = true)
+        }
+
         fun recordDiagnostic(
             step: Step,
             sequence: Long,
@@ -476,6 +670,7 @@ class WorkflowExecutor(
                 outcome = outcome,
                 error = error,
                 failedStepId = failedStepId,
+                imageClick = activeImageClickDiagnostic,
             )
             if (diagnostics.size < MAX_DIAGNOSTIC_EVENTS) {
                 diagnostics += diagnostic
@@ -503,6 +698,7 @@ class WorkflowExecutor(
         val outcome: StepExecutionOutcome,
         val error: ExecutionError? = null,
         val failedStepId: String? = null,
+        val jumpTargetLabel: String? = null,
     )
 
     private class StepFailure(
@@ -521,6 +717,7 @@ class WorkflowExecutor(
 
     private companion object {
         const val NODE_POLL_INTERVAL_MILLIS = 100L
+        const val NO_PROGRESS_SCROLL_LIMIT = 2
         const val MAX_DIAGNOSTIC_EVENTS = 1_000
     }
 }

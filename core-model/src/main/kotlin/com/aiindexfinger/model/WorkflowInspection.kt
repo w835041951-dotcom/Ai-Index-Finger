@@ -7,6 +7,7 @@ enum class SelectorRole {
     InputText,
     ReadNodeText,
     Scroll,
+    ScrollUntil,
     WaitForNode,
     NodeCondition,
 }
@@ -49,6 +50,20 @@ private fun MutableList<SelectorUse>.collectSelectorUses(steps: List<Step>) {
             is Step.InputText -> add(SelectorUse(step.id, SelectorRole.InputText, step.selector))
             is Step.ReadNodeText -> add(SelectorUse(step.id, SelectorRole.ReadNodeText, step.selector))
             is Step.Scroll -> add(SelectorUse(step.id, SelectorRole.Scroll, step.selector))
+            is Step.ScrollUntil -> {
+                add(SelectorUse(step.id, SelectorRole.ScrollUntil, step.selector))
+                when (val stopCondition = step.stopCondition) {
+                    is ScrollUntilStopCondition.NodeAppears ->
+                        add(SelectorUse(step.id, SelectorRole.NodeCondition, stopCondition.selector))
+                    is ScrollUntilStopCondition.NodeDisappears ->
+                        add(SelectorUse(step.id, SelectorRole.NodeCondition, stopCondition.selector))
+                    is ScrollUntilStopCondition.ConditionMet ->
+                        (stopCondition.condition as? Condition.NodeExists)?.let { condition ->
+                            add(SelectorUse(step.id, SelectorRole.NodeCondition, condition.selector))
+                        }
+                    else -> Unit
+                }
+            }
             is Step.WaitForNode -> add(SelectorUse(step.id, SelectorRole.WaitForNode, step.selector))
             is Step.IfElse -> {
                 (step.condition as? Condition.NodeExists)?.let { condition ->
@@ -56,6 +71,9 @@ private fun MutableList<SelectorUse>.collectSelectorUses(steps: List<Step>) {
                 }
                 collectSelectorUses(step.whenTrue)
                 collectSelectorUses(step.whenFalse)
+            }
+            is Step.JumpIf -> (step.condition as? Condition.NodeExists)?.let { condition ->
+                add(SelectorUse(step.id, SelectorRole.NodeCondition, condition.selector))
             }
             is Step.Repeat -> collectSelectorUses(step.steps)
             else -> Unit

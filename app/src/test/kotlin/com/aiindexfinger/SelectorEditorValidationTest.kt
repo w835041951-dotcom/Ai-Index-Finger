@@ -165,13 +165,11 @@ class SelectorEditorValidationTest {
     }
 
     @Test
-    fun draftRejectsMatchIndexesOutsideTheModelRange() {
+    fun draftRejectsNegativeMatchIndexesAndAllowsLargeIndexes() {
         assertNull(NodeSelectorDraft(text = "Continue", matchIndex = -1).toSelectorOrNull())
-        assertNull(
-            NodeSelectorDraft(
-                text = "Continue",
-                matchIndex = NodeSelector.MAX_MATCH_COUNT,
-            ).toSelectorOrNull(),
+        assertEquals(
+            Int.MAX_VALUE,
+            NodeSelectorDraft(text = "Continue", matchIndex = Int.MAX_VALUE).toSelectorOrNull()?.matchIndex,
         )
     }
 }

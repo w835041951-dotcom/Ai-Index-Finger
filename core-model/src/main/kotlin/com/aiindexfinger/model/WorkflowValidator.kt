@@ -13,6 +13,8 @@ enum class ValidationIssueCode {
     DefinedStepLimitExceeded,
     BlankStepId,
     DuplicateStepId,
+    DuplicateLabel,
+    MissingJumpLabel,
     NonPositiveTimeout,
     BlankVariableName,
     UndefinedVariable,
@@ -89,6 +91,10 @@ object WorkflowValidator {
             }
             return 0
         }
+        val labelNames = steps.filterIsInstance<Step.Label>().map(Step.Label::name)
+        val duplicateLabelNames = labelNames.groupingBy { it }.eachCount()
+            .filterValues { count -> count > 1 }
+            .keys
         var estimatedExecutions = 0L
         steps.forEach { step ->
             val guaranteedVariablesBeforeStep = definedVariables.toSet()
@@ -103,6 +109,13 @@ object WorkflowValidator {
             }
             if (step.id.isBlank()) issues += ValidationIssue(step.id, ValidationIssueCode.BlankStepId)
             if (!seenStepIds.add(step.id)) issues += ValidationIssue(step.id, ValidationIssueCode.DuplicateStepId)
+            if (step is Step.Label && step.name in duplicateLabelNames) {
+                issues += ValidationIssue(
+                    step.id,
+                    ValidationIssueCode.DuplicateLabel,
+                    mapOf("label" to step.name),
+                )
+            }
             if (step.timeoutMillis != null && step.timeoutMillis!! <= 0) {
                 issues += ValidationIssue(step.id, ValidationIssueCode.NonPositiveTimeout)
             }
@@ -139,9 +152,11 @@ object WorkflowValidator {
                     0L
                 }
                 is Step.InputText -> {
-                    val variableName = step.variableName
-                    if (variableName != null) state.variableReferences += variableName
-                    if (variableName != null && variableName !in definedVariables) {
+                    val references = step.value?.referencedVariables()
+                        ?: step.variableName?.let(::setOf)
+                        ?: emptySet()
+                    state.variableReferences += references
+                    references.filterNot(definedVariables::contains).forEach { variableName ->
                         issues += ValidationIssue(
                             step.id,
                             ValidationIssueCode.UndefinedVariable,
@@ -172,6 +187,27 @@ object WorkflowValidator {
                     )
                     definedVariables += trueVariables.intersect(falseVariables)
                     maxOf(trueExecutions, falseExecutions)
+                }
+                is Step.JumpIf -> {
+                    step.condition?.let { condition ->
+                        validateCondition(step.id, condition, definedVariables, issues, state)
+                    }
+                    if (step.targetLabel !in labelNames) {
+                        issues += ValidationIssue(
+                            step.id,
+                            ValidationIssueCode.MissingJumpLabel,
+                            mapOf("label" to step.targetLabel),
+                        )
+                    }
+                    0L
+                }
+                is Step.ScrollUntil -> {
+                    when (val stopCondition = step.stopCondition) {
+                        is ScrollUntilStopCondition.ConditionMet ->
+                            validateCondition(step.id, stopCondition.condition, definedVariables, issues, state)
+                        else -> Unit
+                    }
+                    step.maxScrolls?.toLong() ?: WorkflowLimits.MAX_EXECUTED_STEPS - 1
                 }
                 is Step.Repeat -> {
                     val repeatedVariables = definedVariables.toMutableSet()
@@ -256,6 +292,8 @@ object WorkflowValidator {
         ValidationIssueCode.DefinedStepLimitExceeded,
         ValidationIssueCode.BlankStepId,
         ValidationIssueCode.DuplicateStepId,
+        ValidationIssueCode.DuplicateLabel,
+        ValidationIssueCode.MissingJumpLabel,
     )
 }
 

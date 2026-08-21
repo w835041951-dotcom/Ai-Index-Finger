@@ -232,12 +232,15 @@ class WorkflowStarterTemplatesTest {
         is Step.ReadNodeText -> "read:${selector.signature()}:$variableName:$attribute"
         is Step.Swipe -> "swipe:$startX:$startY:$endX:$endY:$durationMillis"
         is Step.Scroll -> "scroll:${selector.signature()}:$direction"
+        is Step.ScrollUntil -> "scroll_until:${selector.signature()}:$direction:$stopCondition:$maxScrolls"
         is Step.Tap -> "tap:$x:$y"
         is Step.GlobalAction -> "global:$action"
         is Step.WaitForNode -> "wait:${selector.signature()}:$mustExist"
         is Step.Delay -> "delay:$durationMillis:${failurePolicy.signature()}"
         is Step.SetVariable -> "set:$name:$value"
         is Step.IfElse -> "if:$condition:${whenTrue.signature()}:${whenFalse.signature()}"
+        is Step.Label -> "label:$name"
+        is Step.JumpIf -> "jump:$targetLabel:$condition"
         is Step.Repeat -> "repeat:$times:${steps.signature()}"
     }
 
@@ -278,12 +281,15 @@ class WorkflowStarterTemplatesTest {
         is Step.ReadNodeText -> "read:$attribute"
         is Step.Swipe -> "swipe"
         is Step.Scroll -> "scroll:$direction"
+        is Step.ScrollUntil -> "scroll_until:$direction:${stopCondition::class.simpleName}"
         is Step.Tap -> "tap"
         is Step.GlobalAction -> "global:$action"
         is Step.WaitForNode -> "wait:$mustExist"
         is Step.Delay -> "delay:${failurePolicy.conceptSignature()}"
         is Step.SetVariable -> "set:${value::class.simpleName}"
         is Step.IfElse -> "if:${condition.conceptSignature()}:${whenTrue.conceptSignature()}:${whenFalse.conceptSignature()}"
+        is Step.Label -> "label"
+        is Step.JumpIf -> "jump:${condition?.conceptSignature().orEmpty()}"
         is Step.Repeat -> "repeat:${steps.conceptSignature()}"
     }
 

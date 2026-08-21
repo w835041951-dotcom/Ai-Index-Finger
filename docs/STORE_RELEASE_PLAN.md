@@ -6,7 +6,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 ## Current Baseline
 
-- Current prerelease `0.33.0-beta.11` (`versionCode 42`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
+- Current prerelease `0.33.0-beta.12` (`versionCode 43`), Kotlin 2.1, Java 17, min SDK 26, target and compile SDK 36.
 - Core workflow editing, execution, persistence, import/export, scheduling, node inspection, and run history are implemented.
 - Core and app JVM tests pass. Structured validator and executor errors are localized through English and Simplified Chinese resources, and new run-history records persist stable error codes while legacy text records remain readable.
 - The application does not request Android's `INTERNET` permission and does not transmit workflow data; WorkManager contributes normal scheduling permissions such as `ACCESS_NETWORK_STATE`.
@@ -18,7 +18,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 
 | Gate | Owner | Current state | Required evidence | Production blocker |
 | --- | --- | --- | --- | --- |
-| Release identity | Product owner | `com.aiindexfinger`, `0.33.0-beta.11`, code 42 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
+| Release identity | Product owner | `com.aiindexfinger`, `0.33.0-beta.12`, code 43 | Confirm permanent application ID, public version name, and incremented version code for the first uploaded candidate | Yes |
 | Upload signing | Release owner | Not configured | Upload keystore and alias stored outside Git; signed AAB verified with `jarsigner` or `apksigner`; Play App Signing enabled | Yes |
 | Automated build gate | Engineering | Local commands pass; no CI | Protected GitHub workflow runs tests, release lint, and unsigned bundle build for the release commit | Yes |
 | Bilingual product UI | Engineering/QA | Resource keys match; remaining hardcoded Compose text exists outside the newly localized run-history flow | English and Simplified Chinese smoke-test checklist passes with no mixed-language critical workflow | Yes |
@@ -64,6 +64,7 @@ Publish AI Index Finger through Google Play internal testing and then production
 ## Completed UX Recovery Improvements
 
 - Click, Long Click, Input Text, Tap Coordinates, Swipe, and Image Click share a reusable in-memory capture. The capture remains available until it is replaced, explicitly cleared, the accessibility service stops, or the process ends.
+- Image Click defaults to one deterministic best candidate, supports an explicit capped all-matches batch from one initial snapshot, and rechecks target-window safety before every gesture. Template persistence is bounded to a 1024 px long edge and 192 KiB PNG budget with grayscale/downscale optimization; Run history retains only numeric matching and partial-execution diagnostics.
 - Preflight findings offer direct accessibility and notification recovery actions.
 - Validation and selector findings can open the exact top-level or nested step editor.
 - Failed run details can reopen the current workflow at the failed step, with safe stale-step fallback.

@@ -7,6 +7,7 @@ import com.aiindexfinger.automation.centeredSupportedTemplateCrop
 import com.aiindexfinger.automation.templateDimensionsAreSupported
 import com.aiindexfinger.automation.templateCenterRelativeToCrop
 import com.aiindexfinger.automation.templatePointRelativeToCrop
+import com.aiindexfinger.model.ImageTemplateConstraints
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -28,9 +29,24 @@ class ImageCropBoundsTest {
 
     @Test
     fun templateDimensionsMustRemainAtRuntimeMatchScale() {
-        assertTrue(templateDimensionsAreSupported(12, 256))
-        assertFalse(templateDimensionsAreSupported(11, 256))
-        assertFalse(templateDimensionsAreSupported(256, 257))
+        assertTrue(
+            templateDimensionsAreSupported(
+                ImageTemplateConstraints.MIN_EDGE_PX,
+                ImageTemplateConstraints.MAX_EDGE_PX,
+            ),
+        )
+        assertFalse(
+            templateDimensionsAreSupported(
+                ImageTemplateConstraints.MIN_EDGE_PX - 1,
+                ImageTemplateConstraints.MAX_EDGE_PX,
+            ),
+        )
+        assertFalse(
+            templateDimensionsAreSupported(
+                ImageTemplateConstraints.MAX_EDGE_PX,
+                ImageTemplateConstraints.MAX_EDGE_PX + 1,
+            ),
+        )
     }
 
     @Test
@@ -54,8 +70,8 @@ class ImageCropBoundsTest {
     @Test
     fun accessibilityCropCentersAndLimitsLargeTargetAtNativeScale() {
         assertEquals(
-            ImageCropBounds(372, 222, 628, 478),
-            centeredSupportedTemplateCrop(ImageCropBounds(0, 0, 1000, 700)),
+            ImageCropBounds(488, 188, 1512, 1212),
+            centeredSupportedTemplateCrop(ImageCropBounds(0, 0, 2000, 1400)),
         )
     }
 

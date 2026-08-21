@@ -133,6 +133,47 @@ class WorkflowValidatorTest {
     }
 
     @Test
+    fun `validates labels and jumps within their current step list`() {
+        val selector = NodeSelector("com.example", text = "Target")
+        val valid = Workflow(
+            id = "valid-jump",
+            name = "Valid jump",
+            steps = listOf(
+                Step.Label("outer-label", "same-name"),
+                Step.Repeat(
+                    "repeat",
+                    1,
+                    listOf(
+                        Step.Label("inner-label", "same-name"),
+                        Step.JumpIf("inner-jump", "same-name"),
+                    ),
+                ),
+            ),
+        )
+        val invalid = valid.copy(
+            id = "invalid-jump",
+            steps = listOf(
+                Step.Label("first", "duplicate"),
+                Step.Label("second", "duplicate"),
+                Step.JumpIf("missing", "not-here"),
+                Step.Repeat(
+                    "repeat",
+                    1,
+                    listOf(
+                        Step.JumpIf("cross-scope", "duplicate", Condition.NodeExists(selector)),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(WorkflowValidator.validate(valid).isEmpty())
+        assertEquals(
+            setOf(ValidationIssueCode.DuplicateLabel, ValidationIssueCode.MissingJumpLabel),
+            WorkflowValidator.validate(invalid).map(ValidationIssue::code).toSet(),
+        )
+    }
+
+    @Test
     fun `accepts a defined variable before a condition`() {
         val workflow = Workflow(
             id = "valid",
@@ -279,6 +320,28 @@ class WorkflowValidatorTest {
                         it.arguments["limit"] == WorkflowLimits.MAX_EXECUTED_STEPS.toString()
                 },
         )
+    }
+
+    @Test
+    fun `unbounded scroll until reports the full runtime execution budget`() {
+        val selector = NodeSelector("com.example", text = "List")
+        val workflow = Workflow(
+            id = "scroll-until-budget",
+            name = "Scroll until budget",
+            steps = listOf(
+                Step.ScrollUntil(
+                    id = "scroll-until",
+                    selector = selector,
+                    direction = ScrollDirection.Forward,
+                    stopCondition = ScrollUntilStopCondition.NoProgress,
+                ),
+            ),
+        )
+
+        val summary = WorkflowValidator.inspect(workflow)
+
+        assertEquals(WorkflowLimits.MAX_EXECUTED_STEPS, summary.maximumStepExecutions)
+        assertTrue(summary.issues.isEmpty())
     }
 
     @Test

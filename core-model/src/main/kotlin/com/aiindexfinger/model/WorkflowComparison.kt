@@ -133,12 +133,15 @@ private fun Step.comparisonType(): String = when (this) {
     is Step.ReadNodeText -> "read_node_text"
     is Step.Swipe -> "swipe"
     is Step.Scroll -> "scroll"
+    is Step.ScrollUntil -> "scroll_until"
     is Step.Tap -> "tap"
     is Step.GlobalAction -> "global_action"
     is Step.WaitForNode -> "wait_for_node"
     is Step.Delay -> "delay"
     is Step.SetVariable -> "set_variable"
     is Step.IfElse -> "if_else"
+    is Step.Label -> "label"
+    is Step.JumpIf -> "jump_if"
     is Step.Repeat -> "repeat"
 }
 
@@ -161,23 +164,36 @@ private fun Step.comparisonConfiguration(): Any = when (this) {
         templateWidth,
         templateHeight,
         minimumScorePermille,
-        ambiguityMarginPermille,
         scaleTolerancePermille,
+        selectionMode,
+        maxClicks,
+        clickIntervalMillis,
         templateClickX,
         templateClickY,
         timeoutMillis,
         failurePolicy,
     )
     is Step.LongClick -> listOf(selector, timeoutMillis, failurePolicy)
-    is Step.InputText -> listOf(selector, text, variableName, inputMethod, timeoutMillis, failurePolicy)
-    is Step.ReadNodeText -> listOf(selector, variableName, attribute, timeoutMillis, failurePolicy)
+    is Step.InputText -> listOf(selector, text, variableName, inputMethod, value, timeoutMillis, failurePolicy)
+    is Step.ReadNodeText -> listOf(
+        selector,
+        variableName,
+        attribute,
+        postProcess,
+        defaultValue,
+        timeoutMillis,
+        failurePolicy,
+    )
     is Step.Swipe -> listOf(startX, startY, endX, endY, durationMillis, timeoutMillis, failurePolicy)
     is Step.Scroll -> listOf(selector, direction, timeoutMillis, failurePolicy)
+    is Step.ScrollUntil -> listOf(selector, direction, stopCondition, maxScrolls, timeoutMillis, failurePolicy)
     is Step.Tap -> listOf(x, y, timeoutMillis, failurePolicy)
     is Step.GlobalAction -> listOf(action, timeoutMillis, failurePolicy)
     is Step.WaitForNode -> listOf(selector, mustExist, timeoutMillis, failurePolicy)
     is Step.Delay -> listOf(durationMillis, timeoutMillis, failurePolicy)
     is Step.SetVariable -> listOf(name, value, timeoutMillis, failurePolicy)
     is Step.IfElse -> listOf(condition, timeoutMillis, failurePolicy)
+    is Step.Label -> listOf(name, timeoutMillis, failurePolicy)
+    is Step.JumpIf -> listOf(targetLabel, condition, timeoutMillis, failurePolicy)
     is Step.Repeat -> listOf(times, timeoutMillis, failurePolicy)
 }

@@ -211,6 +211,7 @@ class FloatingWorkflowEditorFlowTest {
             .performClick()
         composeRule.onNodeWithText(context.getString(R.string.image_click_saved_template_invalid))
             .assertIsDisplayed()
+        composeRule.onNodeWithText(context.getString(R.string.save)).assertIsNotEnabled()
     }
 
     @Test

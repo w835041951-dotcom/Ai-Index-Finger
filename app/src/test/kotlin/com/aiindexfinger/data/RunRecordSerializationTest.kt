@@ -47,6 +47,43 @@ class RunRecordSerializationTest {
     }
 
     @Test
+    fun imageClickDiagnosticRoundTripsWithoutScreenContentOrCoordinates() {
+        val record = RunRecord(
+            id = "image",
+            workflowId = "workflow",
+            workflowName = "Image",
+            startedAtMillis = 1,
+            durationMillis = 2,
+            diagnostics = listOf(
+                RunStepDiagnostic(
+                    sequence = 0,
+                    stepId = "image",
+                    durationMillis = 2,
+                    attemptCount = 1,
+                    imageClick = RunImageClickDiagnostic(
+                        selectionMode = RunImageClickSelectionMode.AllMatches,
+                        candidateCount = 20,
+                        candidatesTruncated = true,
+                        bestScorePermille = 975,
+                        bestScalePermille = 1_050,
+                        plannedClickCount = 20,
+                        completedClickCount = 4,
+                        failedClickIndex = 5,
+                        retrySuppressed = true,
+                    ),
+                ),
+            ),
+        )
+
+        val encoded = Json.encodeToString(RunRecord.serializer(), record)
+
+        assertEquals(record, Json.decodeFromString(RunRecord.serializer(), encoded))
+        assertFalse(encoded.contains("template"))
+        assertFalse(encoded.contains("screenshot"))
+        assertFalse(encoded.contains("coordinate"))
+    }
+
+    @Test
     fun warningRecordKeepsPolicyOwnerAndFailedLeaf() {
         val leafLocation = RunStepLocation(
             listOf(RunStepLocationSegment(0, RunStepBranch.RepeatBody), RunStepLocationSegment(0)),

@@ -4,6 +4,7 @@ import android.content.Context
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
 import com.aiindexfinger.model.WorkflowValidator
+import com.aiindexfinger.model.normalizedForCurrentSchema
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -144,7 +145,9 @@ internal class WorkflowFileStore(
         require(library.formatVersion <= WorkflowLibrary.CURRENT_FORMAT_VERSION) {
             "Workflow library format is newer than this app supports"
         }
-        val normalizedLibrary = library.normalized()
+        val normalizedLibrary = library.copy(
+            workflows = library.workflows.map(Workflow::normalizedForCurrentSchema),
+        ).normalized()
         requireUniqueLibraryIds(normalizedLibrary)
         normalizedLibrary.workflows.forEach { workflow ->
             require(WorkflowValidator.structuralIssues(workflow).isEmpty()) {
@@ -297,7 +300,9 @@ internal class WorkflowFileStore(
             val schemaVersion = workflowRoot["schemaVersion"]?.jsonPrimitive?.intOrNull
                 ?: Workflow.CURRENT_SCHEMA_VERSION
             if (schemaVersion > Workflow.CURRENT_SCHEMA_VERSION) return null
-            json.decodeFromJsonElement(WorkflowVersion.serializer(), root).takeIf { version ->
+            json.decodeFromJsonElement(WorkflowVersion.serializer(), root).let { version ->
+                version.copy(workflow = version.workflow.normalizedForCurrentSchema())
+            }.takeIf { version ->
                 WorkflowValidator.structuralIssues(version.workflow).isEmpty()
             }
         } catch (_: StackOverflowError) {
@@ -319,13 +324,16 @@ internal class WorkflowFileStore(
         return try {
             val root = json.parseToJsonElement(source.readText())
             declaredUnsupportedVersion(root)?.let { return DecodeResult.Unsupported(it) }
-            when (root) {
+            val decodedLibrary = when (root) {
                 is JsonArray -> WorkflowLibrary(
                     workflows = json.decodeFromJsonElement(ListSerializer(Workflow.serializer()), root),
                 )
                 is JsonObject -> json.decodeFromJsonElement(WorkflowLibrary.serializer(), root)
                 else -> error("Workflow library must be a JSON array or object")
-            }.normalized().also { library ->
+            }
+            decodedLibrary.copy(
+                workflows = decodedLibrary.workflows.map(Workflow::normalizedForCurrentSchema),
+            ).normalized().also { library ->
                 requireUniqueLibraryIds(library)
                 require(library.workflows.all { WorkflowValidator.structuralIssues(it).isEmpty() }) {
                     "Workflow structure is unsafe"

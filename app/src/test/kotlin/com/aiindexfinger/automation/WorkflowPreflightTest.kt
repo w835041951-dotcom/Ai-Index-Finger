@@ -1,6 +1,7 @@
 package com.aiindexfinger.automation
 
 import com.aiindexfinger.model.NodeSelector
+import com.aiindexfinger.model.ImageClickSelectionMode
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.WorkflowState
@@ -45,6 +46,33 @@ class WorkflowPreflightTest {
         assertEquals(LaunchTargetStatus.Available, report.launchTargets.single().status)
         assertNull(report.selectors.single().matchCount)
         assertNull(report.selectors.single().requiredMatchAvailable)
+    }
+
+    @Test
+    fun allMatchesImageClickWarnsWhenItsConfiguredIntervalsExceedStepTimeout() {
+        val imageStep = Step.ImageClick(
+            id = "image",
+            packageName = "com.example",
+            templatePngBase64 = "aGVsbG8=",
+            templateWidth = 12,
+            templateHeight = 12,
+            selectionMode = ImageClickSelectionMode.AllMatches,
+            maxClicks = 20,
+            clickIntervalMillis = 200,
+            timeoutMillis = 1_000,
+        )
+        val report = buildWorkflowPreflightReport(
+            workflow = Workflow(id = "batch", name = "Batch", steps = listOf(imageStep)),
+            accessibilityConnected = true,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
+            isLaunchable = { _, _ -> true },
+            countMatches = { 0 },
+        )
+
+        assertEquals(
+            listOf(ImageClickTimeoutPreflightWarning("image", 3_800, 1_000)),
+            report.imageClickTimeoutWarnings,
+        )
     }
 
     @Test
@@ -283,6 +311,12 @@ class WorkflowPreflightTest {
                     com.aiindexfinger.model.Condition.NodeExists(selector),
                     whenTrue = emptyList(),
                 ),
+                Step.Label("label", "done"),
+                Step.JumpIf(
+                    "jump",
+                    "done",
+                    com.aiindexfinger.model.Condition.NodeExists(selector),
+                ),
             ),
         )
 
@@ -294,11 +328,38 @@ class WorkflowPreflightTest {
             countMatches = { 0 },
         )
 
-        assertEquals(2, report.selectors.size)
+        assertEquals(3, report.selectors.size)
         assertEquals(SelectorPreflightExpectation.RequiredAbsent, report.selectors[0].expectation)
         assertEquals(true, report.selectors[0].requirementSatisfied)
         assertEquals(SelectorPreflightExpectation.ObserveOnly, report.selectors[1].expectation)
         assertEquals(null, report.selectors[1].requirementSatisfied)
+        assertEquals(SelectorPreflightExpectation.ObserveOnly, report.selectors[2].expectation)
+        assertEquals(null, report.selectors[2].requirementSatisfied)
+    }
+
+    @Test
+    fun jumpCanBypassLaunchSoLaterSelectorPreflightIsNotDeferred() {
+        val workflow = Workflow(
+            id = "jump-bypasses-launch",
+            name = "Jump bypasses launch",
+            steps = listOf(
+                Step.JumpIf("jump", "after-launch"),
+                Step.LaunchApp("launch", selector.packageName),
+                Step.Label("label", "after-launch"),
+                Step.Click("click", selector),
+            ),
+        )
+
+        val report = buildWorkflowPreflightReport(
+            workflow = workflow,
+            accessibilityConnected = true,
+            notificationStatus = ScheduleNotificationReadiness.Ready,
+            isLaunchable = { _, _ -> true },
+            countMatches = { 0 },
+        )
+
+        assertEquals(0, report.selectors.single().matchCount)
+        assertEquals(false, report.selectors.single().requiredMatchAvailable)
     }
 
     @Test

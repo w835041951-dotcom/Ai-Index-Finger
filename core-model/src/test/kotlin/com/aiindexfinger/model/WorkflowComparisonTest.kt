@@ -31,6 +31,98 @@ class WorkflowComparisonTest {
     }
 
     @Test
+    fun `reports image click selection configuration changes`() {
+        val before = workflow(steps = listOf(
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24),
+        ))
+        val after = workflow(steps = listOf(
+            Step.ImageClick(
+                "image",
+                "com.example",
+                "aGVsbG8=",
+                24,
+                24,
+                selectionMode = ImageClickSelectionMode.AllMatches,
+                maxClicks = 40,
+                clickIntervalMillis = 500,
+            ),
+        ))
+
+        assertEquals(
+            listOf(WorkflowDifference.StepChanged(
+                rootPath(0), StepComparisonField.Configuration, "image_click", "image_click",
+            )),
+            compareWorkflows(before, after).differences,
+        )
+    }
+
+    @Test
+    fun `ignores legacy image click ambiguity margin`() {
+        val before = workflow(steps = listOf(
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, ambiguityMarginPermille = 25),
+        ))
+        val after = workflow(steps = listOf(
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, ambiguityMarginPermille = 400),
+        ))
+
+        assertTrue(compareWorkflows(before, after).isIdentical)
+    }
+
+    @Test
+    fun `reports jump target and condition changes`() {
+        val before = workflow(steps = listOf(Step.JumpIf("jump", "first")))
+        val after = workflow(
+            steps = listOf(
+                Step.JumpIf(
+                    "jump",
+                    "second",
+                    Condition.Equals(Value.Literal("yes"), Value.Literal("yes")),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(WorkflowDifference.StepChanged(
+                rootPath(0), StepComparisonField.Configuration, "jump_if", "jump_if",
+            )),
+            compareWorkflows(before, after).differences,
+        )
+    }
+
+    @Test
+    fun `reports scroll until stop configuration changes`() {
+        val selector = NodeSelector("com.example", text = "List")
+        val before = workflow(
+            steps = listOf(
+                Step.ScrollUntil(
+                    "scroll-until",
+                    selector,
+                    ScrollDirection.Forward,
+                    ScrollUntilStopCondition.NodeAppears(selector),
+                ),
+            ),
+        )
+        val after = workflow(
+            steps = listOf(
+                Step.ScrollUntil(
+                    "scroll-until",
+                    selector,
+                    ScrollDirection.Backward,
+                    ScrollUntilStopCondition.NoProgress,
+                    maxScrolls = 5,
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(WorkflowDifference.StepChanged(
+                rootPath(0), StepComparisonField.Configuration, "scroll_until", "scroll_until",
+            )),
+            compareWorkflows(before, after).differences,
+        )
+    }
+
+    @Test
     fun `reports recorded click fallback cause changes`() {
         val control = RecordedControl(
             packageName = "com.example",

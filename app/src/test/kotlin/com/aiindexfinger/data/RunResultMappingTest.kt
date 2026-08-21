@@ -2,12 +2,14 @@ package com.aiindexfinger.data
 
 import com.aiindexfinger.executor.ExecutionError
 import com.aiindexfinger.executor.ExecutionErrorCode
+import com.aiindexfinger.executor.ImageClickExecutionDiagnostic
 import com.aiindexfinger.executor.RunResult
 import com.aiindexfinger.executor.StepExecutionDiagnostic
 import com.aiindexfinger.executor.StepExecutionOutcome
 import com.aiindexfinger.model.Workflow
 import com.aiindexfinger.model.Step
 import com.aiindexfinger.model.Condition
+import com.aiindexfinger.model.ImageClickSelectionMode
 import com.aiindexfinger.model.Value
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -101,6 +103,37 @@ class RunResultMappingTest {
             listOf(RunStepDiagnostic(0, "input", 20, 1, RunStepOutcome.Completed)),
             record.diagnostics,
         )
+    }
+
+    @Test
+    fun imageClickExecutorDiagnosticMapsToNumericRunHistoryFields() {
+        val record = RunResult.Completed.toRunRecord(
+            workflow,
+            startedAtMillis = 100,
+            finishedAtMillis = 120,
+            diagnostics = listOf(
+                StepExecutionDiagnostic(
+                    sequence = 0,
+                    stepId = "top",
+                    durationMillis = 20,
+                    attemptCount = 1,
+                    outcome = StepExecutionOutcome.Completed,
+                    imageClick = ImageClickExecutionDiagnostic(
+                        selectionMode = ImageClickSelectionMode.BestMatch,
+                        candidateCount = 2,
+                        candidatesTruncated = false,
+                        bestScorePermille = 950,
+                        bestScalePermille = 1_000,
+                        plannedClickCount = 1,
+                        completedClickCount = 1,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(RunImageClickSelectionMode.BestMatch, record.diagnostics.single().imageClick?.selectionMode)
+        assertEquals(2, record.diagnostics.single().imageClick?.candidateCount)
+        assertEquals(1, record.diagnostics.single().imageClick?.completedClickCount)
     }
 
     @Test

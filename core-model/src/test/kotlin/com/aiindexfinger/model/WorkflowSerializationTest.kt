@@ -34,7 +34,13 @@ class WorkflowSerializationTest {
             name = "Device actions",
             steps = listOf(
                 Step.LaunchApp("launch", "com.example.target"),
-                Step.InputText("input", selector, "hello", inputMethod = TextInputMethod.Paste),
+                    Step.InputText(
+                        "input",
+                        selector,
+                        "hello",
+                        inputMethod = TextInputMethod.Paste,
+                        value = Value.Template("Hello ${'$'}{mode}"),
+                    ),
                 Step.Click("click", selector),
                 Step.RecordedClick(
                     id = "recorded-click",
@@ -57,12 +63,33 @@ class WorkflowSerializationTest {
                 ),
                 Step.Tap("tap", 120, 340),
                 Step.Scroll("scroll", selector, ScrollDirection.Backward),
+                Step.ScrollUntil(
+                    id = "scroll-until",
+                    selector = selector,
+                    direction = ScrollDirection.Forward,
+                    stopCondition = ScrollUntilStopCondition.NodeAppears(selector),
+                    maxScrolls = 12,
+                ),
                 Step.Swipe("swipe", 500, 1600, 500, 400, 350),
                 Step.GlobalAction("back", SystemAction.Back),
                 Step.Delay("wait", 1_000),
                 Step.SetVariable("set", "mode", Value.Literal("ready")),
                 Step.SetVariable("set-template", "message", Value.Template("Status: ${'$'}{mode}")),
-                Step.ReadNodeText("read", selector, "captured", NodeAttribute.ClassName),
+                Step.ReadNodeText(
+                    "read",
+                    selector,
+                    "captured",
+                    NodeAttribute.ClassName,
+                    postProcess = ReadNodeTextPostProcess(
+                        trim = true,
+                        caseTransform = ReadNodeTextCaseTransform.Lowercase,
+                        regex = "(\\w+)",
+                        regexGroup = 1,
+                        splitDelimiter = "-",
+                        splitIndex = 0,
+                    ),
+                    defaultValue = "fallback",
+                ),
                 Step.InputText("input-variable", selector, text = "", variableName = "mode"),
                 Step.IfElse(
                     id = "node-condition",
@@ -83,6 +110,12 @@ class WorkflowSerializationTest {
                             steps = listOf(Step.WaitForNode("wait-node", selector, mustExist = false)),
                         ),
                     ),
+                ),
+                Step.Label("label", "finish"),
+                Step.JumpIf(
+                    id = "jump",
+                    targetLabel = "finish",
+                    condition = Condition.Equals(Value.Variable("mode"), Value.Literal("ready")),
                 ),
             ),
         )
@@ -192,6 +225,9 @@ class WorkflowSerializationTest {
             minimumScorePermille = 940,
             ambiguityMarginPermille = 30,
             scaleTolerancePermille = 100,
+            selectionMode = ImageClickSelectionMode.AllMatches,
+            maxClicks = 75,
+            clickIntervalMillis = 1_500,
             timeoutMillis = 4_000,
             failurePolicy = FailurePolicy.Continue,
             templateClickX = 7,
@@ -213,15 +249,57 @@ class WorkflowSerializationTest {
     }
 
     @Test
+    fun `normalizes schema nineteen image clicks to current defaults`() {
+        val legacyJson = """{"schemaVersion":19,"id":"legacy","name":"Legacy","steps":[{"type":"image_click","id":"image","packageName":"com.example","templatePngBase64":"aGVsbG8=","templateWidth":24,"templateHeight":24}]}"""
+
+        val normalized = json.decodeFromString(Workflow.serializer(), legacyJson).normalizedForCurrentSchema()
+        val imageClick = normalized.steps.single() as Step.ImageClick
+
+        assertEquals(Workflow.CURRENT_SCHEMA_VERSION, normalized.schemaVersion)
+        assertEquals(ImageClickSelectionMode.BestMatch, imageClick.selectionMode)
+        assertEquals(20, imageClick.maxClicks)
+        assertEquals(200, imageClick.clickIntervalMillis)
+    }
+
+    @Test
     fun `rejects invalid image template metadata`() {
         assertFailsWith<IllegalArgumentException> {
             Step.ImageClick("image", "com.example", "aGVsbG8=", 11, 24)
         }
+        assertEquals(
+            1_024,
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 1_024, 12).templateWidth,
+        )
+        assertEquals(
+            ImageTemplateConstraints.MAX_BASE64_LENGTH,
+            Step.ImageClick(
+                "image",
+                "com.example",
+                "x".repeat(ImageTemplateConstraints.MAX_BASE64_LENGTH),
+                12,
+                12,
+            ).templatePngBase64.length,
+        )
         assertFailsWith<IllegalArgumentException> {
             Step.ImageClick("image", "com.example", "x".repeat(Step.ImageClick.MAX_TEMPLATE_BASE64_LENGTH + 1), 24, 24)
         }
         assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 1_025, 24)
+        }
+        assertFailsWith<IllegalArgumentException> {
             Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, scaleTolerancePermille = 25)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, maxClicks = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, maxClicks = 101)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, clickIntervalMillis = -1)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ImageClick("image", "com.example", "aGVsbG8=", 24, 24, clickIntervalMillis = 10_001)
         }
         assertFailsWith<IllegalArgumentException> {
             Step.ImageClick(
@@ -242,6 +320,29 @@ class WorkflowSerializationTest {
                 24,
                 templateClickX = 24,
                 templateClickY = 8,
+            )
+        }
+    }
+
+    @Test
+    fun `rejects invalid scroll until limits`() {
+        val selector = NodeSelector("com.example", text = "List")
+
+        assertFailsWith<IllegalArgumentException> {
+            Step.ScrollUntil(
+                "scroll-until",
+                selector,
+                ScrollDirection.Forward,
+                ScrollUntilStopCondition.MaxScrolls,
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Step.ScrollUntil(
+                "scroll-until",
+                selector,
+                ScrollDirection.Forward,
+                ScrollUntilStopCondition.NoProgress,
+                maxScrolls = 0,
             )
         }
     }
